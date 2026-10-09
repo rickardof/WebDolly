@@ -520,6 +520,191 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
         _publish_state()
 
 
+def _build_dashboard() -> str:
+    """Read all run transcripts and return a self-contained HTML dashboard."""
+    import re as _re
+    from collections import defaultdict
+    from datetime import datetime
+
+    runs = sorted(agent_core.LOG_ROOT.glob("run_*/transcript.jsonl"))
+    records = []
+    for tf in runs:
+        run_name = tf.parent.name
+        try:
+            started = datetime.strptime(run_name.replace("run_", ""), "%Y%m%d_%H%M%S")
+        except Exception:
+            continue
+        lines = tf.read_text(errors="replace").splitlines()
+        steps, outcome, answer = 0, "INCOMPLETE", ""
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            s = d.get("step", 0)
+            if isinstance(s, int):
+                steps = max(steps, s)
+            at = d.get("action_type", "")
+            if at == "terminate":
+                ans = d.get("args", {}).get("answer", "")
+                answer = ans
+                if ans.startswith("CODE:"):
+                    outcome = "CODE"
+                elif ans == "NOCODE":
+                    outcome = "NOCODE"
+                elif ans == "NONE":
+                    outcome = "NONE"
+                else:
+                    outcome = "TERMINATE"
+        screens = list(tf.parent.glob("screenshot_*.png"))
+        ended = started
+        if screens:
+            ended = datetime.fromtimestamp(max(s.stat().st_mtime for s in screens))
+        duration_s = max(0, round((ended - started).total_seconds()))
+        records.append({"started": started.isoformat(), "ended": ended.isoformat(),
+                        "duration_s": duration_s, "steps": steps,
+                        "outcome": outcome, "answer": answer[:60]})
+
+    total = len(records)
+    completed = [r for r in records if r["outcome"] in ("CODE", "NOCODE")]
+    none_runs = sum(1 for r in records if r["outcome"] == "NONE")
+    incomplete = sum(1 for r in records if r["outcome"] == "INCOMPLETE")
+    avg_dur = round(sum(r["duration_s"] for r in completed) / max(1, len(completed)))
+
+    hourly: dict = defaultdict(lambda: {"runs": 0, "none": 0, "completed": 0, "incomplete": 0})
+    for r in records:
+        h = r["started"][:13]
+        hourly[h]["runs"] += 1
+        if r["outcome"] == "NONE": hourly[h]["none"] += 1
+        elif r["outcome"] in ("CODE", "NOCODE"): hourly[h]["completed"] += 1
+        elif r["outcome"] == "INCOMPLETE": hourly[h]["incomplete"] += 1
+
+    hours_sorted = sorted(hourly.keys())
+    max_runs = max((hourly[h]["runs"] for h in hours_sorted), default=1)
+
+    def fmt(iso):
+        try:
+            return datetime.fromisoformat(iso).strftime("%H:%M")
+        except Exception:
+            return iso[:16]
+
+    def fmt_dur(s):
+        if s < 60: return f"{s}s"
+        return f"{s//60}m {s%60}s"
+
+    bar_html = ""
+    for h in hours_sorted:
+        d = hourly[h]
+        label = h[11:13] + ":00"
+        bar_h = max(2, round((d["runs"] / max_runs) * 72))
+        bar_html += f"""<div class="bar-wrap">
+          <div class="bar-stack" style="height:{bar_h}px">
+            <div class="bar-incomplete" style="flex:{d['incomplete']};min-height:{2 if d['incomplete'] else 0}px"></div>
+            <div class="bar-completed" style="flex:{d['completed']};min-height:{3 if d['completed'] else 0}px"></div>
+            <div class="bar-none" style="flex:{d['none']}"></div>
+          </div>
+          <div class="bar-label">{label}</div></div>"""
+
+    rows_html = ""
+    for r in reversed(completed):
+        chip_cls = "chip-CODE" if r["outcome"] == "CODE" else "chip-NOCODE"
+        rows_html += f"""<tr>
+          <td>{fmt(r['started'])}</td>
+          <td><span class="chip {chip_cls}">{r['outcome']}</span></td>
+          <td>{fmt_dur(r['duration_s'])}</td>
+          <td>{r['steps']}</td>
+          <td class="mono muted">{r['answer']}</td></tr>"""
+    if not rows_html:
+        rows_html = '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">Nessuno studio completato ancora</td></tr>'
+
+    ob_none = f"flex:{none_runs}" if none_runs else "flex:0"
+    ob_comp = f"flex:{len(completed)}" if completed else "flex:0"
+    ob_inc  = f"flex:{incomplete}" if incomplete else "flex:0"
+    rate = f"{(len(completed)/max(1,total)*100):.1f}%"
+    cph = f"{total/max(1,len(hours_sorted)):.1f}"
+    now = datetime.now().strftime("%H:%M")
+    first_t = fmt(records[0]["started"]) if records else "—"
+    last_t  = fmt(records[-1]["ended"]) if records else "—"
+
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fara Dashboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap">
+<style>
+:root{{--bg:#0f1117;--surface:#181c27;--border:#252a38;--fg:#e2e6f0;--muted:#7a8299;--accent:#4f8ef7;--green:#34c77b;--yellow:#f5a623;--mono:"IBM Plex Mono",monospace;--sans:"Inter",system-ui,sans-serif;color-scheme:dark}}
+*{{box-sizing:border-box;margin:0}}
+body{{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.5;padding:20px}}
+header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:8px}}
+header h1{{font-size:18px;font-weight:600;letter-spacing:-.02em}}
+header h1 span{{color:var(--accent)}}
+.badge{{font-family:var(--mono);font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;color:var(--muted)}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:24px}}
+.tile{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}}
+.tile .label{{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px}}
+.tile .value{{font-family:var(--mono);font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1}}
+.tile .sub{{font-size:11px;color:var(--muted);margin-top:4px}}
+.tile.green .value{{color:var(--green)}}.tile.accent .value{{color:var(--accent)}}.tile.yellow .value{{color:var(--yellow)}}
+section{{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px}}
+section h2{{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:16px}}
+.chart{{display:flex;align-items:flex-end;gap:4px;height:80px}}
+.bar-wrap{{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;justify-content:flex-end}}
+.bar-stack{{width:100%;display:flex;flex-direction:column;justify-content:flex-end;border-radius:3px 3px 0 0;overflow:hidden}}
+.bar-none{{background:var(--border)}}.bar-completed{{background:var(--green)}}.bar-incomplete{{background:var(--yellow)}}
+.bar-label{{font-family:var(--mono);font-size:9px;color:var(--muted);white-space:nowrap}}
+.chart-legend{{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}}
+.legend-item{{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}}
+.dot{{width:8px;height:8px;border-radius:2px;flex-shrink:0}}
+.outcome-bar{{display:flex;height:8px;border-radius:4px;overflow:hidden;margin-bottom:8px}}
+.ob-none{{background:var(--border)}}.ob-completed{{background:var(--green)}}.ob-incomplete{{background:var(--yellow)}}
+.outcome-labels{{display:flex;gap:12px;flex-wrap:wrap}}
+.outcome-label{{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th{{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:0 8px 10px;font-weight:500}}
+td{{padding:10px 8px;border-top:1px solid var(--border);font-variant-numeric:tabular-nums}}
+.chip{{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;font-family:var(--mono)}}
+.chip-CODE{{background:#1a3a28;color:var(--green)}}.chip-NOCODE{{background:#1e2d48;color:var(--accent)}}
+.mono{{font-family:var(--mono);font-size:12px}}.muted{{color:var(--muted)}}
+.refresh{{font-size:11px;color:var(--muted);text-align:right;margin-top:12px}}
+</style></head><body>
+<header>
+  <h1>Fara <span>Agent</span> Dashboard</h1>
+  <span class="badge">aggiornato {now}</span>
+</header>
+<div class="tiles">
+  <div class="tile accent"><div class="label">Cicli totali</div><div class="value">{total}</div><div class="sub">{first_t} – {last_t}</div></div>
+  <div class="tile green"><div class="label">Studi completati</div><div class="value">{len(completed)}</div><div class="sub">{rate} dei cicli</div></div>
+  <div class="tile"><div class="label">Nessuno studio</div><div class="value">{none_runs}</div><div class="sub">cicli NONE</div></div>
+  <div class="tile"><div class="label">Durata media</div><div class="value">{fmt_dur(avg_dur)}</div><div class="sub">su studi completati</div></div>
+  <div class="tile yellow"><div class="label">Cicli/ora (avg)</div><div class="value">{cph}</div><div class="sub">media ora attiva</div></div>
+</div>
+<section><h2>Distribuzione esiti</h2>
+  <div class="outcome-bar">
+    <div class="ob-none" style="{ob_none}"></div>
+    <div class="ob-completed" style="{ob_comp}"></div>
+    <div class="ob-incomplete" style="{ob_inc}"></div>
+  </div>
+  <div class="outcome-labels">
+    <span class="outcome-label"><span class="dot" style="background:var(--border)"></span>NONE: {none_runs}</span>
+    <span class="outcome-label"><span class="dot" style="background:var(--green)"></span>Completati: {len(completed)}</span>
+    <span class="outcome-label"><span class="dot" style="background:var(--yellow)"></span>Incompleti: {incomplete}</span>
+  </div>
+</section>
+<section><h2>Attività per ora</h2>
+  <div class="chart">{bar_html}</div>
+  <div class="chart-legend">
+    <div class="legend-item"><div class="dot" style="background:var(--green)"></div>Completato</div>
+    <div class="legend-item"><div class="dot" style="background:var(--border)"></div>NONE</div>
+    <div class="legend-item"><div class="dot" style="background:var(--yellow)"></div>Incompleto</div>
+  </div>
+</section>
+<section><h2>Studi completati</h2>
+  <table><thead><tr><th>Ora</th><th>Esito</th><th>Durata</th><th>Steps</th><th>Risposta</th></tr></thead>
+  <tbody>{rows_html}</tbody></table>
+</section>
+<p class="refresh">Ricarica la pagina per aggiornare i dati • <a href="/" style="color:var(--accent)">← torna al pannello</a></p>
+</body></html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload, status=200):
         body = json.dumps(payload).encode()
@@ -569,6 +754,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_mjpeg()
         elif self.path == "/presets":
             self._send_json(load_presets())
+        elif self.path == "/dashboard":
+            self._send_bytes(_build_dashboard().encode(), "text/html; charset=utf-8")
         else:
             self.send_response(404)
             self.end_headers()

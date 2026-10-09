@@ -43,6 +43,18 @@ import re
 import pw_bridge
 
 FARA_URL = os.environ.get("FARA_URL", "http://127.0.0.1:8090/v1/chat/completions")
+
+def _notify_telegram(msg: str) -> None:
+    """Fire-and-forget Telegram notification. Fails silently."""
+    try:
+        import telegram_config as _tg
+        url = f"https://api.telegram.org/bot{_tg.TELEGRAM_TOKEN}/sendMessage"
+        payload = json.dumps({"chat_id": _tg.TELEGRAM_CHAT_ID, "text": msg}).encode()
+        req = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass
 CONTAINER = os.environ.get("FARA_CONTAINER", "fara-browser-pw")
 DATA_DIR = Path(os.environ.get("FARA_DATA_DIR", Path.home() / "web-agent" / "data_pw"))
 LOG_ROOT = Path(os.environ.get("FARA_LOG_ROOT", Path.home() / "web-agent" / "logs_pw"))
@@ -366,10 +378,28 @@ def safe_page_for(url: str) -> str:
     return f"{pr.scheme}://{pr.netloc}/studies"
 
 
-def _extract_study_duration() -> float | None:
-    """Return the estimated completion time in minutes from the current page, or None."""
+def _extract_study_duration(x: float | None = None, y: float | None = None) -> float | None:
+    """Return the estimated completion time in minutes from the current page.
+
+    When x/y viewport coordinates are provided, walks up the DOM from the
+    element at that point so we read only the study card being clicked —
+    not durations of other study cards visible on the same page.
+    """
     try:
-        text = pw_bridge.evaluate("document.body.innerText") or ""
+        if x is not None and y is not None:
+            text = pw_bridge.evaluate(f"""
+                (function() {{
+                    var el = document.elementFromPoint({x}, {y});
+                    for (var i = 0; i < 20 && el && el !== document.body; i++) {{
+                        var t = el.innerText || '';
+                        if (/\\d+\\s*(?:minute|min)/i.test(t)) return t;
+                        el = el.parentElement;
+                    }}
+                    return '';
+                }})()
+            """) or ""
+        else:
+            text = pw_bridge.evaluate("document.body.innerText") or ""
         m = re.search(r"(\d+)\s*(?:minute|min)s?", text, re.IGNORECASE)
         if m:
             return float(m.group(1))
@@ -668,7 +698,15 @@ STANDING_RULES = (
     "you must respect. A 'Study timer' line will appear in your status once you enter a study. "
     "If you reach what looks like the final submit/finish page and the timer says time remains, "
     "use the `wait` action to wait (e.g. wait 30s at a time), then check the status line again. "
-    "Submit only once the timer says 'OK to submit now'."
+    "Submit only once the timer says 'OK to submit now'.\n"
+    "6. Screener questions: before and during a study, read the description and requirements "
+    "carefully to understand what profile the researcher is looking for. When answering screener "
+    "questions, emphasise whichever TRUE aspects of the persona best match those criteria — the "
+    "goal is to avoid being excluded for a trivially wrong answer when the persona genuinely "
+    "qualifies. You may present a truth selectively or adapt phrasing to fit the screener "
+    "(e.g. 'I use AI tools every day' if the persona does). You must NEVER invent facts that "
+    "directly contradict the given persona (age, nationality, profession, stated experience), "
+    "and never claim qualifications the persona does not have."
 )
 
 
@@ -722,7 +760,6 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         survey_memory = []  # (question, answer) given so far in this run
         wander = WanderGuard(wander_seconds)
         study_timer = StudyTimer()
-        _pending_duration: float | None = None  # minutes, read from last Prolific detail page
 
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
@@ -770,13 +807,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         pending_user_response = injected
                     continue
 
-            # Capture duration from Prolific study detail pages (not the list).
-            if _on_guarded_site(here) and not _LIST_PATH.match(urlparse(here).path or ""):
-                dur = _extract_study_duration()
-                if dur is not None:
-                    _pending_duration = dur
-
-            # Reset timer when back at the studies list.
+            # Reset timer when back at the studies list (timer re-arms for next study).
             if _on_guarded_site(here) and _LIST_PATH.match(urlparse(here).path or ""):
                 study_timer.reset()
 
@@ -853,6 +884,14 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 target["pixels"] = args.get("pixels")
             _live(target)
             _live({"type": "phase", "phase": "act", "step": step, "action": action_type})
+            # Read study duration from the Prolific page BEFORE dispatch so we
+            # capture the exact study about to be joined (not generic browsing).
+            # Pass click coordinates so elementFromPoint targets that specific card.
+            pre_click_duration: float | None = None
+            if action_type == "left_click" and _on_guarded_site(here):
+                coord = args.get("coordinate")
+                cx, cy = (coord[0], coord[1]) if coord else (None, None)
+                pre_click_duration = _extract_study_duration(cx, cy)
             try:
                 result_desc = dispatch_action(action_type, args)
             except Exception as e:
@@ -868,15 +907,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
 
-            # Detect Prolific detail page → external survey: start the timer.
+            # Detect Prolific → external survey transition: start the timer.
             if action_type == "left_click" and _on_guarded_site(here):
                 new_url = get_current_url()
                 if not _on_guarded_site(new_url) and not study_timer.is_active():
-                    if _pending_duration is not None:
-                        study_timer.start(_pending_duration * 60)
+                    if pre_click_duration is not None:
+                        study_timer.start(pre_click_duration * 60)
                         _live({"type": "timer_start", "min_seconds": study_timer.min_seconds,
-                               "min_minutes": _pending_duration})
-                        _pending_duration = None
+                               "min_minutes": pre_click_duration})
+                    else:
+                        # Duration not found — timer inactive, no minimum.
+                        _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
 
             step_event = {
                 "type": "step", "step": step, "thoughts": thoughts,
@@ -887,7 +928,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
 
             if action_type == "terminate":
                 yield step_event
-                yield {"type": "done", "answer": args.get("answer", ""), "messages": messages}
+                answer = args.get("answer", "")
+                if answer.startswith("CODE:") or answer == "NOCODE":
+                    _notify_telegram(f"Fara studio completato ✅\n{answer}\nCiclo: {run_dir.name if run_dir else '?'}")
+                yield {"type": "done", "answer": answer, "messages": messages}
                 return
 
             # Reuses the same pending_user_response channel as an
