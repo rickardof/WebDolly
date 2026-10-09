@@ -427,6 +427,10 @@ def _dashboard_for(url: str) -> str:
         return agent_core.safe_page_for(url)
     if re.fullmatch(r"/studies/[0-9a-fA-F]{24}/?", pr.path or ""):
         return f"{pr.scheme}://{pr.netloc}/studies"
+    # Submission-complete and waiting-room pages: the agent's job there is
+    # done; returning to them on the next cycle would confuse the model.
+    if re.match(r"^/(submissions|waitingroom|participant)", pr.path or ""):
+        return f"{pr.scheme}://{pr.netloc}/studies"
     return url
 
 
