@@ -1,0 +1,30 @@
+# --- Modelli (decine di GB: si scaricano a parte, vedi README) ---------------
+models/
+*.gguf
+
+# --- Ambiente Python ---------------------------------------------------------
+venv_pw/
+__pycache__/
+*.pyc
+
+# --- Profili del browser (cookie, login, cache: dati personali) --------------
+browser-profile/
+browser-profile-pw/
+browser-profile-test/
+
+# --- Dati personali / locali -------------------------------------------------
+controller_pw/identity.json
+controller_pw/presets.json
+
+# --- Log delle run, screenshot e file temporanei -----------------------------
+logs/
+logs_pw/
+logs_test/
+gui_shots/
+gui_shots_live/
+data_pw/_*.png
+data_test/_*.png
+fara-test-*.png
+STOP
+*.out
+!bench_*.out

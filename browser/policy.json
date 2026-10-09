@@ -1,0 +1,12 @@
+{
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "AutoFillEnabled": false,
+  "SyncDisabled": true,
+  "SigninAllowed": false,
+  "BrowserSignin": 0,
+  "PasswordLeakDetectionEnabled": false,
+  "SpellcheckEnabled": false,
+  "SearchSuggestEnabled": false
+}

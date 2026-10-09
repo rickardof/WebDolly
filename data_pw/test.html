@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fara CUA Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 80px;
+            text-align: center;
+        }
+        button {
+            font-size: 24px;
+            padding: 20px 40px;
+            margin: 20px;
+        }
+        #result {
+            font-size: 28px;
+            font-weight: bold;
+            margin-top: 40px;
+            height: 40px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Fara Computer Use Test</h1>
+    <button id="btn-red" onclick="choose('RED', '#ffdddd')">RED</button>
+    <button id="btn-green" onclick="choose('GREEN', '#ddffdd')">GREEN</button>
+    <button id="btn-blue" onclick="choose('BLUE', '#ddddff')">BLUE</button>
+    <div id="result"></div>
+    <script>
+        function choose(color, bg) {
+            document.body.style.background = bg;
+            document.getElementById('result').textContent = 'You clicked: ' + color;
+        }
+    </script>
+</body>
+</html>

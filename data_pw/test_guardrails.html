@@ -1,0 +1,31 @@
+<!DOCTYPE html><html><head><title>Guardrail cases</title></head><body>
+<div id="case"></div>
+<script>
+const cases = {
+  login: `<h2>Sign in</h2><label>Email <input type="text" id="u"></label>
+          <label>Password <input type="password" id="p"></label>
+          <label><input type="checkbox" name="remember"> Remember me</label>
+          <button>Sign in</button>`,
+  consent: `<h2>Cookies</h2>
+          <label><input type="checkbox" name="c1"> Essential</label>
+          <label><input type="checkbox" name="c2"> Analytics</label>
+          <label><input type="checkbox" name="c3"> Marketing</label>
+          <button>Accept</button>`,
+  terms: `<h2>Before you start</h2>
+          <label><input type="checkbox" name="t1"> I agree to the terms</label>
+          <label><input type="checkbox" name="t2"> I am over 18</label>
+          <label><input type="checkbox" name="t3"> I consent to data use</label>
+          <button>Start study</button>`,
+  survey4: `<h2>Page 2</h2>
+          <fieldset><legend>How did you hear about us?</legend>
+            <label><input type="radio" name="r" value="a"> Search</label>
+            <label><input type="radio" name="r" value="b"> Friend</label></fieldset>
+          <fieldset><legend>Topics?</legend>
+            <label><input type="checkbox" name="t" value="x"> Privacy</label>
+            <label><input type="checkbox" name="t" value="y"> Design</label></fieldset>
+          <label>Role <input type="text" id="role"></label>
+          <label>Thoughts <textarea id="th"></textarea></label><button>Submit</button>`,
+};
+const which = new URLSearchParams(location.search).get('c') || 'login';
+document.getElementById('case').innerHTML = cases[which];
+</script></body></html>

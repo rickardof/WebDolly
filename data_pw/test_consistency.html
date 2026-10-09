@@ -1,0 +1,16 @@
+<!DOCTYPE html><html><head><title>Consistency survey</title><style>.page{display:none}.page.on{display:block} body{font-family:sans-serif;padding:30px}</style></head><body>
+<div class="page on" id="p1">
+  <fieldset><legend>How old are you?</legend><input type="text" id="age"></fieldset>
+  <fieldset><legend>How many years of professional experience do you have?</legend><input type="text" id="exp"></fieldset>
+  <fieldset><legend>To show you are paying attention, please select "Strongly disagree" for this question.</legend>
+    <label><input type="radio" name="att" value="SA"> Strongly agree</label>
+    <label><input type="radio" name="att" value="A"> Agree</label>
+    <label><input type="radio" name="att" value="D"> Disagree</label>
+    <label><input type="radio" name="att" value="SD"> Strongly disagree</label></fieldset>
+  <button id="n1" onclick="document.getElementById('p1').classList.remove('on');document.getElementById('p2').classList.add('on')">Next</button>
+</div>
+<div class="page" id="p2">
+  <fieldset><legend>In what year were you born?</legend><input type="text" id="byear"></fieldset>
+  <fieldset><legend>In what year did you start working professionally?</legend><input type="text" id="start"></fieldset>
+  <button id="n2" onclick="document.getElementById('done').textContent='DONE'">Submit</button><div id="done"></div>
+</div></body></html>

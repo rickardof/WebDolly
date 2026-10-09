@@ -1,0 +1,24 @@
+<!DOCTYPE html><html><head><title>Trusted-only form</title></head><body style="font-family:sans-serif;padding:40px">
+<h1>Strict survey</h1>
+<fieldset><legend>Favourite season?</legend>
+<label><input type="radio" name="season" value="Spring"> Spring</label>
+<label><input type="radio" name="season" value="Summer"> Summer</label>
+<label><input type="radio" name="season" value="Winter"> Winter</label></fieldset>
+<fieldset><legend>Hobbies?</legend>
+<label><input type="checkbox" name="hob" value="Reading"> Reading</label>
+<label><input type="checkbox" name="hob" value="Sport"> Sport</label>
+<label><input type="checkbox" name="hob" value="Music"> Music</label></fieldset>
+<label for="city">City you live in</label> <input type="text" id="city"><br>
+<label for="story">Describe your weekend. Please elaborate.</label><br><textarea id="story"></textarea><br>
+<button id="nx">Next</button><div id="res"></div>
+<script>
+const trusted = {season:false, hob:false, city:false, story:false};
+document.querySelectorAll('input[name=season]').forEach(e=>e.addEventListener('change',ev=>{ if(ev.isTrusted) trusted.season=true; }));
+document.querySelectorAll('input[name=hob]').forEach(e=>e.addEventListener('change',ev=>{ if(ev.isTrusted) trusted.hob=true; }));
+document.getElementById('city').addEventListener('input',ev=>{ if(ev.isTrusted) trusted.city=true; });
+document.getElementById('story').addEventListener('input',ev=>{ if(ev.isTrusted) trusted.story=true; });
+document.getElementById('nx').addEventListener('click',ev=>{
+  const bad = Object.keys(trusted).filter(k=>!trusted[k]);
+  document.getElementById('res').textContent = (ev.isTrusted && !bad.length) ? 'TRUSTED-SUBMITTED' : ('REJECTED untrusted: '+ (ev.isTrusted? bad.join(',') : 'click'));
+});
+</script></body></html>

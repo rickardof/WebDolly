@@ -1,0 +1,125 @@
+{
+  "label": "fara27b_q4_final",
+  "passed": 39,
+  "total": 39,
+  "median_call_s": 0.47,
+  "rows": [
+    {
+      "item": "scale: Everest higher than Kilimanjaro? (Not higher..Much higher)",
+      "pass": 3,
+      "answers": [
+        "6",
+        "6",
+        "6"
+      ]
+    },
+    {
+      "item": "scale: Pacific larger than Atlantic? (Definitely not..Definitely yes)",
+      "pass": 3,
+      "answers": [
+        "5",
+        "5",
+        "5"
+      ]
+    },
+    {
+      "item": "scale REVERSED: 'The Earth is flat' (Strongly agree..Strongly disagree)",
+      "pass": 3,
+      "answers": [
+        "5",
+        "5",
+        "5"
+      ]
+    },
+    {
+      "item": "MC: which mountain is higher",
+      "pass": 3,
+      "answers": [
+        "Mt. Everest",
+        "Mt. Everest",
+        "Mt. Everest"
+      ]
+    },
+    {
+      "item": "MC: capital of Australia",
+      "pass": 3,
+      "answers": [
+        "Canberra",
+        "Canberra",
+        "Canberra"
+      ]
+    },
+    {
+      "item": "MC: spider legs",
+      "pass": 3,
+      "answers": [
+        "8",
+        "8",
+        "8"
+      ]
+    },
+    {
+      "item": "attention check: choose 'Strongly disagree'",
+      "pass": 3,
+      "answers": [
+        "Strongly disagree",
+        "Strongly disagree",
+        "Strongly disagree"
+      ]
+    },
+    {
+      "item": "persona: gender",
+      "pass": 3,
+      "answers": [
+        "Male",
+        "Male",
+        "Male"
+      ]
+    },
+    {
+      "item": "persona: age (stated 29)",
+      "pass": 3,
+      "answers": [
+        "29",
+        "29",
+        "29"
+      ]
+    },
+    {
+      "item": "persona: city",
+      "pass": 3,
+      "answers": [
+        "Milan, Italy.",
+        "Milan",
+        "Milan"
+      ]
+    },
+    {
+      "item": "math: 17 + 25",
+      "pass": 3,
+      "answers": [
+        "42",
+        "42",
+        "42"
+      ]
+    },
+    {
+      "item": "multi: programming languages",
+      "pass": 3,
+      "answers": [
+        "['Python', 'Rust', 'Java']",
+        "['Python', 'Rust', 'Java']",
+        "['Python', 'Rust', 'Java']"
+      ]
+    },
+    {
+      "item": "Italian open question answered in Italian",
+      "pass": 3,
+      "answers": [
+        "Sono un software engineer di 29 anni che lavora a ",
+        "Sono un ingegnere software di 29 anni che lavora a",
+        "Sono un ingegnere software di 29 anni con sede a M"
+      ]
+    }
+  ]
+}

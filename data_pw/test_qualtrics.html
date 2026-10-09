@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html><head><title>Qualtrics-like survey</title>
+<style>
+  body { font-family: sans-serif; background: #fff; }
+  .Skin { max-width: 770px; margin: 0 auto; }
+  .QuestionOuter { background: #e3f2fc; padding: 20px; margin: 16px 0; }
+  fieldset { border: 0; margin: 0; padding: 0; }
+  legend { font-size: 18px; margin-bottom: 14px; }
+  /* Qualtrics default theme: native input kept but visually hidden */
+  .q-radio-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  label.SingleAnswer { display: block; padding: 8px 10px; margin: 4px 0; border: 1px solid #bcd; cursor: pointer; }
+  label.SingleAnswer.q-checked { background: #0077c8; color: #fff; }
+  table.bipolar td { padding: 0 6px; text-align: center; }
+  label.q-radio { display: inline-block; width: 16px; height: 16px; border: 2px solid #0077c8; border-radius: 50%; cursor: pointer; }
+  label.q-radio.q-checked { background: #0077c8; }
+  .err { color: #c00; text-align: center; display: none; }
+  #NextButton { float: right; background: #0077c8; color: #fff; border: 0; padding: 8px 18px; font-size: 16px; }
+  .page { display: none; overflow: hidden; } .page.on { display: block; }
+</style></head>
+<body><div class="Skin">
+<div id="err" class="err">Please answer this question.</div>
+
+<div class="page on" data-req="QR~QID1,QR~QID2">
+  <div class="QuestionOuter"><fieldset><legend>Do you know of Mount Kilimanjaro?</legend>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID1" id="QR~QID1~1" value="1">Yes</label>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID1" id="QR~QID1~2" value="2">No</label>
+  </fieldset></div>
+  <div class="QuestionOuter"><fieldset><legend>Do you know of Mount Everest?</legend>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID2" id="QR~QID2~1" value="1">Yes</label>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID2" id="QR~QID2~2" value="2">No</label>
+  </fieldset></div>
+</div>
+
+<div class="page" data-req="QR~QID3">
+  <div class="QuestionOuter"><fieldset><legend>Do you think Mount Everest is <b>higher</b> than Mount Kilimanjaro?</legend>
+    <table class="bipolar"><tr>
+      <td>Not higher</td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~1" value="1"><label class="q-radio" for="QR~QID3~1"></label></td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~2" value="2"><label class="q-radio" for="QR~QID3~2"></label></td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~3" value="3"><label class="q-radio" for="QR~QID3~3"></label></td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~4" value="4"><label class="q-radio" for="QR~QID3~4"></label></td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~5" value="5"><label class="q-radio" for="QR~QID3~5"></label></td>
+      <td><input class="q-radio-input" type="radio" name="QR~QID3" id="QR~QID3~6" value="6"><label class="q-radio" for="QR~QID3~6"></label></td>
+      <td>Much higher</td>
+    </tr></table>
+  </fieldset></div>
+</div>
+
+<div class="page" data-req="QR~QID4">
+  <div class="QuestionOuter"><fieldset><legend>Which mountain is higher?</legend>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID4" id="QR~QID4~1" value="1">Mt. Everest</label>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID4" id="QR~QID4~2" value="2">Mt. Kilimanjaro</label>
+  </fieldset></div>
+</div>
+
+<div class="page" data-req="QR~QID5,QR~QID6">
+  <div class="QuestionOuter"><fieldset><legend>What is your gender?</legend>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID5" id="QR~QID5~1" value="1">Male</label>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID5" id="QR~QID5~2" value="2">Female</label>
+    <label class="SingleAnswer"><input class="q-radio-input" type="radio" name="QR~QID5" id="QR~QID5~3" value="3">Other</label>
+  </fieldset></div>
+  <div class="QuestionOuter"><fieldset><legend>What is your age?</legend>
+    <input type="text" name="QR~QID6" id="QR~QID6" class="InputText">
+  </fieldset></div>
+</div>
+
+<div class="page" id="end"><h2 id="done">We thank you for your time spent taking this survey.</h2></div>
+
+<input id="NextButton" class="NextButton Button" title="→" type="submit" name="NextButton" value=">>">
+</div>
+<script>
+  // Qualtrics-style: label click toggles input, label gets q-checked styling.
+  document.querySelectorAll('input[type=radio]').forEach(inp => inp.addEventListener('change', () => {
+    document.querySelectorAll(`input[name="${CSS.escape(inp.name)}"]`).forEach(o => {
+      const lbl = o.closest('label') || document.querySelector(`label[for="${CSS.escape(o.id)}"]`);
+      if (lbl) lbl.classList.toggle('q-checked', o.checked);
+    });
+  }));
+  window.__answers = {};
+  document.getElementById('NextButton').addEventListener('click', ev => {
+    const page = document.querySelector('.page.on');
+    const req = (page.dataset.req || '').split(',').filter(Boolean);
+    const missing = req.filter(n => {
+      const r = document.querySelector(`input[type=radio][name="${CSS.escape(n)}"]`);
+      if (r) return !document.querySelector(`input[name="${CSS.escape(n)}"]:checked`);
+      const t = document.getElementById(n); return !t || !t.value.trim();
+    });
+    if (missing.length || !ev.isTrusted) { document.getElementById('err').style.display = 'block'; return; }
+    req.forEach(n => { const c = document.querySelector(`input[name="${CSS.escape(n)}"]:checked`);
+      window.__answers[n] = c ? c.value : document.getElementById(n).value; });
+    document.getElementById('err').style.display = 'none';
+    page.classList.remove('on');
+    const next = page.nextElementSibling;
+    next.classList.add('on');
+    if (next.id === 'end') document.getElementById('NextButton').style.display = 'none';
+  });
+</script></body></html>

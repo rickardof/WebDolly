@@ -1,0 +1,230 @@
+{
+  "label": "fara9b_q8",
+  "A_gen_tok_s": 73.2,
+  "A_image_prompt_ms": 660,
+  "A_image_prompt_tokens": 1281,
+  "B_rows": [
+    {
+      "t": "the RED button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 115,
+      "size": "135x72",
+      "s": 1.8
+    },
+    {
+      "t": "the GREEN button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 139,
+      "size": "169x72",
+      "s": 1.4
+    },
+    {
+      "t": "the BLUE button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 207,
+      "size": "147x72",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Female' radio button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 143,
+      "size": "13x13",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Export' checkbox",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 148,
+      "size": "13x13",
+      "s": 1.4
+    },
+    {
+      "t": "the country dropdown",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 110,
+      "size": "112x29",
+      "s": 1.4
+    },
+    {
+      "t": "the comments text area",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 204,
+      "size": "606x66",
+      "s": 1.4
+    },
+    {
+      "t": "the height text input",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 81,
+      "size": "212x30",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Next' button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 126,
+      "size": "89x45",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Open study in new tab' link",
+      "hit": true,
+      "action": "left_click",
+      "dist_px": 2,
+      "size": "219x25",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Avanti' button",
+      "hit": true,
+      "action": "left_click",
+      "dist_px": 1,
+      "size": "53x21",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Cover B -- green' option",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 90,
+      "size": "140x32",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Wednesday' checkbox",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 128,
+      "size": "106x32",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Germany' list option",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 112,
+      "size": "220x30",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Weekly' option",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 200,
+      "size": "652x32",
+      "s": 1.4
+    },
+    {
+      "t": "the 'No' answer of the question about Mount Everest",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 261,
+      "size": "730x36",
+      "s": 1.4
+    },
+    {
+      "t": "the blue '>>' next button",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 284,
+      "size": "55x34",
+      "s": 1.4
+    },
+    {
+      "t": "the leftmost circle of the scale (next to 'Not higher')",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 129,
+      "size": "20x20",
+      "s": 1.4
+    },
+    {
+      "t": "the rightmost circle of the scale (next to 'Much higher')",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 181,
+      "size": "20x20",
+      "s": 1.4
+    },
+    {
+      "t": "the third circle from the left of the scale",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 125,
+      "size": "20x20",
+      "s": 1.4
+    },
+    {
+      "t": "the fifth circle from the left of the scale",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 175,
+      "size": "20x20",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Mt. Kilimanjaro' answer",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 249,
+      "size": "730x36",
+      "s": 1.4
+    },
+    {
+      "t": "the 'Female' answer",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 252,
+      "size": "730x36",
+      "s": 1.4
+    },
+    {
+      "t": "the age text box",
+      "hit": false,
+      "action": "mouse_move",
+      "dist_px": 38,
+      "size": "177x21",
+      "s": 1.4
+    }
+  ],
+  "B_hits": 2,
+  "B_total": 24,
+  "B_latency_median_s": 1.39,
+  "B_small_hits": "1/8",
+  "C_rows": [
+    {
+      "case": "3 studies listed (1 interview, 1 Zoom meeting, 1 plain survey)",
+      "action": "scroll",
+      "coord": null,
+      "verdict": "neutral (scroll)",
+      "s": 2.5,
+      "thought": "I need to inspect more of the study list before choosing one. The current screen shows the Prolific Studies page with three visible study cards and a right-side detail panel for the first card"
+    },
+    {
+      "case": "only the interview study listed",
+      "action": "left_click",
+      "coord": [
+        1039.68,
+        835.2
+      ],
+      "verdict": "WRONG (opens the interview)",
+      "s": 3.1,
+      "thought": "I can see a cookie consent banner in the bottom-right corner overlapping part of the page. Clearing it first will make the lower controls unobstructed and reduce the chance that it blocks surv"
+    }
+  ],
+  "D_15fields_median_s": 5.1,
+  "D_issues": 0,
+  "D_undecided": 0,
+  "D_consistency": "2/3",
+  "E_qualtrics_survey": "0/2"
+}

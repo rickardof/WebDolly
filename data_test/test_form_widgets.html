@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Custom-widget form-fill test</title>
+    <style>
+        body { font-family: sans-serif; padding: 40px; max-width: 700px; margin: 0 auto; }
+        fieldset { margin-bottom: 24px; padding: 12px 20px; }
+        legend { font-weight: bold; }
+        /* Qualtrics-documented default-theme pattern: native input kept in
+           the accessibility tree and interactive, but visually hidden via
+           absolute positioning + opacity + tiny size (NOT display:none). */
+        .qualtrics-like input[type=radio], .qualtrics-like input[type=checkbox] {
+            position: absolute; opacity: 0; width: 1px; height: 1px; overflow: hidden;
+        }
+        .qualtrics-like label { display: block; padding: 6px 10px; margin: 4px 0;
+            border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+        .qualtrics-like label.q-checked { background: #cde; border-color: #37a; }
+
+        /* ARIA custom widgets -- no native <input> at all, state lives in
+           aria-checked/aria-selected, toggled by the widget's own JS. */
+        [role=radio], [role=checkbox] { display: block; padding: 6px 10px; margin: 4px 0;
+            border: 1px solid #ccc; border-radius: 4px; cursor: pointer; width: fit-content; }
+        [role=radio][aria-checked=true], [role=checkbox][aria-checked=true] { background: #cde; border-color: #37a; }
+        [role=listbox] { border: 1px solid #ccc; border-radius: 4px; width: 220px; }
+        [role=option] { padding: 6px 10px; cursor: pointer; }
+        [role=option][aria-selected=true] { background: #cde; }
+        [role=slider] { width: 220px; }
+        textarea { width: 100%; height: 60px; }
+    </style>
+</head>
+<body>
+    <h1>Custom-widget survey (test fixture)</h1>
+
+    <fieldset class="qualtrics-like">
+        <legend>How often do you use our product? (Qualtrics-style hidden-native radio)</legend>
+        <label id="QID1-1-label" class="SingleAnswer">
+            <input type="radio" name="QR~QID1" id="QR~QID1~1" value="Daily"> Daily
+        </label>
+        <label id="QID1-2-label" class="SingleAnswer">
+            <input type="radio" name="QR~QID1" id="QR~QID1~2" value="Weekly"> Weekly
+        </label>
+        <label id="QID1-3-label" class="SingleAnswer">
+            <input type="radio" name="QR~QID1" id="QR~QID1~3" value="Rarely"> Rarely
+        </label>
+    </fieldset>
+
+    <fieldset class="qualtrics-like">
+        <legend>Which features have you used? (Qualtrics-style hidden-native checkbox)</legend>
+        <label id="QID2-1-label" class="MultipleAnswer">
+            <input type="checkbox" name="QR~QID2~1" id="QR~QID2~1" value="Dashboard"> Dashboard
+        </label>
+        <label id="QID2-2-label" class="MultipleAnswer">
+            <input type="checkbox" name="QR~QID2~2" id="QR~QID2~2" value="API"> API
+        </label>
+        <label id="QID2-3-label" class="MultipleAnswer">
+            <input type="checkbox" name="QR~QID2~3" id="QR~QID2~3" value="Reporting"> Reporting
+        </label>
+    </fieldset>
+
+    <div role="radiogroup" aria-labelledby="aria-radio-legend">
+        <div id="aria-radio-legend" style="font-weight:bold">Which book cover do you prefer? (ARIA custom widget, no native input)</div>
+        <div role="radio" aria-checked="false" data-value="Cover A" tabindex="0">Cover A -- blue</div>
+        <div role="radio" aria-checked="false" data-value="Cover B" tabindex="0">Cover B -- green</div>
+        <div role="radio" aria-checked="false" data-value="Cover C" tabindex="0">Cover C -- red</div>
+    </div>
+
+    <div style="font-weight:bold; margin-top:16px">Which days are you available? (ARIA checkbox group)</div>
+    <div role="checkbox" aria-checked="false" data-value="Monday" tabindex="0">Monday</div>
+    <div role="checkbox" aria-checked="false" data-value="Wednesday" tabindex="0">Wednesday</div>
+    <div role="checkbox" aria-checked="false" data-value="Friday" tabindex="0">Friday</div>
+
+    <div style="margin-top:16px">
+        <div style="font-weight:bold">Which country do you live in? (ARIA listbox/option custom dropdown)</div>
+        <div role="listbox" aria-labelledby="country-label" tabindex="0">
+            <div role="option" aria-selected="false" data-value="Italy">Italy</div>
+            <div role="option" aria-selected="false" data-value="Germany">Germany</div>
+            <div role="option" aria-selected="false" data-value="France">France</div>
+        </div>
+    </div>
+
+    <label for="comments" style="display:block; margin-top:16px">Any comments?</label>
+    <textarea id="comments"></textarea>
+
+    <button id="submit-btn" onclick="document.getElementById('done').textContent='SUBMITTED';" style="margin-top:16px">Next</button>
+    <div id="done" style="font-weight:bold; margin-top:12px"></div>
+
+    <script>
+        // Minimal behavior so the widgets are functionally real, not just styled divs:
+        document.querySelectorAll('.qualtrics-like input[type=radio]').forEach(el => {
+            el.addEventListener('change', () => {
+                document.querySelectorAll(`label[for]`); // no-op, labels use nesting here
+                el.closest('fieldset').querySelectorAll('label').forEach(l => l.classList.remove('q-checked'));
+                el.closest('label').classList.add('q-checked');
+            });
+        });
+        document.querySelectorAll('.qualtrics-like input[type=checkbox]').forEach(el => {
+            el.addEventListener('change', () => {
+                el.closest('label').classList.toggle('q-checked', el.checked);
+            });
+        });
+        document.querySelectorAll('[role=radio]').forEach(el => {
+            el.addEventListener('click', () => {
+                el.parentElement.querySelectorAll('[role=radio]').forEach(r => r.setAttribute('aria-checked', 'false'));
+                el.setAttribute('aria-checked', 'true');
+            });
+        });
+        document.querySelectorAll('[role=checkbox]').forEach(el => {
+            el.addEventListener('click', () => {
+                const now = el.getAttribute('aria-checked') === 'true';
+                el.setAttribute('aria-checked', String(!now));
+            });
+        });
+        document.querySelectorAll('[role=listbox]').forEach(listbox => {
+            listbox.querySelectorAll('[role=option]').forEach(opt => {
+                opt.addEventListener('click', () => {
+                    listbox.querySelectorAll('[role=option]').forEach(o => o.setAttribute('aria-selected', 'false'));
+                    opt.setAttribute('aria-selected', 'true');
+                });
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fara</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #12141a; --panel: #1a1d25; --panel-2: #222631; --panel-3: #2a2f3c;
+    --border: #2d3240; --text: #e8e9ec; --muted: #8b90a0; --faint: #5d6272;
+    --accent: #5b9dff; --accent-dim: #213653;
+    --good: #4cc38a; --good-dim: #173528;
+    --warn: #e0a030; --warn-dim: #33290f;
+    --bad: #e05a5a; --bad-dim: #3a1f1f;
+    --violet: #b57bea; --violet-dim: #2a1d3a;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font-size: 13px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    display: grid; grid-template-rows: 52px 1fr; overflow: hidden;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 0 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .brand { font-weight: 700; letter-spacing: .02em; font-size: 15px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border); white-space: nowrap;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .pill.running { color: var(--good); border-color: #1f4a37; background: var(--good-dim); }
+  .pill.running .dot { background: var(--good); box-shadow: 0 0 7px var(--good); animation: pulse 1.4s infinite; }
+  .pill.waiting { color: var(--warn); border-color: #5a4515; background: var(--warn-dim); }
+  .pill.waiting .dot { background: var(--warn); animation: pulse 1s infinite; }
+  .pill.stopping { color: var(--warn); border-color: #5a4515; background: var(--warn-dim); }
+  .pill.stopping .dot { background: var(--warn); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .stats { display: flex; gap: 6px; }
+  .stat { color: var(--muted); font-size: 12px; padding: 3px 9px; background: var(--panel-2); border-radius: 6px; }
+  .stat b { color: var(--text); font-weight: 600; margin-left: 3px; }
+  .spacer { flex: 1 1 auto; }
+
+  button, input, textarea, select {
+    font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  textarea { resize: vertical; line-height: 1.45; width: 100%; }
+  button { cursor: pointer; transition: background .12s, border-color .12s, opacity .12s; }
+  button:hover:not(:disabled) { background: var(--panel-3); border-color: #3d4354; }
+  button:disabled, input:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #07111f; font-weight: 700; }
+  button.primary:hover:not(:disabled) { background: #7ab3ff; border-color: #7ab3ff; }
+  button.danger { background: var(--bad-dim); border-color: #6a2e2e; color: #ff9a9a; font-weight: 700; }
+  button.danger:hover:not(:disabled) { background: #4d2626; border-color: var(--bad); }
+  button.warn { background: var(--warn-dim); border-color: #5a4515; color: var(--warn); font-weight: 700; }
+  button.ghost { background: transparent; }
+  #runBtn { min-width: 120px; padding: 8px 16px; }
+
+  /* ---------- main layout ---------- */
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 470px; min-height: 0; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; grid-template-rows: 55% 45%; } }
+
+  .left { display: flex; flex-direction: column; gap: 8px; padding: 12px; min-height: 0; min-width: 0; }
+  .viewer {
+    position: relative; flex: 1 1 auto; min-height: 0; background: #000; border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden; display: flex; align-items: center; justify-content: center;
+  }
+  #screen { max-width: 100%; max-height: 100%; display: block; user-select: none; -webkit-user-drag: none; }
+  #screen.clickable { cursor: crosshair; }
+  .live-badge {
+    position: absolute; top: 8px; left: 8px; font-size: 11px; font-weight: 700; padding: 3px 8px;
+    border-radius: 5px; background: rgba(0,0,0,.6); color: var(--muted); pointer-events: none;
+  }
+  .live-badge.on { color: var(--good); }
+  .url-badge {
+    position: absolute; bottom: 8px; left: 8px; right: 8px; font-size: 11px; padding: 4px 9px; border-radius: 5px;
+    background: rgba(0,0,0,.65); color: #c9ccd6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    pointer-events: none;
+  }
+  .manual {
+    display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center;
+  }
+  .manual .keys { display: flex; gap: 4px; grid-column: 1 / -1; }
+  .manual .keys button { flex: 1 1 0; padding: 5px 4px; font-size: 12px; }
+  .manual-note { grid-column: 1 / -1; font-size: 11.5px; color: var(--warn); display: none; }
+  .manual-note.show { display: block; }
+  .manual.locked input, .manual.locked button { opacity: .4; pointer-events: none; }
+
+  /* ---------- right panel ---------- */
+  .right { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); border-left: 1px solid var(--border); }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tab {
+    flex: 1 1 0; text-align: center; padding: 11px 8px; color: var(--muted); font-weight: 600; cursor: pointer;
+    border-bottom: 2px solid transparent; user-select: none; position: relative;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .badge {
+    display: none; position: absolute; top: 8px; right: 22%; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--warn); box-shadow: 0 0 6px var(--warn);
+  }
+  .tab .badge.show { display: block; }
+  .pane { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; }
+  .pane.active { display: flex; }
+
+  /* ---------- activity feed ---------- */
+  #feed { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
+  .empty { margin: auto; text-align: center; color: var(--muted); line-height: 1.7; max-width: 330px; }
+  .empty b { color: var(--text); }
+  .empty ol { text-align: left; padding-left: 20px; margin: 10px 0 0; }
+
+  .row { background: var(--panel-2); border-left: 3px solid var(--border); border-radius: 0 6px 6px 0; padding: 6px 10px; }
+  .row.step { border-left-color: var(--good); cursor: pointer; }
+  .row.step.fail { border-left-color: var(--bad); }
+  .row .head { display: flex; gap: 8px; align-items: baseline; }
+  .row .t { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .row .act { font-weight: 600; flex: 0 0 auto; }
+  .row .arg { color: #8fd6ab; font-family: ui-monospace, monospace; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .row .thought { color: #b5b8c4; margin-top: 3px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .row.open .thought { -webkit-line-clamp: unset; display: block; white-space: pre-wrap; }
+  .row .detail { display: none; margin-top: 5px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  .row.open .detail { display: block; }
+
+  .row.batch { border-left-color: var(--violet); background: var(--violet-dim); }
+  .row.batch .title { font-weight: 700; color: #d9b8ff; }
+  .row.batch .sub { color: #c4b0dd; margin-top: 2px; }
+  .row.batch .detail { color: #b9a6d0; }
+  .row.batch { cursor: pointer; }
+
+  .row.inject { border-left-color: var(--accent); background: var(--accent-dim); }
+  .row.ask-row { border-left-color: var(--warn); background: var(--warn-dim); }
+  .row.error { border-left-color: var(--bad); background: var(--bad-dim); color: #ffb4b4; }
+  .row.done { border-left-color: var(--accent); background: var(--accent-dim); font-weight: 600; }
+  .row.done.stopped { border-left-color: var(--warn); background: var(--warn-dim); color: var(--warn); }
+  .cycle {
+    display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; letter-spacing: .07em;
+    text-transform: uppercase; margin: 8px 0 2px;
+  }
+  .cycle::before, .cycle::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
+
+  .ask {
+    position: sticky; bottom: 0; background: var(--warn-dim); border: 1px solid #6b5218; border-left-width: 4px;
+    border-radius: var(--radius); padding: 11px 12px; margin-top: 6px; box-shadow: 0 -8px 16px rgba(0,0,0,.35);
+  }
+  .ask .q { font-weight: 600; color: #ffd98a; line-height: 1.45; margin-bottom: 8px; }
+  .ask .a { display: flex; gap: 6px; }
+  .ask input { flex: 1 1 auto; }
+
+  .composer { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .composer input { flex: 1 1 auto; }
+  .jump {
+    position: absolute; right: 22px; bottom: 74px; display: none; font-size: 12px; padding: 5px 11px; border-radius: 999px;
+    background: var(--accent); color: #07111f; border: 0; font-weight: 700; box-shadow: 0 4px 14px rgba(0,0,0,.5);
+  }
+  .jump.show { display: block; }
+
+  /* ---------- settings ---------- */
+  .settings { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  .field > label.cap { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-bottom: 5px; }
+  .field .hint { font-size: 11.5px; color: var(--faint); margin-top: 4px; line-height: 1.4; }
+  #contextBox { height: 84px; } #taskBox { height: 130px; }
+  .inline { display: flex; gap: 6px; }
+  .inline > select, .inline > input[type=text] { flex: 1 1 auto; min-width: 0; }
+  .opts { display: flex; flex-direction: column; gap: 2px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); }
+  .opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .opt:last-child { border-bottom: 0; }
+  .opt .lbl b { display: block; font-weight: 600; }
+  .opt .lbl span { color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+  .opt input[type=number] { width: 76px; text-align: center; }
+  .switch { position: relative; width: 38px; height: 22px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .switch .slider { position: absolute; inset: 0; background: #3a3f4f; border-radius: 22px; transition: .15s; cursor: pointer; }
+  .switch .slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .15s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(16px); }
+  .flash { animation: flash .9s; }
+  @keyframes flash { 0%,100% { border-color: var(--border); } 30% { border-color: var(--bad); box-shadow: 0 0 0 3px rgba(224,90,90,.25); } }
+  .errmsg { color: #ff9a9a; font-size: 12px; display: none; }
+  .errmsg.show { display: block; }
+
+
+  /* ---------- live overlay on the viewer ---------- */
+  #overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .marker { position: absolute; width: 0; height: 0; }
+  .marker i {
+    position: absolute; left: -22px; top: -22px; width: 44px; height: 44px; border-radius: 50%;
+    border: 3px solid #ffd24a; background: rgba(255,210,74,.18); box-shadow: 0 0 14px rgba(255,210,74,.7);
+    animation: ring 2.6s ease-out forwards;
+  }
+  .marker b {
+    position: absolute; left: 28px; top: -12px; font-size: 11px; font-weight: 700; white-space: nowrap; padding: 2px 7px;
+    border-radius: 4px; background: rgba(0,0,0,.72); color: #ffd24a; animation: fadeout 2.6s ease-out forwards;
+  }
+  @keyframes ring { 0% { transform: scale(2.2); opacity: 0; } 12% { transform: scale(1); opacity: 1; } 70% { opacity: 1; } 100% { transform: scale(.85); opacity: 0; } }
+  @keyframes fadeout { 0%,70% { opacity: 1; } 100% { opacity: 0; } }
+  .toast {
+    position: absolute; top: 40px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 700; padding: 5px 12px;
+    border-radius: 6px; background: rgba(0,0,0,.75); color: #ffd24a; white-space: nowrap; animation: fadeout 2.6s ease-out forwards;
+  }
+  .phase-chip {
+    position: absolute; top: 8px; right: 8px; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 5px;
+    background: rgba(0,0,0,.65); color: var(--accent); display: none; font-variant-numeric: tabular-nums;
+  }
+  .phase-chip.show { display: block; }
+  .row.live { border-left-color: var(--accent); background: var(--accent-dim); }
+  .row.live .act { color: #a9ccff; }
+  .row.live .spin { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); align-self: center; animation: pulse 1s infinite; flex: 0 0 auto; }
+  .row.live .thought { display: block; -webkit-line-clamp: unset; white-space: pre-wrap; color: #cfd8ea; }
+  .row.live .thought:empty { display: none; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #353a49; border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: #474d5f; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="brand">Fara</span>
+  <span class="pill" id="pill"><span class="dot"></span><span id="pillText">fermo</span></span>
+  <div class="stats" id="stats" style="display:none">
+    <span class="stat" id="stCycleWrap">Ciclo<b id="stCycle">0</b></span>
+    <span class="stat">Passi<b id="stSteps">0</b></span>
+    <span class="stat">Batch<b id="stBatch">0</b></span>
+    <span class="stat" id="stErrWrap" style="display:none">Errori<b id="stErr">0</b></span>
+    <span class="stat">Tempo<b id="stTime">0:00</b></span>
+  </div>
+  <span class="spacer"></span>
+  <button id="runBtn" class="primary">▶ Avvia</button>
+</header>
+
+<main>
+  <section class="left">
+    <div class="viewer" id="viewer">
+      <img id="screen" alt="vista live del browser">
+      <div id="overlay"></div>
+      <span class="live-badge" id="liveBadge">● LIVE</span>
+      <span class="phase-chip" id="phaseChip"></span>
+      <span class="url-badge" id="urlBadge" style="display:none"></span>
+    </div>
+    <div class="manual" id="manual">
+      <input type="text" id="urlBox" placeholder="Indirizzo (https://...)" style="grid-column: 1 / 4">
+      <button id="goBtn">Vai</button>
+      <input type="text" id="typeBox" placeholder="Digita nel campo selezionato (login...)" style="grid-column: 1 / 4">
+      <button id="typeBtn">Invia</button>
+      <div class="keys">
+        <button data-key="Enter">⏎ Invio</button>
+        <button data-key="Tab">⇥ Tab</button>
+        <button data-key="Backspace">⌫ Canc</button>
+        <button data-key="Escape">Esc</button>
+      </div>
+      <div class="manual-note" id="manualNote">Controllo manuale disattivato mentre l'agente lavora.</div>
+    </div>
+  </section>
+
+  <aside class="right">
+    <div class="tabs">
+      <div class="tab active" data-tab="activity">Attività<span class="badge" id="askBadge"></span></div>
+      <div class="tab" data-tab="settings">Compito e opzioni</div>
+    </div>
+
+    <div class="pane active" id="pane-activity" style="position:relative">
+      <div id="feed"></div>
+      <button class="jump" id="jumpBtn">↓ Ultimi eventi</button>
+      <div class="composer">
+        <input type="text" id="injectBox" placeholder="Istruzione extra per l'agente (vale dal prossimo passo)" disabled>
+        <button id="injectBtn" class="primary" disabled>Invia</button>
+      </div>
+    </div>
+
+    <div class="pane" id="pane-settings">
+      <div class="settings">
+        <div class="field">
+          <label class="cap">Preset salvati</label>
+          <div class="inline">
+            <select id="presetSelect"><option value="">— scegli —</option></select>
+            <button id="loadPresetBtn">Carica</button>
+            <button id="deletePresetBtn" class="ghost" title="Elimina il preset selezionato">Elimina</button>
+          </div>
+          <div class="inline" style="margin-top:6px">
+            <input type="text" id="presetNameBox" placeholder="Nome con cui salvare queste impostazioni">
+            <button id="savePresetBtn">Salva</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="cap" for="contextBox">Contesto / persona</label>
+          <textarea id="contextBox" placeholder="Chi sei per questo compito: età, lavoro, competenze, dati che l'agente può usare. Resta valido per tutti i cicli."></textarea>
+        </div>
+
+        <div class="field">
+          <label class="cap" for="taskBox">Compito</label>
+          <textarea id="taskBox" placeholder="Cosa deve fare l'agente..."></textarea>
+          <div class="errmsg" id="taskErr">Scrivi cosa deve fare l'agente.</div>
+        </div>
+
+        <div class="opts">
+          <div class="opt">
+            <div class="lbl"><b>Ripeti automaticamente</b><span>Ricomincia dalla pagina di partenza dopo ogni ciclo.</span></div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="number" id="pollInterval" value="60" min="5" max="3600" title="secondi di pausa tra un ciclo e l'altro">
+              <span style="color:var(--muted)">s</span>
+              <label class="switch"><input type="checkbox" id="loopBox"><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="opt">
+            <div class="lbl"><b>Compilazione rapida form</b><span>Legge tutte le domande della pagina e risponde in un colpo solo, invece di cliccare campo per campo.</span></div>
+            <label class="switch"><input type="checkbox" id="batchFillBox"><span class="slider"></span></label>
+          </div>
+          <div class="opt">
+            <div class="lbl"><b>Parti dall'indirizzo in alto</b><span>Spento: parte dalla pagina già aperta (consigliato dopo un login manuale).</span></div>
+            <label class="switch"><input type="checkbox" id="navigateOnStart"><span class="slider"></span></label>
+          </div>
+          <div class="opt">
+            <div class="lbl"><b>Rientro automatico agli studi</b><span>Se resta più di tanti secondi su Prolific fuori dall'elenco studi, senza svolgere uno studio, viene riportato a /studies. 0 = spento.</span></div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <input type="number" id="wanderSecs" value="90" min="0" max="3600">
+              <span style="color:var(--muted)">s</span>
+            </div>
+          </div>
+          <div class="opt">
+            <div class="lbl"><b>Passi massimi per ciclo</b><span>Limite di sicurezza per ogni tentativo.</span></div>
+            <input type="number" id="maxRounds" value="60" min="1" max="300">
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const feed = $('feed');
+let running = false, stopping = false, pendingQuestion = null;
+let lastSeq = 0, runId = null, startedAt = null;
+
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clock = ts => ts ? new Date(ts * 1000).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit', second: '2-digit'}) : '';
+
+/* ---------- tabs ---------- */
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
+}
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => showTab(t.dataset.tab));
+
+/* ---------- live view: MJPEG stream, with screenshot polling as fallback ---------- */
+const screenImg = $('screen');
+let mode = 'stream', streamLoaded = false, screenBusy = false, lastShot = 0, sseOpen = false;
+function useStream() {
+  mode = 'stream'; streamLoaded = false;
+  screenImg.src = '/stream.mjpg?t=' + Date.now();
+}
+screenImg.addEventListener('load', () => { lastShot = Date.now(); if (mode === 'stream') streamLoaded = true; });
+screenImg.addEventListener('error', () => {
+  if (mode !== 'stream' || document.hidden) return;
+  mode = 'poll'; streamLoaded = false;                       // stream broke: fall back to screenshots...
+  setTimeout(() => { if (!document.hidden) useStream(); }, 5000);   // ...and retry it soon
+});
+function refreshScreen() {
+  if (mode !== 'poll' || document.hidden || screenBusy) return;
+  screenBusy = true;
+  const img = new Image();
+  img.onload = () => { if (mode === 'poll') screenImg.src = img.src; lastShot = Date.now(); screenBusy = false; };
+  img.onerror = () => { screenBusy = false; };
+  img.src = '/screen.png?t=' + Date.now();
+}
+setInterval(refreshScreen, 900);
+function updateLiveBadge() {
+  const on = (mode === 'stream' ? streamLoaded : Date.now() - lastShot < 3000) && !document.hidden;
+  $('liveBadge').classList.toggle('on', on);
+  $('liveBadge').textContent = on ? '● LIVE' : '○ OFFLINE';
+}
+setInterval(updateLiveBadge, 1000);
+// A hidden tab closes the stream so the capture loop in the container stops too.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) screenImg.removeAttribute('src'); else useStream();
+});
+// Start the stream only after the page has loaded: an MJPEG image never "finishes",
+// so started earlier it would keep the tab's loading spinner on forever.
+if (document.readyState === 'complete') useStream();
+else window.addEventListener('load', () => setTimeout(useStream, 0));
+
+screenImg.addEventListener('click', e => {
+  if (running) return;
+  const rect = screenImg.getBoundingClientRect();
+  const nw = screenImg.naturalWidth, nh = screenImg.naturalHeight;
+  const scale = Math.min(rect.width / nw, rect.height / nh);
+  postJSON('/click', { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale });
+});
+
+/* ---------- manual controls ---------- */
+$('goBtn').onclick = () => { const u = $('urlBox').value.trim(); if (u) postJSON('/navigate', {url: u}); };
+$('urlBox').addEventListener('keydown', e => { if (e.key === 'Enter') $('goBtn').click(); });
+$('typeBtn').onclick = () => { const b = $('typeBox'); if (b.value) { postJSON('/type', {text: b.value}); b.value = ''; } };
+$('typeBox').addEventListener('keydown', e => { if (e.key === 'Enter') $('typeBtn').click(); });
+document.querySelectorAll('.keys button').forEach(b => b.onclick = () => postJSON('/key', {key: b.dataset.key}));
+
+/* ---------- draft autosave (navigateOnStart deliberately NOT persisted:
+   a stale "on" silently sent the agent away from a logged-in page) ---------- */
+const DRAFT_KEY = 'fara_gui_draft';
+const DRAFT_FIELDS = ['contextBox', 'taskBox', 'urlBox', 'maxRounds', 'loopBox', 'pollInterval', 'presetNameBox', 'batchFillBox', 'wanderSecs'];
+function saveDraft() {
+  const d = {};
+  for (const id of DRAFT_FIELDS) { const el = $(id); d[id] = el.type === 'checkbox' ? el.checked : el.value; }
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch (e) {}
+}
+function loadDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}');
+    for (const id of DRAFT_FIELDS) { if (id in d) { const el = $(id); if (el.type === 'checkbox') el.checked = d[id]; else el.value = d[id]; } }
+  } catch (e) {}
+}
+DRAFT_FIELDS.forEach(id => { $(id).addEventListener('input', saveDraft); $(id).addEventListener('change', saveDraft); });
+loadDraft();
+
+/* ---------- run / stop ---------- */
+const wanderValue = () => { const v = parseFloat($('wanderSecs').value); return Number.isFinite(v) && v >= 0 ? v : 90; };
+$('runBtn').onclick = async () => {
+  if (stopping) return;
+  if (running) {
+    stopping = true; render();                 // immediate feedback; server stops in milliseconds
+    postJSON('/agent/stop');
+    return;
+  }
+  const taskText = $('taskBox').value.trim();
+  if (!taskText) {
+    showTab('settings'); $('taskErr').classList.add('show');
+    const t = $('taskBox'); t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash'); t.focus();
+    return;
+  }
+  $('taskErr').classList.remove('show');
+  const context = $('contextBox').value.trim();
+  const task = context ? `${context}\n\n${taskText}` : taskText;
+  const url = $('navigateOnStart').checked ? $('urlBox').value.trim() : '';
+  resetFeed();
+  showTab('activity');
+  const res = await postJSON('/start_agent', {
+    task, url, max_rounds: parseInt($('maxRounds').value, 10) || 20, loop: $('loopBox').checked,
+    poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
+    wander_seconds: wanderValue(),
+  });
+  if (res.error) addRow(`<div class="row error">${esc(res.error)}</div>`);
+};
+$('taskBox').addEventListener('input', () => $('taskErr').classList.remove('show'));
+
+$('injectBtn').onclick = () => { const b = $('injectBox'); if (b.value.trim()) { postJSON('/agent/inject', {text: b.value.trim()}); b.value = ''; } };
+$('injectBox').addEventListener('keydown', e => { if (e.key === 'Enter') $('injectBtn').click(); });
+
+/* ---------- presets ---------- */
+let presets = [];
+async function loadPresetList() {
+  presets = await (await fetch('/presets')).json();
+  const sel = $('presetSelect'), cur = sel.value;
+  sel.innerHTML = '<option value="">— scegli —</option>';
+  presets.forEach(p => { const o = document.createElement('option'); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
+  sel.value = cur;
+}
+$('loadPresetBtn').onclick = () => {
+  const p = presets.find(x => x.name === $('presetSelect').value); if (!p) return;
+  $('contextBox').value = p.context || ''; $('taskBox').value = p.task || ''; $('urlBox').value = p.url || '';
+  $('maxRounds').value = p.max_rounds || 60; $('loopBox').checked = !!p.loop; $('pollInterval').value = p.poll_interval || 60;
+  $('batchFillBox').checked = !!p.batch_fill;
+  $('wanderSecs').value = p.wander_seconds ?? 90;
+  $('navigateOnStart').checked = false;   // loading a preset must never auto-send the agent to a URL
+  $('presetNameBox').value = p.name; saveDraft();
+};
+$('savePresetBtn').onclick = async () => {
+  const name = $('presetNameBox').value.trim();
+  if (!name) { const b = $('presetNameBox'); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); b.focus(); return; }
+  await postJSON('/presets', { name, context: $('contextBox').value, task: $('taskBox').value, url: $('urlBox').value,
+    max_rounds: parseInt($('maxRounds').value, 10) || 60, loop: $('loopBox').checked,
+    poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
+    wander_seconds: wanderValue() });
+  await loadPresetList(); $('presetSelect').value = name;
+};
+$('deletePresetBtn').onclick = async () => {
+  const name = $('presetSelect').value; if (!name) return;
+  if (!confirm(`Eliminare il preset "${name}"?`)) return;
+  await postJSON('/presets/delete', {name}); await loadPresetList();
+};
+loadPresetList();
+
+/* ---------- feed rendering ---------- */
+const ACTIONS = {
+  left_click: 'Click', double_click: 'Doppio click', right_click: 'Click destro', triple_click: 'Triplo click',
+  mouse_move: 'Sposta mouse', left_click_drag: 'Trascina', type: 'Scrivi', key: 'Tasti', scroll: 'Scorri',
+  hscroll: 'Scorri orizz.', visit_url: 'Apri pagina', history_back: 'Indietro', web_search: 'Cerca', wait: 'Attendi',
+  terminate: 'Fine', ask_user_question: 'Domanda', pause_and_memorize_fact: 'Memorizza', read_page_answer_question: 'Leggi pagina',
+};
+function argSummary(ev) {
+  const a = ev.args || {};
+  if (a.coordinate) return `(${Math.round(a.coordinate[0])}, ${Math.round(a.coordinate[1])})`;
+  if (a.text !== undefined) return `"${String(a.text).slice(0, 70)}"`;
+  if (a.keys) return a.keys.join(' + ');
+  if (a.url) return a.url;
+  if (a.pixels !== undefined) return (a.pixels < 0 ? '↓ ' : '↑ ') + Math.abs(a.pixels) + ' px';
+  if (a.time !== undefined) return a.time + ' s';
+  if (a.query) return a.query;
+  return '';
+}
+const cleanThought = t => String(t || '').replace(/<\/?think>/g, '').trim();
+function addRow(html) {
+  const wrap = document.createElement('div'); wrap.innerHTML = html.trim();
+  const el = wrap.firstElementChild;
+  if (el.classList.contains('step') || el.classList.contains('batch')) el.onclick = () => el.classList.toggle('open');
+  feed.insertBefore(el, $('liveCard'));   // liveCard + askCard are always last
+  return el;
+}
+function renderEvent(ev) {
+  const t = `<span class="t">${clock(ev.ts)}</span>`;
+  switch (ev.type) {
+    case 'cycle':
+      return addRow(`<div class="cycle">Ciclo ${ev.n}</div>`);
+    case 'step': {
+      const fail = String(ev.result_desc || '').startsWith('ACTION FAILED') || String(ev.result_desc || '').includes('REFUSED');
+      const label = ACTIONS[ev.action_type] || ev.action_type;
+      const detail = `${ev.action_type} ${JSON.stringify(ev.args || {})}\n→ ${ev.result_desc || ''}`;
+      return addRow(`<div class="row step${fail ? ' fail' : ''}"><div class="head">${t}<span class="act">${esc(label)}</span>` +
+        `<span class="arg">${esc(argSummary(ev))}</span></div><div class="thought">${esc(cleanThought(ev.thoughts))}</div>` +
+        `<div class="detail">${esc(detail)}</div></div>`);
+    }
+    case 'batch_fill': {
+      const r = ev.result || {};
+      let title = 'Compilazione rapida', sub = esc(ev.result_desc || '');
+      if (r.field_count !== undefined) {
+        const bad = (r.mismatches || []).length + Object.keys(r.apply_errors || {}).length + (r.undecided || []).length;
+        title = `Compilati ${r.field_count - bad}/${r.field_count} campi`;
+        const bits = [];
+        if (r.already_answered_count) bits.push(`${r.already_answered_count} già compilati`);
+        if ((r.undecided || []).length) bits.push(`da fare a mano: ${r.undecided.join(', ')}`);
+        const adv = r.advance;
+        if (adv && adv.attempted) bits.push(adv.advanced ? `poi cliccato "${adv.label}" ✓` : `cliccato "${adv.label}", pagina invariata`);
+        sub = esc(bits.join(' · '));
+      }
+      const ans = Object.entries(r.answers || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\n');
+      return addRow(`<div class="row batch"><div class="head">${t}<span class="title">⚡ ${esc(title)}</span></div>` +
+        (sub ? `<div class="sub">${sub}</div>` : '') + `<div class="detail">${esc(ans)}</div></div>`);
+    }
+    case 'notice':
+      return addRow(`<div class="row ask-row"><div class="head">${t}<span class="act">⚠ ${esc(ev.text)}</span></div></div>`);
+    case 'inject':
+      return addRow(`<div class="row inject"><div class="head">${t}<span class="act">Tu</span></div><div class="thought" style="-webkit-line-clamp:unset;display:block">${esc(ev.text)}</div></div>`);
+    case 'done': {
+      const stopped = ev.answer === 'STOPPED';
+      return addRow(`<div class="row done${stopped ? ' stopped' : ''}"><div class="head">${t}<span>${stopped ? 'Fermato' : 'Completato'}</span></div>` +
+        (stopped ? '' : `<div class="thought" style="-webkit-line-clamp:unset;display:block;font-weight:400">${esc(ev.answer)}</div>`) + `</div>`);
+    }
+    case 'error':
+      return addRow(`<div class="row error"><div class="head">${t}<span class="act">Errore</span></div><div class="thought" style="-webkit-line-clamp:unset;display:block">${esc(ev.message)}</div></div>`);
+    case 'question':
+      return addRow(`<div class="row ask-row"><div class="head">${t}<span class="act">❓ L'agente chiede</span></div><div class="thought" style="-webkit-line-clamp:unset;display:block">${esc(ev.question)}</div></div>`);
+    case 'answer':
+      return addRow(`<div class="row inject"><div class="head">${t}<span class="act">Tu hai risposto</span></div><div class="thought" style="-webkit-line-clamp:unset;display:block">${esc(ev.text)}</div></div>`);
+  }
+  return null;
+}
+
+const emptyHTML = `<div class="empty" id="emptyState"><b>Pronto.</b><ol>
+  <li>Usa il browser a sinistra per aprire il sito e fare il login (clic sulla vista, oppure barra indirizzo e campo di testo).</li>
+  <li>In <b>Compito e opzioni</b> scegli un preset o scrivi il compito.</li>
+  <li>Premi <b>▶ Avvia</b>: qui compare ogni passo dell'agente.</li></ol></div>`;
+function resetFeed() {
+  feed.innerHTML = '<div id="liveCard"></div><div id="askCard"></div>';
+  lastSeq = 0; pendingQuestion = null; renderAsk(); live.phase = null; live.text = ''; renderLive();
+}
+function showEmptyIfNeeded() {
+  if (feed.children.length === 2 && !running) { feed.insertAdjacentHTML('afterbegin', emptyHTML); }
+}
+
+/* ---------- pending question ---------- */
+function renderAsk() {
+  const card = $('askCard');
+  const typing = card.querySelector('input') && document.activeElement === card.querySelector('input');
+  if (!pendingQuestion) { card.className = ''; card.innerHTML = ''; return; }
+  if (card.dataset.q === pendingQuestion && card.className === 'ask') return;   // don't clobber what's being typed
+  card.className = 'ask'; card.dataset.q = pendingQuestion;
+  card.innerHTML = `<div class="q">❓ ${esc(pendingQuestion)}</div><div class="a"><input type="text" id="answerBox" placeholder="La tua risposta..."><button class="primary" id="answerBtn">Rispondi</button></div>`;
+  const send = () => { const v = $('answerBox').value; if (v) postJSON('/agent/answer', {text: v}); };
+  $('answerBtn').onclick = send;
+  $('answerBox').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  setTimeout(() => $('answerBox') && $('answerBox').focus(), 50);
+}
+
+/* ---------- scroll behaviour ---------- */
+const nearBottom = () => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+feed.addEventListener('scroll', () => { if (nearBottom()) $('jumpBtn').classList.remove('show'); });
+$('jumpBtn').onclick = () => { feed.scrollTop = feed.scrollHeight; $('jumpBtn').classList.remove('show'); };
+
+/* ---------- header / state ---------- */
+function fmtTime(s) { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(ss).padStart(2, '0'); }
+function render() {
+  const pill = $('pill');
+  const waiting = running && pendingQuestion;
+  pill.className = 'pill ' + (stopping ? 'stopping' : waiting ? 'waiting' : running ? 'running' : '');
+  $('pillText').textContent = stopping ? 'sto fermando…' : waiting ? 'in attesa di te' : running ? 'in esecuzione' : 'fermo';
+  const btn = $('runBtn');
+  btn.className = stopping ? 'warn' : running ? 'danger' : 'primary';
+  btn.textContent = stopping ? 'Fermando…' : running ? '■ Ferma' : '▶ Avvia';
+  btn.disabled = stopping;
+  $('stats').style.display = (running || startedAt) ? 'flex' : 'none';
+  $('injectBox').disabled = !running; $('injectBtn').disabled = !running;
+  $('manual').classList.toggle('locked', running);
+  $('manualNote').classList.toggle('show', running);
+  screenImg.classList.toggle('clickable', !running);
+  $('askBadge').classList.toggle('show', !!pendingQuestion && document.querySelector('.tab.active').dataset.tab !== 'activity');
+  document.title = pendingQuestion ? '(!) Fara — ti serve una risposta' : running ? '● Fara' : 'Fara';
+}
+
+/* ---------- live card: what the agent is doing right now ---------- */
+const live = { phase: null, step: null, text: '', info: '', t0: 0 };
+const PHASE_TXT = { observe: 'Guardo lo schermo…', think: 'Il modello ragiona…', act: 'Eseguo l’azione…', form: 'Compilo il modulo…' };
+let liveQueued = false;
+function renderLiveSoon() { if (!liveQueued) { liveQueued = true; requestAnimationFrame(() => { liveQueued = false; renderLive(); }); } }
+function liveThought() {
+  let t = live.text.replace(/<\/?think>/g, '');
+  const i = t.indexOf('<tool_call>');
+  return { text: (i >= 0 ? t.slice(0, i) : t).trim(), decided: i >= 0 };
+}
+function renderLive() {
+  const card = $('liveCard'), chip = $('phaseChip');
+  if (!card) return;
+  if (!live.phase) { card.className = ''; card.innerHTML = ''; chip.classList.remove('show'); return; }
+  const stick = nearBottom();
+  const th = liveThought();
+  let label = PHASE_TXT[live.phase] || '';
+  if (live.phase === 'think' && th.decided) label = 'Scelgo l’azione…';
+  if (live.phase === 'act') label = 'Eseguo: ' + (live.info || 'azione') + '…';
+  if (live.phase === 'form') label = 'Compilo il modulo' + (live.info ? ` (${live.info})` : '') + '…';
+  const secs = ((Date.now() - live.t0) / 1000).toFixed(1);
+  card.className = 'row live';
+  card.innerHTML = `<div class="head"><span class="spin"></span><span class="act">${esc(label)}</span><span class="t">${secs} s</span></div>` +
+    `<div class="thought">${esc(th.text)}</div>`;
+  chip.textContent = label.replace('…', '') + ' · ' + secs + ' s'; chip.classList.add('show');
+  if (stick) feed.scrollTop = feed.scrollHeight;
+}
+setInterval(() => { if (live.phase) renderLive(); }, 250);
+
+function screenGeom() {
+  const v = $('viewer').getBoundingClientRect(), r = screenImg.getBoundingClientRect();
+  const nw = screenImg.naturalWidth || 1440, nh = screenImg.naturalHeight || 900;
+  return { ox: r.left - v.left, oy: r.top - v.top, sc: Math.min(r.width / nw, r.height / nh) };
+}
+function showTarget(m) {
+  const ov = $('overlay');
+  while (ov.children.length > 4) ov.removeChild(ov.firstChild);
+  const base = ACTIONS[m.action] || m.action;
+  let text = base;
+  if (m.chars !== undefined) text = `${base} · ${m.chars} car.`;
+  else if (m.keys) text = `${base} · ${[].concat(m.keys).join('+')}`;
+  else if (m.pixels !== undefined && m.pixels !== null) text = `${base} ${m.pixels < 0 ? '↓' : '↑'} ${Math.abs(m.pixels)} px`;
+  const el = document.createElement('div');
+  if (m.x !== undefined) {
+    const g = screenGeom();
+    el.className = 'marker'; el.style.left = (g.ox + m.x * g.sc) + 'px'; el.style.top = (g.oy + m.y * g.sc) + 'px';
+    el.innerHTML = `<i></i><b>${esc(text)}</b>`;
+  } else {
+    el.className = 'toast'; el.textContent = text;
+  }
+  ov.appendChild(el);
+  setTimeout(() => el.remove(), 2700);
+}
+function applyLive(m) {
+  if (m.type === 'phase') {
+    if (m.phase === 'idle') live.phase = null;
+    else {
+      live.phase = m.phase; live.t0 = Date.now();
+      if (m.phase === 'observe' || m.phase === 'form') { live.text = ''; live.step = m.step ?? null; }
+      live.info = m.phase === 'act' ? (ACTIONS[m.action] || m.action || '') : m.phase === 'form' ? (m.fields ? m.fields + ' campi' : '') : '';
+    }
+  } else if (m.type === 'token') {
+    if (live.step !== m.step) { live.step = m.step; live.text = ''; }
+    live.text += m.text;
+    if (!live.phase) { live.phase = 'think'; live.t0 = Date.now(); }
+  } else if (m.type === 'target') {
+    showTarget(m); return;
+  }
+  renderLiveSoon();
+}
+
+/* ---------- state + events (pushed by SSE, polled only as a fallback) ---------- */
+let lastEventTs = null;
+function applyEvent(ev) {
+  if (ev.seq <= lastSeq) return;           // replay overlap after a reconnect
+  const wasAtBottom = nearBottom();
+  document.getElementById('emptyState')?.remove();
+  lastSeq = ev.seq; lastEventTs = ev.ts;
+  if (['step', 'batch_fill', 'done', 'error', 'question', 'notice'].includes(ev.type)) { live.phase = null; live.text = ''; renderLive(); }
+  renderEvent(ev);
+  if (wasAtBottom) feed.scrollTop = feed.scrollHeight; else $('jumpBtn').classList.add('show');
+}
+function applyState(d) {
+  if (runId !== null && d.run_id !== runId) { resetFeed(); lastEventTs = null; }   // a new run started (maybe from another tab)
+  runId = d.run_id;
+  running = d.running; startedAt = d.started_at;
+  if (!d.running) { stopping = false; if (live.phase) { live.phase = null; renderLive(); } } else stopping = d.stopping || stopping;
+  pendingQuestion = d.pending_question; renderAsk();
+  const s = d.stats || {};
+  $('stCycleWrap').style.display = d.loop ? '' : 'none';
+  $('stCycle').textContent = s.cycle || 0; $('stSteps').textContent = s.steps || 0; $('stBatch').textContent = s.batch_fills || 0;
+  $('stErr').textContent = s.errors || 0; $('stErrWrap').style.display = s.errors ? '' : 'none';
+  if (!d.running && startedAt && lastEventTs) $('stTime').textContent = fmtTime(lastEventTs - startedAt);
+  if (d.url) { const u = $('urlBadge'); u.style.display = ''; u.textContent = d.url; }
+  if (lastSeq === 0) showEmptyIfNeeded();
+  render();
+}
+
+let es = null;
+function connectEvents() {
+  if (es) { es.onerror = null; es.close(); }
+  es = new EventSource(`/agent/events?since=${lastSeq}&run=${runId ?? -1}`);
+  es.onopen = () => { sseOpen = true; };
+  es.addEventListener('state', e => applyState(JSON.parse(e.data)));
+  es.addEventListener('ev', e => applyEvent(JSON.parse(e.data)));
+  es.addEventListener('live', e => applyLive(JSON.parse(e.data)));
+  es.onerror = () => { sseOpen = false; es.close(); setTimeout(connectEvents, 1500); };
+}
+
+async function poll() {            // fallback only, while the event stream is down
+  try {
+    const d = await (await fetch(`/agent/status?since=${lastSeq}`)).json();
+    applyState(d);
+    for (const ev of d.events) applyEvent(ev);
+  } catch (e) { /* server busy: skip this tick */ }
+}
+resetFeed(); showEmptyIfNeeded(); render();
+connectEvents();
+setInterval(() => { if (!sseOpen) poll(); }, 1000);
+setInterval(() => { if (running && startedAt) $('stTime').textContent = fmtTime(Date.now() / 1000 - startedAt); }, 1000);
+</script>
+</body>
+</html>

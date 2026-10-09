@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fara Complex Form-Fill Test</title>
+    <style>
+        body { font-family: sans-serif; padding: 40px; max-width: 700px; margin: 0 auto; }
+        fieldset { margin-bottom: 24px; padding: 12px 20px; }
+        legend { font-weight: bold; }
+        label { display: block; margin: 6px 0; }
+        textarea { width: 100%; height: 70px; }
+        select, input[type=text], input[type=email] { font-size: 16px; padding: 4px; }
+        h2 { border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+        #name_live { font-size: 12px; color: #666; }
+        button { font-size: 18px; padding: 10px 24px; margin-top: 16px; }
+        #done { font-size: 20px; font-weight: bold; margin-top: 20px; }
+        #platforms_group { display: none; margin-top: 10px; padding-left: 20px; }
+        .inline { display: inline-block; margin-left: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Synthetic Long Survey (test fixture)</h1>
+
+    <h2>1. Personal info</h2>
+    <label for="full_name">Full name</label>
+    <input type="text" id="full_name">
+    <div id="name_live"></div>
+
+    <label for="email">Email address</label>
+    <input type="email" id="email">
+
+    <fieldset>
+        <legend>What is your age range?</legend>
+        <label><input type="radio" name="age_range" value="18-24"> 18-24</label>
+        <label><input type="radio" name="age_range" value="25-34"> 25-34</label>
+        <label><input type="radio" name="age_range" value="35-44"> 35-44</label>
+        <label><input type="radio" name="age_range" value="45+"> 45+</label>
+    </fieldset>
+
+    <label for="country">Which country do you currently live in?</label>
+    <select id="country">
+        <option value="">-- choose --</option>
+        <option>Italy</option>
+        <option>Germany</option>
+        <option>France</option>
+        <option>Spain</option>
+        <option>Netherlands</option>
+        <option>Other</option>
+    </select>
+
+    <label for="avail_days">Which days are you generally available for a follow-up call? (select all that apply)</label>
+    <select id="avail_days" multiple size="7">
+        <option>Monday</option>
+        <option>Tuesday</option>
+        <option>Wednesday</option>
+        <option>Thursday</option>
+        <option>Friday</option>
+        <option>Saturday</option>
+        <option>Sunday</option>
+    </select>
+
+    <label for="birth_date">Date of birth</label>
+    <input type="date" id="birth_date">
+
+    <h2>2. Usage &amp; experience</h2>
+    <fieldset>
+        <legend>How often do you use our product?</legend>
+        <label><input type="radio" name="usage_freq" value="Daily"> Daily</label>
+        <label><input type="radio" name="usage_freq" value="A few times a week"> A few times a week</label>
+        <label><input type="radio" name="usage_freq" value="Weekly"> Weekly</label>
+        <label><input type="radio" name="usage_freq" value="Monthly"> Monthly</label>
+        <label><input type="radio" name="usage_freq" value="Rarely"> Rarely</label>
+    </fieldset>
+
+    <fieldset>
+        <legend>Which features have you used? (select all that apply)</legend>
+        <label><input type="checkbox" name="features_used" value="Dashboard"> Dashboard</label>
+        <label><input type="checkbox" name="features_used" value="Reporting"> Reporting</label>
+        <label><input type="checkbox" name="features_used" value="API"> API</label>
+        <label><input type="checkbox" name="features_used" value="Mobile app"> Mobile app</label>
+        <label><input type="checkbox" name="features_used" value="Notifications"> Notifications</label>
+        <label>
+            <input type="checkbox" name="features_used" value="Other">
+            Other
+            <span class="inline">please specify: <input type="text" id="features_other_specify" size="20"></span>
+        </label>
+    </fieldset>
+
+    <label for="satisfaction">Overall satisfaction (1 = very dissatisfied, 10 = very satisfied)</label><br>
+    <input type="range" id="satisfaction" min="1" max="10" step="1" value="5">
+
+    <label for="nps">How likely are you to recommend us to a friend? (0 = not at all likely, 10 = extremely likely)</label><br>
+    <input type="range" id="nps" min="0" max="10" step="1" value="5">
+
+    <h2>3. Mobile app</h2>
+    <fieldset>
+        <legend>Do you use our mobile app?</legend>
+        <label><input type="radio" name="uses_app" value="Yes" onclick="document.getElementById('platforms_group').style.display='block'"> Yes</label>
+        <label><input type="radio" name="uses_app" value="No" onclick="document.getElementById('platforms_group').style.display='none'"> No</label>
+    </fieldset>
+    <div id="platforms_group">
+        <fieldset>
+            <legend>Which platforms? (select all that apply)</legend>
+            <label><input type="checkbox" name="platforms" value="iOS"> iOS</label>
+            <label><input type="checkbox" name="platforms" value="Android"> Android</label>
+            <label><input type="checkbox" name="platforms" value="Both"> Both</label>
+        </fieldset>
+    </div>
+
+    <h2>4. Open feedback</h2>
+    <label for="like_most">What do you like most about the product? Please elaborate with a few sentences.</label>
+    <textarea id="like_most"></textarea>
+
+    <label for="improve">What could we improve? Please elaborate with a few sentences.</label>
+    <textarea id="improve"></textarea>
+
+    <label for="other_comments">Any other comments? (optional)</label>
+    <textarea id="other_comments"></textarea>
+
+    <button id="submit-btn" onclick="goPage2()">Next</button>
+    <div id="done"></div>
+    <div id="page2" style="display:none">
+        <h2>Page 2 of 2</h2>
+        <fieldset>
+            <legend>How did you hear about us?</legend>
+            <label><input type="radio" name="referral" value="Search"> Search engine</label>
+            <label><input type="radio" name="referral" value="Friend"> From a friend</label>
+            <label><input type="radio" name="referral" value="Ad"> An advertisement</label>
+        </fieldset>
+        <fieldset>
+            <legend>Which topics interest you? (select all that apply)</legend>
+            <label><input type="checkbox" name="topics" value="Privacy"> Privacy</label>
+            <label><input type="checkbox" name="topics" value="Performance"> Performance</label>
+            <label><input type="checkbox" name="topics" value="Design"> Design</label>
+        </fieldset>
+        <label for="role">What is your job role?</label>
+        <input type="text" id="role">
+        <label for="final_thoughts">Final thoughts? Please elaborate.</label>
+        <textarea id="final_thoughts"></textarea>
+        <button id="finish-btn" onclick="document.getElementById('done2').textContent='SUBMITTED';">Submit</button>
+        <div id="done2" style="font-weight:bold"></div>
+    </div>
+
+    <script>
+        document.getElementById('full_name').addEventListener('input', (e) => {
+            document.getElementById('name_live').textContent = 'live: ' + e.target.value;
+        });
+    
+        function goPage2() {
+            document.querySelectorAll('body > *').forEach(el => {
+                if (el.id !== 'page2' && el.tagName !== 'SCRIPT') el.style.display = 'none';
+            });
+            document.getElementById('page2').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

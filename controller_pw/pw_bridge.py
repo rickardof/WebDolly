@@ -1,0 +1,239 @@
+"""Single-threaded Playwright bridge to the agent's Chromium (over CDP).
+
+Playwright's sync API is not thread-safe, but the GUI server calls into the
+browser from several threads (HTTP handlers + the agent thread). Every
+Playwright call is therefore funnelled through ONE worker thread that owns
+the connection: callers submit a function and block on its result.
+
+Connects to the already-running kiosk Chromium (connect_over_cdp), so the
+persistent profile, logins and the Xvfb display Fara sees are untouched --
+Playwright only replaces the hand-rolled cdp.py plumbing.
+"""
+
+import os
+import queue
+import cancel
+import time
+import threading
+
+from playwright.sync_api import sync_playwright
+
+CDP_URL = os.environ.get("FARA_CDP_URL", "http://127.0.0.1:9333")
+
+
+class _Bridge:
+    def __init__(self):
+        self._q = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="pw-bridge")
+        self._thread.start()
+
+    def _connect(self):
+        self._pw = self._pw if getattr(self, "_pw", None) else sync_playwright().start()
+        self._browser = self._pw.chromium.connect_over_cdp(CDP_URL)
+
+    def _run(self):
+        self._pw = None
+        self._browser = None
+        self._active = None
+        self._known = []
+        while True:
+            fn, args, kwargs, box, done = self._q.get()
+            try:
+                if self._browser is None or not self._browser.is_connected():
+                    self._connect()
+                    self._active, self._known = None, []
+                self._sync_tabs()
+                box["result"] = fn(self, *args, **kwargs)
+            except Exception as e:  # noqa: BLE001 -- re-raised in the caller's thread
+                box["error"] = e
+                # A dropped CDP connection (browser container restarted)
+                # must not wedge the bridge forever: reconnect next call.
+                if self._browser is not None and not self._browser.is_connected():
+                    self._browser = None
+            finally:
+                done.set()
+
+    def call(self, fn, *args, timeout: float = 120, **kwargs):
+        box, done = {}, threading.Event()
+        self._q.put((fn, args, kwargs, box, done))
+        if not done.wait(timeout):
+            raise TimeoutError(f"browser bridge call {getattr(fn, '__name__', fn)} timed out")
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    # -- helpers, only ever run inside the worker thread ---------------------
+
+    def pages(self):
+        return [p for ctx in self._browser.contexts for p in ctx.pages]
+
+    def _sync_tabs(self):
+        """Keep self._active pointing at the tab that is on screen.
+
+        The page itself can't tell us: measured in this kiosk Chromium,
+        every tab reports visibilityState='visible' AND hasFocus()=true,
+        foreground or not. So the bridge tracks it instead: a newly opened
+        tab is what Chromium brings to the front (target=_blank survey
+        links), a closed active tab falls back to the last remaining one,
+        and explicit switches go through switch_tab(), which uses
+        bring_to_front() so the screen and our pointer can't diverge."""
+        # The sync API only processes browser events (e.g. "new tab
+        # opened") while it waits on something; reading .pages is a local
+        # property and doesn't. Without this pump a tab opened by a real
+        # click stayed invisible to us indefinitely (measured).
+        anchor = self._active or (self.pages()[0] if self.pages() else None)
+        if anchor is not None:
+            try:
+                anchor.wait_for_timeout(50)
+            except Exception:
+                pass
+        pages = self.pages()
+        new = [p for p in pages if p not in self._known]
+        if self._active is None or self._active not in pages:
+            self._active = pages[-1] if pages else None
+            if self._active is not None and self._known:
+                try:
+                    self._active.bring_to_front()
+                except Exception:
+                    pass
+        if new and self._known:
+            self._active = new[-1]
+        self._known = list(pages)
+
+    def active_page(self):
+        """The tab Fara actually sees (see _sync_tabs). cdp.py always used
+        the first tab in CDP's target list, so after a survey opened in a
+        new tab, DOM reads could hit the hidden dashboard instead."""
+        if self._active is None:
+            raise RuntimeError("no open pages in the browser")
+        return self._active
+
+    def switch_tab(self, delta: int):
+        pages = self.pages()
+        if len(pages) < 2:
+            return self._active
+        i = pages.index(self._active) if self._active in pages else len(pages) - 1
+        self._active = pages[(i + delta) % len(pages)]
+        self._active.bring_to_front()
+        return self._active
+
+
+_bridge = None
+_bridge_lock = threading.Lock()
+
+
+def bridge() -> _Bridge:
+    global _bridge
+    with _bridge_lock:
+        if _bridge is None:
+            _bridge = _Bridge()
+        return _bridge
+
+
+def run(fn, *args, **kwargs):
+    """Run fn(bridge, *args) on the Playwright thread and return its result."""
+    return bridge().call(fn, *args, **kwargs)
+
+
+# -- convenience operations used by the agent/GUI ----------------------------
+
+def current_url() -> str:
+    return run(lambda b: b.active_page().url)
+
+
+def goto(url: str):
+    def _go(b):
+        p = b.active_page()
+        p.goto(url, wait_until="domcontentloaded", timeout=30000)
+        p.bring_to_front()
+    return run(_go)
+
+
+def go_back() -> bool:
+    """Browser Back that can't walk out of the logged-in site. Back from
+    the first page after login lands on the pre-login page (measured:
+    app.prolific.com/studies/<id> -> www.prolific.com, a logged-out
+    marketing page), and that navigation also hung until the 15s timeout,
+    which killed the whole run. So: don't wait for load events (commit is
+    enough, the next screenshot shows the result), and if the host changed,
+    go forward again and report that Back was refused."""
+    from urllib.parse import urlparse
+
+    def _back(b):
+        page = b.active_page()
+        before = urlparse(page.url).netloc
+        try:
+            page.go_back(wait_until="commit", timeout=8000)
+        except Exception:
+            pass
+        page.wait_for_timeout(400)
+        if urlparse(page.url).netloc != before:
+            try:
+                page.go_forward(wait_until="commit", timeout=8000)
+            except Exception:
+                pass
+            return False
+        return True
+    return run(_back)
+
+
+def reload():
+    return run(lambda b: b.active_page().reload(wait_until="domcontentloaded", timeout=30000))
+
+
+def switch_tab(delta: int) -> str:
+    """Ctrl+Tab (delta=+1) / Ctrl+Shift+Tab (delta=-1), done through
+    Playwright so the on-screen tab and the tracked active tab match."""
+    return run(lambda b: b.switch_tab(delta).url)
+
+
+def reset_to(url: str):
+    """Between loop cycles: close every tab but one and load `url` in it.
+    Just navigating the current tab back to the dashboard left each
+    finished survey's tab open, so a 24/7 loop would pile up tabs."""
+    def _reset(b):
+        pages = b.pages()
+        keep = b._active if b._active in pages else pages[0]
+        for p in pages:
+            if p is not keep:
+                try:
+                    p.close()
+                except Exception:
+                    pass
+        b._active = keep
+        b._known = [keep]
+        keep.bring_to_front()
+        keep.goto(url, wait_until="domcontentloaded", timeout=30000)
+    return run(_reset)
+
+
+def wait_for_content(max_s: float = 5.0, quiet_s: float = 0.4) -> float:
+    """Wait until the visible page has rendered something and stopped
+    changing, instead of a fixed sleep. SPAs like Prolific are
+    "DOMContentLoaded" long before the studies list appears (seen in logs:
+    the agent's first screenshot showed a blank page with only the cookie
+    banner, costing it extra `wait` steps). Returns seconds waited."""
+    def _wait(b):
+        t0 = time.time()
+        last, stable_since = None, time.time()
+        while time.time() - t0 < max_s and not cancel.is_cancelled():
+            try:
+                txt = b.active_page().evaluate(
+                    "() => document.body ? document.body.innerText.length : 0")
+            except Exception:
+                txt = None
+            if txt != last:
+                last, stable_since = txt, time.time()
+            elif txt and time.time() - stable_since >= quiet_s:
+                break
+            b.active_page().wait_for_timeout(100)
+        return time.time() - t0
+    return run(_wait, timeout=max_s + 30)
+
+
+def page_count() -> int:
+    return run(lambda b: len(b.pages()))
+
+
+def evaluate(js: str):
+    return run(lambda b: b.active_page().evaluate(js))

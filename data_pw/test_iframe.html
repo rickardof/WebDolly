@@ -1,0 +1,17 @@
+<!DOCTYPE html><html><head><title>Iframe host</title></head><body style="font-family:sans-serif;padding:20px">
+<h1>Study wrapper</h1><p>The survey is embedded below.</p>
+<iframe id="sv" style="width:900px;height:700px;border:1px solid #999" srcdoc='
+<html><body style="font-family:sans-serif">
+<fieldset><legend>How old are you?</legend>
+<label><input type="radio" name="age" value="18-24"> 18-24</label>
+<label><input type="radio" name="age" value="25-34"> 25-34</label>
+<label><input type="radio" name="age" value="35+"> 35+</label></fieldset>
+<fieldset><legend>Which devices do you own?</legend>
+<label><input type="checkbox" name="dev" value="Phone"> Phone</label>
+<label><input type="checkbox" name="dev" value="Laptop"> Laptop</label>
+<label><input type="checkbox" name="dev" value="Tablet"> Tablet</label></fieldset>
+<label for="why">Why do you use them? Please elaborate.</label><br><textarea id="why"></textarea><br>
+<label for="job">Your job</label> <input type="text" id="job"><br>
+<button onclick="document.getElementById(&apos;ok&apos;).textContent=&apos;IFRAME-SUBMITTED&apos;">Next</button>
+<div id="ok"></div></body></html>'></iframe>
+</body></html>
