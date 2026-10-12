@@ -42,7 +42,9 @@ import os
 import re
 import pw_bridge
 
-FARA_URL = os.environ.get("FARA_URL", "http://127.0.0.1:8090/v1/chat/completions")
+FARA_URL   = os.environ.get("FARA_URL",   "http://127.0.0.1:8090/v1/chat/completions")
+FARA_MODEL = os.environ.get("FARA_MODEL", "Fara1.5-27B-Q4_K_M.gguf")
+FARA_API_KEY = os.environ.get("FARA_API_KEY", "")
 
 def _notify_telegram(msg: str) -> None:
     """Fire-and-forget Telegram notification. Fails silently."""
@@ -143,17 +145,28 @@ def encode_for_model(img: Image.Image) -> str:
 # restore the template default.
 ENABLE_THINKING = os.environ.get("FARA_ENABLE_THINKING", "0") == "1"
 
+_hurry_mode: bool = False
+
+
+def set_hurry(enabled: bool):
+    global _hurry_mode
+    _hurry_mode = enabled
+
 
 def call_fara(messages: list, step: int = None) -> str:
     payload = {
-        "model": "Fara1.5-27B-Q4_K_M.gguf",
+        "model": FARA_MODEL,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 512,
-        "chat_template_kwargs": {"enable_thinking": ENABLE_THINKING},
+        "max_tokens": 512 if _hurry_mode else 1024,
     }
+    # chat_template_kwargs is llama-server-only — skip when using a cloud API
+    if not FARA_API_KEY:
+        payload["chat_template_kwargs"] = {"enable_thinking": ENABLE_THINKING}
+    extra_hdrs = {"Authorization": f"Bearer {FARA_API_KEY}"} if FARA_API_KEY else None
     result = cancel.post_chat(FARA_URL, payload, timeout=120,
-                              on_delta=lambda t: _live({"type": "token", "step": step, "text": t}))
+                              on_delta=lambda t: _live({"type": "token", "step": step, "text": t}),
+                              extra_headers=extra_hdrs)
     return result["choices"][0]["message"]["content"]
 
 
@@ -218,21 +231,29 @@ TRIM_TO_IMAGES = 5
 # budget after the usual image trim, oldest whole messages (text and all)
 # are dropped next -- the only fix that can address bloat coming from
 # repeated large text, not just images.
-CONTEXT_TOKEN_BUDGET = 28000
+CONTEXT_TOKEN_BUDGET = int(os.environ.get("FARA_TOKEN_BUDGET", "28000"))
 MEASURED_IMAGE_TOKENS = 1262
 PER_MESSAGE_OVERHEAD_MARGIN = 20
-TOKENIZE_URL = FARA_URL.rsplit("/v1/", 1)[0] + "/tokenize"
+# llama-server tokenizer endpoint — not available for cloud APIs
+_TOKENIZE_URL = FARA_URL.rsplit("/v1/", 1)[0] + "/tokenize" if not FARA_API_KEY else ""
 
 
 def _tokenize_count(text: str) -> int:
+    """Count tokens via llama-server, or fall back to a word-based estimate."""
     if not text:
         return 0
-    req = urllib.request.Request(
-        TOKENIZE_URL, data=json.dumps({"content": text}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return len(json.load(r)["tokens"])
+    if _TOKENIZE_URL:
+        try:
+            req = urllib.request.Request(
+                _TOKENIZE_URL, data=json.dumps({"content": text}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return len(json.load(r)["tokens"])
+        except Exception:
+            pass
+    # Fallback: ~0.75 tokens per character (conservative for English)
+    return max(1, len(text) // 4)
 
 
 def _message_text(m: dict) -> str:
@@ -455,10 +476,51 @@ class StudyTimer:
                 "Do NOT submit yet — use the `wait` action on the last page.")
 
 
+def _near_checkbox_state(x: float, y: float):
+    """Return checked state of nearest checkbox within 80px, or None."""
+    _JS = """([x, y]) => {
+        const cbs = [...document.querySelectorAll('input[type=checkbox]')];
+        let best = null, minD = Infinity;
+        for (const cb of cbs) {
+            const r = cb.getBoundingClientRect();
+            const d = Math.hypot(r.left + r.width/2 - x, r.top + r.height/2 - y);
+            if (d < 80 && d < minD) { minD = d; best = cb.checked; }
+        }
+        return best;
+    }"""
+    try:
+        return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+    except Exception:
+        return None
+
+
+def _js_click_near_checkbox(x: float, y: float):
+    """JS-click the nearest checkbox within 80px (fallback for missed clicks)."""
+    _JS = """([x, y]) => {
+        const cbs = [...document.querySelectorAll('input[type=checkbox]')];
+        let best = null, minD = Infinity;
+        for (const cb of cbs) {
+            const r = cb.getBoundingClientRect();
+            const d = Math.hypot(r.left + r.width/2 - x, r.top + r.height/2 - y);
+            if (d < 80 && d < minD) { minD = d; best = cb; }
+        }
+        if (best) best.click();
+    }"""
+    try:
+        pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+    except Exception:
+        pass
+
+
 def dispatch_action(action_type: str, args: dict) -> str:
     if action_type == "left_click":
         x, y = args["coordinate"]
+        cb_before = _near_checkbox_state(x, y)
         docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)), "click", "1")
+        if cb_before is not None:
+            cb_after = _near_checkbox_state(x, y)
+            if cb_after == cb_before:
+                _js_click_near_checkbox(x, y)
         return f"left_click at ({x:.0f},{y:.0f})"
 
     if action_type == "double_click":
@@ -760,6 +822,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         survey_memory = []  # (question, answer) given so far in this run
         wander = WanderGuard(wander_seconds)
         study_timer = StudyTimer()
+        _last_guarded_duration: float | None = None  # persists across clicks within a study entry
+        _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
 
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
@@ -807,9 +871,31 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         pending_user_response = injected
                     continue
 
+            # Stateful transition check: if previous step was on Prolific and now we're
+            # external, start the timer regardless of HOW the navigation happened
+            # (left_click, key press, Enter in a modal, JS redirect, etc.)
+            here_guarded = _on_guarded_site(here)
+            _timer_started_this_step = False
+            if _prev_was_guarded and not here_guarded and not study_timer.is_active():
+                effective_duration = _last_guarded_duration
+                if effective_duration is not None:
+                    study_timer.start(effective_duration * 60)
+                    _live({"type": "timer_start", "min_seconds": study_timer.min_seconds,
+                           "min_minutes": effective_duration})
+                else:
+                    study_timer.start(0)
+                    _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
+                _timer_started_this_step = True
+                _live({"type": "notice", "text": f"[timer] transition detected: guarded→external | duration={effective_duration}min"})
+                dur_str = f" (~{effective_duration:.0f} min)" if effective_duration else ""
+                _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
+            _prev_was_guarded = here_guarded
+
             # Reset timer when back at the studies list (timer re-arms for next study).
-            if _on_guarded_site(here) and _LIST_PATH.match(urlparse(here).path or ""):
+            if here_guarded and _LIST_PATH.match(urlparse(here).path or ""):
                 study_timer.reset()
+                _last_guarded_duration = None
+                _prev_was_guarded = False
 
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
@@ -892,6 +978,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 coord = args.get("coordinate")
                 cx, cy = (coord[0], coord[1]) if coord else (None, None)
                 pre_click_duration = _extract_study_duration(cx, cy)
+                if pre_click_duration is not None:
+                    _last_guarded_duration = pre_click_duration
             try:
                 result_desc = dispatch_action(action_type, args)
             except Exception as e:
@@ -907,17 +995,27 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
 
-            # Detect Prolific → external survey transition: start the timer.
-            if action_type == "left_click" and _on_guarded_site(here):
-                new_url = get_current_url()
-                if not _on_guarded_site(new_url) and not study_timer.is_active():
-                    if pre_click_duration is not None:
-                        study_timer.start(pre_click_duration * 60)
-                        _live({"type": "timer_start", "min_seconds": study_timer.min_seconds,
-                               "min_minutes": pre_click_duration})
-                    else:
-                        # Duration not found — timer inactive, no minimum.
-                        _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
+
+            # --- diagnostic log entry (separate from model transcript) ---
+            diag: dict = {
+                "type": "diag", "step": step,
+                "url": here,
+                "guarded": here_guarded,
+                "prev_guarded": _prev_was_guarded,  # value BEFORE this step updated it
+                "action": action_type,
+                "result": result_desc,
+                "timer_active": study_timer.is_active(),
+                "timer_elapsed": round(study_timer.elapsed(), 1) if study_timer.is_active() else None,
+                "timer_remaining": round(study_timer.remaining(), 1) if study_timer.is_active() else None,
+                "timer_min_sec": study_timer.min_seconds if study_timer.is_active() else None,
+                "last_guarded_duration": _last_guarded_duration,
+            }
+            if action_type == "left_click" and here_guarded:
+                diag["pre_click_duration"] = pre_click_duration
+            diag["timer_started"] = _timer_started_this_step
+            transcript.write(json.dumps(diag) + "\n")
+            transcript.flush()
+            # ---------------------------------------------------------------
 
             step_event = {
                 "type": "step", "step": step, "thoughts": thoughts,
@@ -927,6 +1025,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             }
 
             if action_type == "terminate":
+                if study_timer.is_active() and study_timer.remaining() > 30:
+                    rem = int(study_timer.remaining())
+                    pending_user_response = (
+                        f"TERMINATE REFUSED: study timer has {rem}s remaining "
+                        f"(minimum {study_timer.min_seconds:.0f}s). "
+                        "Use the `wait` action to wait (e.g. wait 30), then try again.")
+                    continue
                 yield step_event
                 answer = args.get("answer", "")
                 if answer.startswith("CODE:") or answer == "NOCODE":

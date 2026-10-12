@@ -64,7 +64,8 @@ def cancel_all():
             pass
 
 
-def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None) -> dict:
+def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
+              extra_headers: dict | None = None) -> dict:
     """Chat-completions request that can be aborted ON THE SERVER too.
 
     A plain (non-streaming) request keeps generating after the client
@@ -82,12 +83,20 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None) -> d
     check()
     u = urlparse(url)
     body = dict(payload, stream=True, stream_options={"include_usage": True})
-    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+    if u.scheme == "https":
+        import ssl
+        conn = http.client.HTTPSConnection(u.hostname, u.port or 443,
+                                           context=ssl.create_default_context(),
+                                           timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
     with _lock:
         _conns.add(conn)
+    req_headers = {"Content-Type": "application/json"}
+    if extra_headers:
+        req_headers.update(extra_headers)
     try:
-        conn.request("POST", u.path or "/", json.dumps(body).encode(),
-                     {"Content-Type": "application/json"})
+        conn.request("POST", u.path or "/", json.dumps(body).encode(), req_headers)
         resp = conn.getresponse()
         if resp.status >= 400:
             raise RuntimeError(f"HTTP {resp.status} from {u.path}: "
