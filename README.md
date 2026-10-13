@@ -6,7 +6,8 @@ scrivere). Il caso d'uso principale è la compilazione di survey/studi (es.
 Prolific) con un profilo/persona che definisci tu, ma il compito è libero: lo
 scrivi nella GUI.
 
-Tutto gira in locale:
+Di base tutto gira in locale (il modello può anche stare su un'API remota,
+vedi sotto):
 
 ```
 ┌────────────── host ──────────────┐   ┌──────── Docker ────────┐
@@ -23,7 +24,13 @@ Tutto gira in locale:
 - **Browser**: Chromium in modalità kiosk dentro un container, su un display
   virtuale 1440x900. L'agente vede quello schermo e agisce con xdotool
   (mouse/tastiera) + Playwright via CDP (navigazione, lettura DOM, compilazione).
-- **Controller**: gira sull'host (Python). Espone la GUI web su `127.0.0.1:8766`.
+- **Controller**: gira sull'host (Python). Espone la GUI web su `127.0.0.1:8766`,
+  una dashboard delle performance su `/dashboard` e un bot Telegram per
+  comandare tutto dal telefono.
+- **Modello remoto (alternativa alla GPU)**: `FARA_URL` + `FARA_API_KEY` possono
+  puntare a qualunque API OpenAI-compatibile con visione (es. Gemini). In quel
+  caso il container `fara-test` e la GPU non servono e l'agente gira anche su una
+  VM piccola: vedi [Esecuzione su VM cloud](#esecuzione-su-vm-cloud).
 
 ## Requisiti
 
@@ -118,6 +125,23 @@ cp controller_pw/identity.json.example controller_pw/identity.json
 
 Il file è nel `.gitignore`.
 
+### 6. Telegram (opzionale)
+
+Serve per comandare l'agente e ricevere notifiche dal telefono. Crea un bot con
+[@BotFather](https://t.me/BotFather), prendi il token e l'id della tua chat, e
+scrivili in `controller_pw/telegram_config.py`:
+
+```python
+TELEGRAM_TOKEN   = "123456:ABC-DEF..."
+TELEGRAM_CHAT_ID = "12345678"
+```
+
+Se il file non c'è, bot e notifiche vengono saltati in silenzio e il resto
+funziona identico. Il bot risponde **solo** ai messaggi che arrivano da quell'id.
+
+> Il token è un segreto: tieni `telegram_config.py` fuori da git (come
+> `identity.json`). Vedi [Controllo da Telegram](#controllo-da-telegram).
+
 ## Avvio
 
 ```bash
@@ -158,7 +182,12 @@ barra degli indirizzi, quindi si naviga da qui. Il login resta nel profilo.
 
 Premi **▶ Avvia**. Il tab **Attività** mostra in tempo reale cosa pensa e fa
 l'agente (fase, token generati, azione, risultato) e le statistiche (ciclo,
-passi, batch, errori, tempo).
+passi, batch, errori, tempo). Il bottone **📊** in alto apre la
+[dashboard delle performance](#dashboard-delle-performance).
+
+Finché una run è in corso il portatile non va in sospensione nemmeno a coperchio
+chiuso: il server tiene un inhibitor `systemd-inhibit` (lid/sleep/idle) che vive
+esattamente quanto la run, senza cambiare nessuna impostazione di sistema.
 
 Durante la run:
 
@@ -174,10 +203,73 @@ Durante la run:
 - Sui siti in `FARA_GUARDED_HOSTS` (default `prolific.com,prolific.co`) l'agente
   non può entrare in `/about-you` né nelle pagine di logout: viene riportato
   all'elenco studi.
-- Rispetta il tempo minimo di completamento dello studio: se prova a inviare
-  troppo presto, gli viene detto di aspettare.
+- **Timer dello studio**: parte quando si passa da Prolific a un sito esterno,
+  qualunque sia il modo (click, Invio in un modale, redirect JS), con il minimo
+  letto dalla card dello studio che ha cliccato (e, se lì non lo trova, dal testo
+  della pagina). Finché mancano più di 30 s al minimo l'azione `terminate` viene
+  **rifiutata** e all'agente viene detto di usare `wait`. Tornando a `/studies` il
+  timer si ri-arma per lo studio successivo.
+- La **compilazione batch** è disattivata sulle pagine dei siti guardati: si usa
+  solo sui questionari esterni, non sull'interfaccia di Prolific.
+- **Click verificati**: dopo un click su una checkbox ne rilegge lo stato dal DOM
+  e, se non è cambiato, la ri-clicca via JS. Se il click finisce su un elemento
+  disabilitato (`disabled`, `aria-disabled`, classe `disabled`) l'agente viene
+  avvisato che probabilmente è rimasto un campo obbligatorio da compilare.
+- A studio completato chiude le schede extra rimaste aperte, così il ciclo
+  successivo riparte da una sola scheda.
 - Le istruzioni nei preset (es. saltare studi con audio/video) sono solo testo
   del compito: modificale a piacere.
+
+## Modalità di velocità
+
+Tre modalità che barattano qualità per velocità (si cambiano da Telegram e
+valgono per tutta la run):
+
+| Modalità | Screenshot inviato al modello | `max_tokens` | Immagini in contesto |
+|---|---|---|---|
+| `normal` (default) | PNG a risoluzione piena | 1024 | max 10, si taglia a 5 |
+| `hurry` | PNG ridotto al 75% | 512 | max 10, si taglia a 5 |
+| `super_fast` | JPEG q60 ridotto al 50% | 384 | max 5, si taglia a 2 |
+
+Se uno studio sta sforando il tempo minimo stimato la velocità **sale da sola**:
+`hurry` appena si supera il minimo, `super_fast` dopo 2 minuti di sforamento.
+L'escalation non scende mai di livello e, finito lo studio (o tornando
+all'elenco), si ripristina la modalità che avevi scelto tu.
+
+## Dashboard delle performance
+
+`http://127.0.0.1:8766/dashboard` (o il bottone **📊** nella GUI) legge tutti i
+transcript in `logs_pw/run_*/` e mostra: cicli totali, completati (`CODE` /
+`NOCODE`), cicli senza esito (`NONE`), incompleti, durata media per studio
+completato, cicli/ora sul tempo effettivo della sessione, un istogramma
+dell'attività per ora e la tabella degli studi completati con codice, durata e
+numero di passi. Si aggiorna da sola ogni 60 s e, mentre l'agente gira, ha un
+bottone **⏹ Ferma**.
+
+## Controllo da Telegram
+
+Con `telegram_config.py` configurato (vedi [setup](#6-telegram-opzionale)) il
+server fa polling dei comandi del bot. Tutti i comandi hanno anche la versione
+italiana (`avvia`, `ferma`, `riavvia`, `stato`, `veloce`, `velocissimo`,
+`aiuto`), con o senza `/`:
+
+| Comando | Cosa fa |
+|---|---|
+| `/start` | avvia l'agente con il **primo preset salvato**, senza navigare: parte da dov'è il browser |
+| `/stop` | ferma subito la run (come il tasto ■) |
+| `/restart` | ferma, riporta il browser su `/studies`, riavvia |
+| `/status` | screenshot live + stato, uptime, ciclo/passi/form/errori, fase, URL, timer dello studio, modalità velocità, studi recenti e guadagni delle ultime 24 h (solo studi approvati) |
+| `/normal`, `/hurry`, `/superfast` | cambiano [modalità di velocità](#modalità-di-velocità) |
+| `/help` | la lista dei comandi |
+
+Notifiche automatiche: 📝 studio iniziato (con la durata stimata e l'URL), ✅
+studio completato (con il codice o `NOCODE`), ❌ errore della run (tipo di
+eccezione e coda del traceback).
+
+Gli "studi recenti" e i guadagni arrivano dalla pagina `submissions` di
+Prolific, letta in una scheda temporanea aperta **solo nella pausa fra due
+cicli** (mai durante uno step), con cache di 60 s e aggiornamento a fine ciclo o
+ogni 5 minuti. Se la lettura fallisce, resta in cache il risultato precedente.
 
 ## API HTTP (tutto su loopback)
 
@@ -197,7 +289,7 @@ curl -X POST localhost:8766/agent/stop
 ```
 
 Altri endpoint: `/screen.png`, `/stream.mjpg` (video), `/agent/events` (SSE),
-`/presets`, `/click`, `/type`, `/key`, `/navigate`.
+`/dashboard` (HTML), `/presets`, `/click`, `/type`, `/key`, `/navigate`.
 
 ## Uso da riga di comando (senza GUI)
 
@@ -206,11 +298,41 @@ cd controller_pw
 ../venv_pw/bin/python controller.py "Clicca il bottone BLU." --url file:///data/test.html --max-rounds 10
 ```
 
+## Esecuzione su VM cloud
+
+Con un modello servito da un'API remota la GPU non serve più, quindi l'agente può
+stare sempre acceso su una VM piccola (gli script sono tarati su una Ubuntu 22.04
+ARM64, es. Oracle Cloud free tier). In `cloud/`:
+
+| Script | Dove si lancia | Cosa fa |
+|---|---|---|
+| `setup-vm.sh` | sulla VM, una volta | Docker, Python venv, cartelle (`data_pw`, `logs_pw`, `browser-profile-pw`) |
+| `sync-to-cloud.sh user@ip` | dal PC locale | rsync del codice **e del profilo browser già loggato** (così su Prolific non devi rifare il login) |
+| `build-docker.sh` | sulla VM | costruisce `fara-browser` / `fara-browser-pw` e avvia il container del browser |
+| `start-agent.sh` | sulla VM | carica `cloud/fara.env` e avvia `gui_server.py` su `:8766`, con log in `logs_pw/gui_server.out` |
+| `fara-agent.service` | sulla VM | unit systemd (`Restart=always`) per tenerlo su anche dopo reboot o crash |
+
+La configurazione sta in `cloud/fara.env`: `FARA_URL` / `FARA_MODEL` /
+`FARA_API_KEY` dell'API remota, `FARA_TOKEN_BUDGET` più generoso (le API cloud
+hanno finestre di contesto molto più grandi del 27B locale) e i path della VM.
+
+> `fara.env` contiene una chiave API: non committarlo. La GUI resta in ascolto
+> solo su loopback, quindi per usarla dal tuo PC apri un tunnel:
+> `ssh -L 8766:localhost:8766 utente@IP_DELLA_VM`.
+
+Quando `FARA_API_KEY` è impostata il controller si adatta da solo: manda
+l'header `Authorization: Bearer ...`, parla in HTTPS, non invia
+`chat_template_kwargs` (è un'estensione di llama-server) e, non avendo più
+l'endpoint `/tokenize`, stima i token con un fallback a ~4 caratteri per token.
+
 ## Variabili d'ambiente
 
 | Variabile | Default | Cosa fa |
 |---|---|---|
-| `FARA_URL` | `http://127.0.0.1:8090/v1/chat/completions` | endpoint del modello |
+| `FARA_URL` | `http://127.0.0.1:8090/v1/chat/completions` | endpoint del modello (chat completions, OpenAI-compatibile) |
+| `FARA_MODEL` | `Fara1.5-27B-Q4_K_M.gguf` | nome del modello passato nella richiesta |
+| `FARA_API_KEY` | *(vuota)* | se impostata: `Authorization: Bearer`, HTTPS e modalità "API cloud" (vedi sopra) |
+| `FARA_TOKEN_BUDGET` | `28000` | tetto di token del contesto prima del taglio di immagini/messaggi |
 | `FARA_CONTAINER` | `fara-browser-pw` | container del browser |
 | `FARA_CDP_URL` | `http://127.0.0.1:9333` | CDP di Chromium (per Playwright) |
 | `FARA_DATA_DIR` | `~/web-agent/data_pw` | cartella montata come `/data` |
@@ -223,7 +345,16 @@ cd controller_pw
 ## Log
 
 Ogni run scrive in `logs_pw/run_AAAAMMGG_HHMMSS/`: `transcript.jsonl` (cosa ha
-pensato/fatto a ogni passo) e `screenshot_NN.png`.
+pensato/fatto a ogni passo) e `screenshot_NN.png`. Nel transcript, accanto alle
+righe del dialogo col modello, ci sono righe `{"type": "diag"}` con lo stato
+"meccanico" di ogni passo (URL, sito guardato sì/no, azione, risultato, stato del
+timer, durata letta dalla card): servono per capire a posteriori perché il timer
+è partito o no. La dashboard aggrega tutti i transcript presenti; `logs_pw/`
+tiene le ultime 200 run e cancella le più vecchie.
+
+Altri file in `logs_pw/`: `gui_server.out` (log del server quando è avviato dagli
+script cloud o da systemd) e `submissions_api_debug.txt` (ultimo esito della
+lettura delle submission di Prolific).
 
 ## Test e benchmark
 
@@ -256,6 +387,9 @@ nei file `bench_*.out`.
 browser/            Dockerfile + entrypoint + policy (autofill/password manager disattivati) + cdp.py
 browser_pw/         Dockerfile che aggiunge socat per esporre CDP
 controller_pw/      codice dell'agente (agent_core, form_fill*, pw_bridge, gui_server, gui_index.html, test)
+                    + telegram_config.py (token del bot, da tenere privato)
+cloud/              deploy su VM: setup-vm.sh, sync-to-cloud.sh, build-docker.sh,
+                    start-agent.sh, fara-agent.service, fara.env
 data_pw/, data_test/  pagine HTML di test montate come /data
 tools/              utility (inject_each_cycle.py)
 bench_models/       risultati dei benchmark

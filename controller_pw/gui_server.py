@@ -659,6 +659,9 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
                 pass
     except Exception as e:
         _push_event({"type": "error", "message": str(e)})
+        import traceback
+        tb = traceback.format_exc()[-300:]
+        agent_core._notify_telegram(f"❌ Errore agent!\n{type(e).__name__}: {str(e)[:150]}\n\n{tb}")
     finally:
         if inhibitor is not None:
             inhibitor.terminate()
@@ -1517,7 +1520,9 @@ def _telegram_bot_loop():
             {"command": "stop",    "description": "Ferma l'agente"},
             {"command": "restart", "description": "Ferma, torna a studies, riavvia"},
             {"command": "status",  "description": "Stato + screenshot + studi recenti"},
-            {"command": "hurry",   "description": "Toggle modalità veloce (max_tokens ridotto)"},
+            {"command": "normal",  "description": "Modalità normale (qualità massima)"},
+            {"command": "hurry",   "description": "Modalità veloce (immagini ridotte)"},
+            {"command": "superfast","description": "Modalità super-veloce (massima velocità)"},
             {"command": "help",    "description": "Lista comandi"},
         ]}).encode()
         req = _ur.Request(f"{base}/setMyCommands", data=cmds,
@@ -1636,8 +1641,10 @@ def _telegram_bot_loop():
 
         if loop:
             lines.append("🔁 Modalità loop attiva")
-        if agent_core._hurry_mode:
-            lines.append("⚡ Modalità hurry attiva")
+        if agent_core._speed_mode == "super_fast":
+            lines.append("🚀 Modalità SUPER-FAST")
+        elif agent_core._speed_mode == "hurry":
+            lines.append("⚡ Modalità hurry")
 
         # Submissions from Prolific (opens a tab briefly when agent is idle)
         try:
@@ -1714,10 +1721,16 @@ def _telegram_bot_loop():
             elif text in ("/restart", "restart", "/riavvia", "riavvia"):
                 tg_send("🔄 Riavvio in corso...")
                 tg_send(_do_restart())
+            elif text in ("/normal", "normal", "/normale", "normale"):
+                agent_core.set_speed("normal")
+                tg_send("🐢 Modalità normale attiva")
             elif text in ("/hurry", "hurry", "/veloce", "veloce"):
-                agent_core.set_hurry(not agent_core._hurry_mode)
-                st = "⚡ ATTIVA" if agent_core._hurry_mode else "🐢 DISATTIVA"
-                tg_send(f"Modalità hurry: {st}")
+                agent_core.set_speed("hurry")
+                tg_send("⚡ Modalità hurry attiva")
+            elif text in ("/superfast", "superfast", "/super-fast", "super-fast",
+                          "/velocissimo", "velocissimo"):
+                agent_core.set_speed("super_fast")
+                tg_send("🚀 Modalità SUPER-FAST attiva — qualità ridotta, massima velocità")
             elif text in ("/help", "help", "/aiuto", "aiuto"):
                 tg_send(
                     "🤖 Comandi disponibili:\n"
@@ -1725,8 +1738,11 @@ def _telegram_bot_loop():
                     "/stop — Ferma l'agente\n"
                     "/restart — Ferma, torna a studies, riavvia\n"
                     "/status — Stato + screenshot + studi recenti\n"
-                    "/hurry — Toggle modalità veloce\n"
-                    "/help — Questa lista"
+                    "\n⚙️ Velocità:\n"
+                    "/normal — Qualità massima (default)\n"
+                    "/hurry — Veloce (immagini 75%, token ridotti)\n"
+                    "/superfast — Super-veloce (img 50%, JPEG, contesto ridotto)\n"
+                    "\n/help — Questa lista"
                 )
 
 

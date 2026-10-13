@@ -129,10 +129,20 @@ def take_screenshot(run_dir: Path, step: int) -> Image.Image:
 
 
 def encode_for_model(img: Image.Image) -> str:
+    if _speed_mode == "super_fast":
+        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+    elif _speed_mode == "hurry":
+        img = img.resize((img.width * 3 // 4, img.height * 3 // 4), Image.LANCZOS)
     rh, rw = fp.smart_resize(img.height, img.width)
     buf = io.BytesIO()
-    img.resize((rw, rh)).save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    resized = img.resize((rw, rh))
+    if _speed_mode == "super_fast":
+        resized.save(buf, format="JPEG", quality=60)
+        mime = "image/jpeg"
+    else:
+        resized.save(buf, format="PNG")
+        mime = "image/png"
+    return f"data:{mime};base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 # Whether the chat template opens a <think> block for the model to reason in.
@@ -145,12 +155,46 @@ def encode_for_model(img: Image.Image) -> str:
 # restore the template default.
 ENABLE_THINKING = os.environ.get("FARA_ENABLE_THINKING", "0") == "1"
 
+_speed_mode: str = "normal"  # "normal", "hurry", "super_fast"
+_speed_user: str = "normal"  # what the user explicitly chose (restored after auto-escalation)
+_speed_auto: bool = False    # True while speed was auto-escalated by the timer
+
+# Back-compat alias
 _hurry_mode: bool = False
 
 
+def set_speed(mode: str):
+    global _speed_mode, _speed_user, _speed_auto, _hurry_mode
+    _speed_mode = mode
+    _speed_user = mode
+    _speed_auto = False
+    _hurry_mode = mode != "normal"
+
+
+_SPEED_RANK = {"normal": 0, "hurry": 1, "super_fast": 2}
+
+
+def _auto_escalate(mode: str):
+    """Set speed without changing the user's saved preference. Never downgrades."""
+    global _speed_mode, _speed_auto, _hurry_mode
+    if _SPEED_RANK.get(mode, 0) <= _SPEED_RANK.get(_speed_mode, 0):
+        return
+    _speed_mode = mode
+    _speed_auto = True
+    _hurry_mode = mode != "normal"
+
+
+def _restore_user_speed():
+    """Restore the speed mode the user explicitly chose."""
+    global _speed_mode, _speed_auto, _hurry_mode
+    if _speed_auto:
+        _speed_mode = _speed_user
+        _speed_auto = False
+        _hurry_mode = _speed_mode != "normal"
+
+
 def set_hurry(enabled: bool):
-    global _hurry_mode
-    _hurry_mode = enabled
+    set_speed("hurry" if enabled else "normal")
 
 
 def call_fara(messages: list, step: int = None) -> str:
@@ -158,7 +202,7 @@ def call_fara(messages: list, step: int = None) -> str:
         "model": FARA_MODEL,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 512 if _hurry_mode else 1024,
+        "max_tokens": {"normal": 1024, "hurry": 512, "super_fast": 384}[_speed_mode],
     }
     # chat_template_kwargs is llama-server-only — skip when using a cloud API
     if not FARA_API_KEY:
@@ -287,11 +331,15 @@ def _image_turn_idxs(messages: list) -> list:
 
 
 def _trim_to_budget(messages: list, budget: int = CONTEXT_TOKEN_BUDGET,
-                     max_images: int = MAX_IMAGES_IN_CONTEXT,
-                     trim_to: int = TRIM_TO_IMAGES) -> int:
+                     max_images: int | None = None,
+                     trim_to: int | None = None) -> int:
     """Brings `messages` under `budget`, verified against the real
     tokenizer at every stage rather than assumed. Returns the real token
     count after trimming (0 trims performed if already under budget)."""
+    if max_images is None:
+        max_images = 5 if _speed_mode == "super_fast" else MAX_IMAGES_IN_CONTEXT
+    if trim_to is None:
+        trim_to = 2 if _speed_mode == "super_fast" else TRIM_TO_IMAGES
     image_idxs = _image_turn_idxs(messages)
     if len(image_idxs) > max_images:
         keep_from = len(image_idxs) - trim_to
@@ -399,14 +447,33 @@ def safe_page_for(url: str) -> str:
     return f"{pr.scheme}://{pr.netloc}/studies"
 
 
+def _close_extra_tabs():
+    """Close all tabs except the active one. Called after study completion."""
+    try:
+        def _do(b):
+            active = b.active_page()
+            for p in b.pages():
+                if p is not active:
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
+        pw_bridge.run(_do)
+    except Exception:
+        pass
+
+
 def _extract_study_duration(x: float | None = None, y: float | None = None) -> float | None:
     """Return the estimated completion time in minutes from the current page.
 
     When x/y viewport coordinates are provided, walks up the DOM from the
     element at that point so we read only the study card being clicked —
     not durations of other study cards visible on the same page.
+    Falls back to the full page text when the walk-up finds nothing (e.g.
+    clicks on buttons/modals far from the duration text in the DOM).
     """
     try:
+        text = ""
         if x is not None and y is not None:
             text = pw_bridge.evaluate(f"""
                 (function() {{
@@ -419,7 +486,7 @@ def _extract_study_duration(x: float | None = None, y: float | None = None) -> f
                     return '';
                 }})()
             """) or ""
-        else:
+        if not re.search(r"\d+\s*(?:minute|min)", text, re.IGNORECASE):
             text = pw_bridge.evaluate("document.body.innerText") or ""
         m = re.search(r"(\d+)\s*(?:minute|min)s?", text, re.IGNORECASE)
         if m:
@@ -510,6 +577,30 @@ def _js_click_near_checkbox(x: float, y: float):
         pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
     except Exception:
         pass
+
+
+def _check_disabled_near(x: float, y: float) -> bool:
+    """Return True if the clicked element or nearest button/submit is disabled."""
+    _JS = """([x, y]) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el) return false;
+        // Check the element itself and walk up to find a button/input
+        let node = el;
+        for (let i = 0; i < 10 && node && node !== document.body; i++) {
+            const tag = node.tagName;
+            if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'A') {
+                if (node.disabled || node.getAttribute('aria-disabled') === 'true'
+                    || node.classList.contains('disabled'))
+                    return true;
+            }
+            node = node.parentElement;
+        }
+        return false;
+    }"""
+    try:
+        return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+    except Exception:
+        return False
 
 
 def dispatch_action(action_type: str, args: dict) -> str:
@@ -856,7 +947,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                        "text": f"Più di {n} s fuori dall'elenco studi senza svolgerne uno: riportato a /studies.",
                        "messages": messages}
 
-            if batch_fill:
+            if batch_fill and not _on_guarded_site(here):
                 batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
                     task, attempted_form_signatures, survey_memory)
                 transcript.write(json.dumps(
@@ -894,6 +985,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # Reset timer when back at the studies list (timer re-arms for next study).
             if here_guarded and _LIST_PATH.match(urlparse(here).path or ""):
                 study_timer.reset()
+                _restore_user_speed()
                 _last_guarded_duration = None
                 _prev_was_guarded = False
 
@@ -915,6 +1007,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _live({"type": "timer", "elapsed": study_timer.elapsed(),
                            "remaining": study_timer.remaining(),
                            "min_seconds": study_timer.min_seconds})
+                    if study_timer.min_seconds > 0:
+                        over = study_timer.elapsed() - study_timer.min_seconds
+                        if over > 120:
+                            _auto_escalate("super_fast")
+                        elif over > 0:
+                            _auto_escalate("hurry")
                 text = f"{prefix}{fp.USER_MESSAGE}"
 
             messages.append({
@@ -995,6 +1093,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
 
+            if action_type == "left_click" and not pending_user_response:
+                coord = args.get("coordinate")
+                if coord and _check_disabled_near(coord[0], coord[1]):
+                    pending_user_response = (
+                        "The button you clicked appears to be DISABLED (greyed out). "
+                        "This usually means a required field on the page has not been "
+                        "filled in yet. Look carefully at the page for any unanswered "
+                        "questions, unselected radio buttons, empty required fields, "
+                        "or unchecked mandatory checkboxes. Fill them in first, then "
+                        "try clicking the button again.")
+
 
             # --- diagnostic log entry (separate from model transcript) ---
             diag: dict = {
@@ -1034,6 +1143,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     continue
                 yield step_event
                 answer = args.get("answer", "")
+                _restore_user_speed()
+                _close_extra_tabs()
                 if answer.startswith("CODE:") or answer == "NOCODE":
                     _notify_telegram(f"Fara studio completato ✅\n{answer}\nCiclo: {run_dir.name if run_dir else '?'}")
                 yield {"type": "done", "answer": answer, "messages": messages}
