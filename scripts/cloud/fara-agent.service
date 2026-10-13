@@ -1,0 +1,33 @@
+# systemd service — keeps Fara running on the VM at all times.
+#
+# Install (as the user that owns ~/web-agent, here assumed to be `ubuntu`):
+#   sudo cp ~/web-agent/scripts/cloud/fara-agent.service /etc/systemd/system/
+#   # if your user is NOT ubuntu, fix the two lines that name it:
+#   sudo sed -i "s/^User=.*/User=$USER/;s#^EnvironmentFile=.*#EnvironmentFile=$HOME/web-agent/scripts/cloud/fara.env#" \
+#       /etc/systemd/system/fara-agent.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fara-agent
+#
+# Logs:   journalctl -u fara-agent -f
+# Status: systemctl status fara-agent
+#
+# Every path except these two comes from FARA_HOME in fara.env, so there is
+# only one place to change if the code lives somewhere else.
+
+[Unit]
+Description=Fara Agent GUI Server
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+EnvironmentFile=/home/ubuntu/web-agent/scripts/cloud/fara.env
+Environment=FARA_PORT=8766
+ExecStartPre=-/usr/bin/docker start fara-browser-pw
+ExecStart=/bin/bash -c 'cd "$FARA_HOME/agent" && exec "$FARA_HOME/venv_pw/bin/python" gui_server.py --port "$FARA_PORT"'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
