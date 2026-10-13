@@ -1,6 +1,9 @@
 import sys, time, json
+from pathlib import Path
 from playwright.sync_api import sync_playwright
-out = sys.argv[1] if len(sys.argv) > 1 else "/home/riccardo/web-agent/gui_shots"
+out = sys.argv[1] if len(sys.argv) > 1 else str(
+    Path(__file__).resolve().parent.parent / "var" / "gui_shots")
+Path(out).mkdir(parents=True, exist_ok=True)
 with sync_playwright() as p:
     b = p.chromium.launch(channel="chrome", headless=True, args=["--no-sandbox"])
     pg = b.new_page(viewport={"width": 1500, "height": 900})

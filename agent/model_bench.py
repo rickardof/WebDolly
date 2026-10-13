@@ -1,6 +1,6 @@
 """Identical benchmark for any Fara model served on 127.0.0.1:8090.
 
-Usage: model_bench.py <label>          -> writes ~/web-agent/bench_models/<label>.json
+Usage: model_bench.py <label>          -> writes bench/bench_models/<label>.json
 
 Parts (all measured, nothing taken from the paper):
   A. raw speed: generation tok/s and image-prompt processing speed
@@ -18,7 +18,8 @@ from PIL import Image
 import agent_core as ac, fara_prompt as fp, pw_bridge as pb, form_fill as base, form_fill_pw as ff
 
 LABEL = sys.argv[1]
-OUT = Path.home() / "web-agent" / "bench_models"; OUT.mkdir(exist_ok=True)
+OUT = Path(__file__).resolve().parent.parent / "bench" / "bench_models"
+OUT.mkdir(parents=True, exist_ok=True)
 SHOTS = Path("/tmp/model_bench_shots"); SHOTS.mkdir(exist_ok=True)
 R = {"label": LABEL}
 
@@ -130,7 +131,7 @@ def part_c():
     ]
     rows = []
     for name, rel in cases:
-        img = Image.open(Path.home() / "web-agent/logs_pw" / rel).convert("RGB")
+        img = Image.open(ac.LOG_ROOT / rel).convert("RGB")
         msgs = [{"role": "system", "content": fp.SYSTEM_PROMPT},
                 {"role": "user", "content": [{"type": "image_url", "image_url": {"url": ac.encode_for_model(img)}},
                                              {"type": "text", "text": task}]}]

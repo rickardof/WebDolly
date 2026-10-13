@@ -19,6 +19,7 @@ import select
 import socket
 import shlex
 import ctypes
+import gzip
 import os
 import signal
 import json
@@ -26,22 +27,55 @@ import queue
 import subprocess
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cancel
 import pw_bridge
 import agent_core
+import study_cache
 from agent_core import run_agent, docker_exec, get_current_url, KEY_MAP, DATA_DIR, CONTAINER
 
 HERE = Path(__file__).parent
 MAX_EVENTS = 500
+
+# A second server (the isolated test stack on :8767, or a smoke test) must not
+# run the side threads: both talk to things the live instance owns -- the same
+# Telegram bot token, where two getUpdates pollers steal each other's
+# messages, and the browser, where the submissions updater opens a tab.
+TEST_INSTANCE = os.environ.get("FARA_TEST_INSTANCE", "") not in ("", "0")
 PRESETS_FILE = Path(os.environ.get("FARA_PRESETS", HERE / "presets.json"))
 presets_lock = threading.Lock()
 
 _submissions_cache: dict = {"data": [], "ts": 0.0}
 _submissions_lock = threading.Lock()
 _submissions_trigger = threading.Event()   # set on each "done" event
+
+
+def _transcript_files() -> list:
+    """Every run transcript, newest last. Runs older than FARA_MAX_RUNS keep
+    their transcript gzipped (see agent_core._prune_old_runs), so both forms
+    have to be looked for or the stats silently lose their history."""
+    root = Path(agent_core.LOG_ROOT)
+    found: dict = {}
+    try:
+        for pat in ("run_*/transcript.jsonl", "run_*/transcript.jsonl.gz"):
+            for f in root.glob(pat):
+                found.setdefault(f.parent.name, f)
+    except Exception:
+        return []
+    return [found[k] for k in sorted(found)]
+
+
+def _read_transcript(path) -> str:
+    try:
+        if str(path).endswith(".gz"):
+            with gzip.open(path, "rt", errors="replace") as f:
+                return f.read()
+        return Path(path).read_text(errors="replace")
+    except Exception:
+        return ""
 
 
 def _dbg(msg: str):
@@ -145,9 +179,9 @@ def _agent_submissions() -> list[dict]:
     # Count runs where the agent actually submitted something (CODE or NOCODE)
     completed = 0
     try:
-        for p in sorted(Path(LOG_ROOT).glob("run_*/transcript.jsonl"), reverse=True)[:200]:
+        for p in list(reversed(_transcript_files()))[:200]:
             try:
-                for line in p.read_text().splitlines():
+                for line in _read_transcript(p).splitlines():
                     d = _json.loads(line)
                     if d.get("action_type") == "terminate":
                         ans = d.get("args", {}).get("answer", "")
@@ -395,10 +429,13 @@ def _status_payload(since: int = 0, with_events: bool = True, fresh_url: bool = 
             "stats": dict(state.get("stats", {})),
             "pending_question": state["pending_question"],
             "phase": state.get("phase"),
+            "study_timer": state.get("study_timer"),
+            "skip_av": state.get("skip_av", False),
         }
         if with_events:
             payload["events"] = [e for e in state["events"] if e.get("seq", 0) > since]
     payload["url"] = _cached_url() if fresh_url else _url_cache["v"]
+    payload["speed"] = agent_core.speed_state()
     return payload
 
 
@@ -420,6 +457,10 @@ def _on_live(msg: dict):
                 "min_seconds": msg.get("min_seconds", 0),
             }
     hub.publish("live", msg)
+    if msg.get("type") == "speed":
+        # The mode can change from the GUI, from Telegram or on its own when a
+        # study overruns: push the whole state so every client agrees on it.
+        _publish_state()
 
 
 agent_core.live_hook = _on_live
@@ -491,7 +532,8 @@ def _pop_injected():
 
 
 def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue,
-                   messages: list = None, batch_fill: bool = False, wander_seconds: float = 0):
+                   messages: list = None, batch_fill: bool = False, wander_seconds: float = 0,
+                   skip_av: bool = False):
     """Drives a single agent_core.run_agent generator to completion.
 
     Returns (ok, messages): ok is False if the run was aborted via the stop
@@ -503,7 +545,8 @@ def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue
     never has to be handled here.
     """
     try:
-        return _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill, wander_seconds)
+        return _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill,
+                            wander_seconds, skip_av)
     except cancel.Cancelled:
         # Stop pressed while the agent was blocked on a model call or a
         # wait: cancel.cancel_all() cut the request, the generator is gone.
@@ -511,9 +554,10 @@ def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue
         return False, messages
 
 
-def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill, wander_seconds=0):
+def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill,
+                  wander_seconds=0, skip_av=False):
     gen = run_agent(task, url, max_rounds, stop_event=stop_event, messages=messages,
-                     batch_fill=batch_fill, wander_seconds=wander_seconds)
+                     batch_fill=batch_fill, wander_seconds=wander_seconds, skip_av=skip_av)
     try:
         event = next(gen)
     except StopIteration:
@@ -604,8 +648,20 @@ def _inhibit_sleep():
         return None
 
 
+# How long to wait before retrying after a cycle blew up, by consecutive
+# failure count. A model timeout clears in seconds, a dead browser container
+# does not, so the wait grows instead of hammering the same error.
+ERROR_BACKOFF = (30, 60, 120, 300)
+
+
+def _backoff(consecutive_errors: int) -> int:
+    """Seconds to wait before retrying, by how many cycles failed in a row."""
+    i = max(1, int(consecutive_errors)) - 1
+    return ERROR_BACKOFF[min(i, len(ERROR_BACKOFF) - 1)]
+
+
 def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval: float,
-                  batch_fill: bool = False, wander_seconds: float = 0):
+                  batch_fill: bool = False, wander_seconds: float = 0, skip_av: bool = False):
     stop_event = state["stop_event"]
     answer_queue = state["answer_queue"]
     # Each cycle starts a FRESH conversation, with no memory of earlier
@@ -621,6 +677,7 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
     inhibitor = _inhibit_sleep()
     try:
         cycle = 0
+        errors_in_a_row = 0
         while True:
             cycle += 1
             if loop:
@@ -633,10 +690,43 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
             # Navigate (if requested at all) only on the first cycle; later
             # cycles continue from wherever the page is (refreshed below),
             # instead of re-navigating to the start URL every time.
-            ok, _ = run_one_cycle(task, url if cycle == 1 else "", max_rounds,
-                                  stop_event, answer_queue,
-                                  messages=None, batch_fill=batch_fill,
-                                  wander_seconds=wander_seconds)
+            try:
+                ok, _ = run_one_cycle(task, url if cycle == 1 else "", max_rounds,
+                                      stop_event, answer_queue,
+                                      messages=None, batch_fill=batch_fill,
+                                      wander_seconds=wander_seconds, skip_av=skip_av)
+                errors_in_a_row = 0
+            except Exception as e:
+                # One bad cycle must not end a 24/7 run. A model timeout, a CDP
+                # hiccup or a browser that died gets reported, waited out and
+                # retried from the studies list; only a single (non-loop) run
+                # still fails outright, where there is no next cycle to save.
+                if not loop or stop_event.is_set():
+                    raise
+                errors_in_a_row += 1
+                delay = _backoff(errors_in_a_row)
+                _push_event({"type": "error",
+                             "message": f"Ciclo {cycle} interrotto — {type(e).__name__}: "
+                                        f"{str(e)[:200]} · riprovo tra {delay}s "
+                                        f"({errors_in_a_row}° errore di fila)"})
+                agent_core._notify_telegram(
+                    f"⚠️ Ciclo {cycle} fallito ({errors_in_a_row}° di fila)\n"
+                    f"{type(e).__name__}: {str(e)[:150]}\n"
+                    f"Riprovo tra {delay}s\n\n{traceback.format_exc()[-300:]}")
+                if stop_event.wait(delay):
+                    return
+                # Back to a known page, whatever state the browser is in. If
+                # the bridge itself can't do it (a wedged tab makes every
+                # Playwright call hang), replace the tab over plain CDP HTTP.
+                target = home_url or agent_core.studies_url()
+                try:
+                    pw_bridge.reset_to(target)
+                    pw_bridge.wait_for_content()
+                except Exception:
+                    if pw_bridge.recycle_tab(target):
+                        _push_event({"type": "notice",
+                                     "text": "Scheda del browser bloccata: sostituita con una nuova."})
+                continue
             if not home_url:
                 home_url = start_page_url
             if not ok or not loop or stop_event.is_set():
@@ -678,7 +768,7 @@ def _build_dashboard() -> str:
     from collections import defaultdict
     from datetime import datetime
 
-    runs = sorted(agent_core.LOG_ROOT.glob("run_*/transcript.jsonl"))
+    runs = _transcript_files()
     records = []
     for tf in runs:
         run_name = tf.parent.name
@@ -686,7 +776,7 @@ def _build_dashboard() -> str:
             started = datetime.strptime(run_name.replace("run_", ""), "%Y%m%d_%H%M%S")
         except Exception:
             continue
-        lines = tf.read_text(errors="replace").splitlines()
+        lines = _read_transcript(tf).splitlines()
         steps, outcome, answer = 0, "INCOMPLETE", ""
         for line in lines:
             try:
@@ -1223,6 +1313,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(load_presets())
         elif self.path == "/dashboard":
             self._send_bytes(_build_dashboard().encode(), "text/html; charset=utf-8")
+        elif self.path == "/study_cache":
+            self._send_json({"entries": study_cache.entries(),
+                             "titles": study_cache.titles()})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1357,6 +1450,7 @@ class Handler(BaseHTTPRequestHandler):
                 poll_interval = float(body.get("poll_interval", 60))
                 batch_fill = bool(body.get("batch_fill", False))
                 wander_seconds = max(0.0, float(body.get("wander_seconds", 90)))
+                skip_av = bool(body.get("skip_av", False))
                 with state_lock:
                     if state["running"]:
                         return self._send_json({"error": "agent already running"}, status=409)
@@ -1374,10 +1468,12 @@ class Handler(BaseHTTPRequestHandler):
                     state["stop_event"] = threading.Event()
                     state["answer_queue"] = queue.Queue()
                     state["phase"] = None
+                    state["skip_av"] = skip_av
                 _publish_state()
                 threading.Thread(
                     target=agent_driver,
-                    args=(task, url, max_rounds, loop, poll_interval, batch_fill, wander_seconds), daemon=True,
+                    args=(task, url, max_rounds, loop, poll_interval, batch_fill, wander_seconds,
+                          skip_av), daemon=True,
                 ).start()
                 return self._send_json({"ok": True})
 
@@ -1402,6 +1498,25 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send_json({"error": "agent is not running"}, status=409)
                     state["inject_message"] = text
                 return self._send_json({"ok": True})
+
+            if self.path == "/agent/speed":
+                body = self._read_json()
+                mode = str(body.get("mode", "")).strip()
+                if not agent_core.set_speed(mode):
+                    return self._send_json(
+                        {"error": f"unknown speed mode: {mode!r}",
+                         "modes": list(agent_core.SPEED_MODES)}, status=400)
+                return self._send_json({"ok": True, "speed": agent_core.speed_state()})
+
+            if self.path == "/study_cache/clear":
+                n = study_cache.clear()
+                _publish_state()
+                return self._send_json({"ok": True, "cleared": n})
+
+            if self.path == "/study_cache/forget":
+                body = self._read_json()
+                key = str(body.get("key", ""))
+                return self._send_json({"ok": study_cache.forget(key)})
 
             if self.path == "/agent/stop":
                 with state_lock:
@@ -1457,6 +1572,8 @@ class Handler(BaseHTTPRequestHandler):
 def _telegram_bot_loop():
     """Background thread: polls Telegram for commands."""
     import urllib.request as _ur
+    if TEST_INSTANCE:
+        return
     try:
         import telegram_config as _tg
     except ImportError:
@@ -1520,6 +1637,7 @@ def _telegram_bot_loop():
             {"command": "stop",    "description": "Ferma l'agente"},
             {"command": "restart", "description": "Ferma, torna a studies, riavvia"},
             {"command": "status",  "description": "Stato + screenshot + studi recenti"},
+            {"command": "inject",  "description": "Manda un'istruzione extra all'agente"},
             {"command": "normal",  "description": "Modalità normale (qualità massima)"},
             {"command": "hurry",   "description": "Modalità veloce (immagini ridotte)"},
             {"command": "superfast","description": "Modalità super-veloce (massima velocità)"},
@@ -1553,6 +1671,7 @@ def _telegram_bot_loop():
             state["stop_event"]  = threading.Event()
             state["answer_queue"] = queue.Queue()
             state["phase"]     = None
+            state["skip_av"]   = bool(p.get("skip_av", False))
         _publish_state()
         threading.Thread(
             target=agent_driver,
@@ -1564,6 +1683,7 @@ def _telegram_bot_loop():
                 float(p.get("poll_interval", 60)),
                 bool(p.get("batch_fill", False)),
                 max(0.0, float(p.get("wander_seconds", 90))),
+                bool(p.get("skip_av", False)),
             ),
             daemon=True,
         ).start()
@@ -1642,9 +1762,15 @@ def _telegram_bot_loop():
         if loop:
             lines.append("🔁 Modalità loop attiva")
         if agent_core._speed_mode == "super_fast":
-            lines.append("🚀 Modalità SUPER-FAST")
+            lines.append("🚀 Modalità SUPER-FAST" + (" (automatica)" if agent_core._speed_auto else ""))
         elif agent_core._speed_mode == "hurry":
-            lines.append("⚡ Modalità hurry")
+            lines.append("⚡ Modalità hurry" + (" (automatica)" if agent_core._speed_auto else ""))
+        try:
+            n_skipped = len(study_cache.entries())
+            if n_skipped:
+                lines.append(f"⏭ Studi scartati in memoria: {n_skipped}")
+        except Exception:
+            pass
 
         # Submissions from Prolific (opens a tab briefly when agent is idle)
         try:
@@ -1705,7 +1831,12 @@ def _telegram_bot_loop():
             # only accept messages from the authorized chat
             if str(msg.get("chat", {}).get("id", "")) != chat_id:
                 continue
-            text = (msg.get("text") or "").strip().lower().split()[0]
+            raw = (msg.get("text") or "").strip()
+            if not raw:
+                continue      # photo, sticker, service message: nothing to parse
+            parts = raw.split(maxsplit=1)
+            text = parts[0].lower()
+            arg = parts[1].strip() if len(parts) > 1 else ""
             if text in ("/stop", "stop", "/ferma", "ferma"):
                 with state_lock:
                     running = state["running"]
@@ -1721,6 +1852,16 @@ def _telegram_bot_loop():
             elif text in ("/restart", "restart", "/riavvia", "riavvia"):
                 tg_send("🔄 Riavvio in corso...")
                 tg_send(_do_restart())
+            elif text in ("/inject", "inject", "/istruzione", "istruzione", "/msg", "msg"):
+                if not arg:
+                    tg_send("Scrivi anche il testo:\n/inject <istruzione per l'agente>")
+                else:
+                    with state_lock:
+                        running = state["running"]
+                        if running:
+                            state["inject_message"] = arg
+                    tg_send(f"📨 Istruzione in coda, la riceve al prossimo passo:\n{arg}"
+                            if running else "ℹ️ L'agente non è in esecuzione.")
             elif text in ("/normal", "normal", "/normale", "normale"):
                 agent_core.set_speed("normal")
                 tg_send("🐢 Modalità normale attiva")
@@ -1738,6 +1879,7 @@ def _telegram_bot_loop():
                     "/stop — Ferma l'agente\n"
                     "/restart — Ferma, torna a studies, riavvia\n"
                     "/status — Stato + screenshot + studi recenti\n"
+                    "/inject <testo> — Istruzione extra per la run in corso\n"
                     "\n⚙️ Velocità:\n"
                     "/normal — Qualità massima (default)\n"
                     "/hurry — Veloce (immagini 75%, token ridotti)\n"
@@ -1751,6 +1893,8 @@ def _submissions_auto_updater():
     agent cycle ends (triggered by the 'done' event) or on a 5-minute
     fallback timer. Only runs the tab fetch during the inter-cycle idle
     window (phase=None) so the agent is never interrupted mid-cycle."""
+    if TEST_INSTANCE:
+        return
     time.sleep(20)  # let the browser settle after server start
     _submissions_trigger.set()   # fetch once on startup if agent is idle
     while True:

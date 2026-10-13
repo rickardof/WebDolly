@@ -2,11 +2,13 @@
 Runs against a TEST gui_server instance (default :8767, test browser container, stub or real model)
 -- never point it at the port of a live run. Usage: gui_live_e2e.py [base_url] [quick]"""
 import statistics as st, subprocess, sys, time
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8767"
 assert "8766" not in BASE, "refusing to run against the production GUI"
-OUT = "/home/riccardo/web-agent/gui_shots_live"
+OUT = str(Path(__file__).resolve().parent.parent / "var" / "gui_shots_live")
+Path(OUT).mkdir(parents=True, exist_ok=True)
 CONTAINER = "fara-browser-test"
 res = []
 def check(name, ok, detail=""):

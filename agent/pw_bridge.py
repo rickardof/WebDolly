@@ -135,6 +135,51 @@ def run(fn, *args, **kwargs):
     return bridge().call(fn, *args, **kwargs)
 
 
+def drop_connection():
+    """Make the next call reconnect over CDP, from any thread.
+
+    Deliberately not submitted through the worker queue: it is used exactly
+    when the worker is stuck on a dead page, where a queued job would wait
+    behind it. Writing the attribute is safe -- the worker only ever reads
+    it to decide whether to reconnect, and a redundant reconnect is harmless.
+    """
+    b = _bridge
+    if b is not None:
+        b._browser = None
+        b._active, b._known = None, []
+
+
+def recycle_tab(url: str) -> bool:
+    """Replace the current tab with a fresh one, over plain CDP HTTP.
+
+    Measured after a hard restart of the server: Playwright reattached to a
+    tab whose renderer had wedged, `page.url` came back as '' and every
+    evaluate() hung until the bridge timeout -- so nothing that goes through
+    Playwright could fix it. The browser's own HTTP endpoint still answers,
+    and a new tab comes up clean, so recovery goes around the bridge
+    entirely and then forces it to reconnect.
+    """
+    import json as _json
+    import urllib.request as _ur
+    base = CDP_URL.rstrip("/")
+    try:
+        with _ur.urlopen(f"{base}/json/list", timeout=5) as r:
+            old = [t.get("id") for t in _json.load(r) if t.get("type") == "page"]
+        req = _ur.Request(f"{base}/json/new?{url}", method="PUT")
+        with _ur.urlopen(req, timeout=20) as r:
+            new_id = _json.load(r).get("id")
+    except Exception:
+        return False
+    for tid in old:
+        if tid and tid != new_id:
+            try:
+                _ur.urlopen(f"{base}/json/close/{tid}", timeout=5).read()
+            except Exception:
+                pass
+    drop_connection()
+    return bool(new_id)
+
+
 # -- convenience operations used by the agent/GUI ----------------------------
 
 def current_url() -> str:

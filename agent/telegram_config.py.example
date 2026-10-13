@@ -1,0 +1,18 @@
+"""Telegram bot config — copy to telegram_config.py and fill in.
+
+    cp controller_pw/telegram_config.py.example controller_pw/telegram_config.py
+
+How to get the two values:
+  1. open a chat with @BotFather on Telegram, send /newbot, follow the
+     prompts: it replies with the token;
+  2. send any message to your new bot, then open
+     https://api.telegram.org/bot<TOKEN>/getUpdates and read
+     result[0].message.chat.id — that is your chat id.
+
+The bot only answers that one chat id, so keep both values private: the
+token alone is enough for anyone to drive this agent. The real file is in
+.gitignore; if it is missing, bot and notifications are skipped silently
+and everything else works the same.
+"""
+TELEGRAM_TOKEN   = ""   # e.g. "123456789:AAE...": from @BotFather
+TELEGRAM_CHAT_ID = ""   # e.g. "12345678": your own chat id

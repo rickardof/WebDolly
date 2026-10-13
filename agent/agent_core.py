@@ -23,6 +23,7 @@ the human's answer instead of the generic "next screenshot" prompt.
 
 import ast
 import base64
+import gzip
 import io
 import json
 import shutil
@@ -38,6 +39,7 @@ from PIL import Image
 import fara_prompt as fp
 import cancel
 import form_fill_pw as form_fill
+import study_cache
 import os
 import re
 import pw_bridge
@@ -58,8 +60,11 @@ def _notify_telegram(msg: str) -> None:
     except Exception:
         pass
 CONTAINER = os.environ.get("FARA_CONTAINER", "fara-browser-pw")
-DATA_DIR = Path(os.environ.get("FARA_DATA_DIR", Path.home() / "web-agent" / "data_pw"))
-LOG_ROOT = Path(os.environ.get("FARA_LOG_ROOT", Path.home() / "web-agent" / "logs_pw"))
+# Everything is found relative to the checkout, so moving or renaming the
+# folder (or running on a VM with a different user) needs no edits.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = Path(os.environ.get("FARA_DATA_DIR", REPO_ROOT / "fixtures" / "pw"))
+LOG_ROOT = Path(os.environ.get("FARA_LOG_ROOT", REPO_ROOT / "var" / "logs" / "pw"))
 
 # Optional observer for the GUI: called with small dicts describing what the
 # agent is doing right now ({"type": "phase"|"token"|"target", ...}). These
@@ -81,16 +86,40 @@ def _live(msg: dict):
 # Each run writes one screenshot per step under LOG_ROOT/run_*/. For a
 # 24/7 polling loop this grows without bound unless pruned -- keep only the
 # most recent MAX_RUN_DIRS run directories, oldest deleted first.
-MAX_RUN_DIRS = 200
+MAX_RUN_DIRS = int(os.environ.get("FARA_MAX_RUNS", "200"))
 
 
-def _prune_old_runs(keep: int = MAX_RUN_DIRS):
+def _prune_old_runs(keep: int = None):
+    """Thin out old runs without losing their history.
+
+    The screenshots are what fills the disk -- one PNG per step, thousands a
+    day in a 24/7 loop -- while a transcript is tens of KB and is the only
+    record of what the agent actually did. So past the newest `keep` runs the
+    screenshots are deleted and the transcript is gzipped in place and kept
+    forever. Both the dashboard and the submission counter read `.jsonl` and
+    `.jsonl.gz`, so nothing is lost from the stats.
+    """
+    if keep is None:
+        keep = MAX_RUN_DIRS
     run_dirs = sorted(
         (p for p in LOG_ROOT.glob("run_*") if p.is_dir()),
         key=lambda p: p.name,
     )
-    for old in run_dirs[:-keep] if keep > 0 else run_dirs:
-        shutil.rmtree(old, ignore_errors=True)
+    for old in (run_dirs[:-keep] if keep > 0 else run_dirs):
+        for shot in old.glob("screenshot_*.png"):
+            try:
+                shot.unlink()
+            except Exception:
+                pass
+        tr = old / "transcript.jsonl"
+        if not tr.exists():
+            continue
+        try:
+            with tr.open("rb") as src, gzip.open(old / "transcript.jsonl.gz", "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            tr.unlink()
+        except Exception:
+            pass
 
 # Fara "keys" names -> xdotool/X11 keysym names.
 KEY_MAP = {
@@ -128,14 +157,31 @@ def take_screenshot(run_dir: Path, step: int) -> Image.Image:
     return img
 
 
+# How much of the screen each speed mode hands to the model. Fewer pixels mean
+# fewer image tokens, which is where most of a step's latency sits.
+SPEED_SCALE = {"normal": 1.0, "hurry": 0.75, "super_fast": 0.5}
+
+
 def encode_for_model(img: Image.Image) -> str:
-    if _speed_mode == "super_fast":
-        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
-    elif _speed_mode == "hurry":
-        img = img.resize((img.width * 3 // 4, img.height * 3 // 4), Image.LANCZOS)
-    rh, rw = fp.smart_resize(img.height, img.width)
+    """Screenshot as a data URL, at the resolution the current speed mode asks
+    for.
+
+    Resampled ONCE, straight from the full-resolution screenshot: scaling down
+    and then letting smart_resize scale part of the way back up cost more bytes
+    than sending the original (measured: 411 KB vs 376 KB for `hurry` on a real
+    1440x900 screenshot) because the blur it introduces is what PNG compresses
+    worst. One LANCZOS step keeps the same token count and the sharp text.
+    """
+    scale = SPEED_SCALE.get(_speed_mode, 1.0)
+    h, w = img.height, img.width
+    if scale != 1.0:
+        h, w = max(1, int(h * scale)), max(1, int(w * scale))
+    rh, rw = fp.smart_resize(h, w)
+    # LANCZOS only where there is something to lose: at scale 1.0 the resize is
+    # a sub-percent nudge to the model's grid and the sharper filter would just
+    # cost bytes.
+    resized = img.resize((rw, rh), Image.LANCZOS) if scale != 1.0 else img.resize((rw, rh))
     buf = io.BytesIO()
-    resized = img.resize((rw, rh))
     if _speed_mode == "super_fast":
         resized.save(buf, format="JPEG", quality=60)
         mime = "image/jpeg"
@@ -155,7 +201,10 @@ def encode_for_model(img: Image.Image) -> str:
 # restore the template default.
 ENABLE_THINKING = os.environ.get("FARA_ENABLE_THINKING", "0") == "1"
 
-_speed_mode: str = "normal"  # "normal", "hurry", "super_fast"
+_SPEED_RANK = {"normal": 0, "hurry": 1, "super_fast": 2}
+SPEED_MODES = tuple(_SPEED_RANK)
+
+_speed_mode: str = "normal"  # what is in force right now
 _speed_user: str = "normal"  # what the user explicitly chose (restored after auto-escalation)
 _speed_auto: bool = False    # True while speed was auto-escalated by the timer
 
@@ -163,15 +212,27 @@ _speed_auto: bool = False    # True while speed was auto-escalated by the timer
 _hurry_mode: bool = False
 
 
-def set_speed(mode: str):
+def speed_state() -> dict:
+    """Current speed for the GUI/API: what is in force, what the user picked,
+    and whether the difference comes from the timer escalating on its own."""
+    return {"mode": _speed_mode, "user": _speed_user, "auto": _speed_auto}
+
+
+def _emit_speed():
+    _live({"type": "speed", **speed_state()})
+
+
+def set_speed(mode: str) -> bool:
+    """Pick a speed mode explicitly (GUI, API or Telegram). False if unknown."""
     global _speed_mode, _speed_user, _speed_auto, _hurry_mode
+    if mode not in _SPEED_RANK:
+        return False
     _speed_mode = mode
     _speed_user = mode
     _speed_auto = False
     _hurry_mode = mode != "normal"
-
-
-_SPEED_RANK = {"normal": 0, "hurry": 1, "super_fast": 2}
+    _emit_speed()
+    return True
 
 
 def _auto_escalate(mode: str):
@@ -182,6 +243,7 @@ def _auto_escalate(mode: str):
     _speed_mode = mode
     _speed_auto = True
     _hurry_mode = mode != "normal"
+    _emit_speed()
 
 
 def _restore_user_speed():
@@ -191,6 +253,7 @@ def _restore_user_speed():
         _speed_mode = _speed_user
         _speed_auto = False
         _hurry_mode = _speed_mode != "normal"
+        _emit_speed()
 
 
 def set_hurry(enabled: bool):
@@ -371,6 +434,10 @@ def _trim_to_budget(messages: list, budget: int = CONTEXT_TOKEN_BUDGET,
     return current
 
 
+class BrowserStateError(RuntimeError):
+    """The bridge cannot say what page the browser is on."""
+
+
 def get_current_url() -> str:
     # Through Playwright: the URL of the tab actually on screen, not of
     # whatever tab cdp.py happened to list first.
@@ -410,6 +477,106 @@ def is_forbidden_url(url: str) -> bool:
 
 
 _LIST_PATH = re.compile(r"^/studies/?$", re.IGNORECASE)
+_STUDY_PATH = re.compile(r"^/studies/([0-9a-fA-F]{24})/?$", re.IGNORECASE)
+
+
+def studies_url() -> str:
+    """Where to go back to when a study has to be abandoned."""
+    return os.environ.get("FARA_STUDIES_URL", "https://app.prolific.com/studies")
+
+
+def _page_text(limit: int = 20000) -> str:
+    try:
+        return (pw_bridge.evaluate("document.body.innerText") or "")[:limit]
+    except Exception:
+        return ""
+
+
+def _study_title() -> str:
+    """Name of the study on the page being looked at, or "".
+
+    Only used to tell the model which studies to skip: the list page shows
+    names, never ids, so a cached entry without a title is useless to it.
+    """
+    _JS = """() => {
+        const sel = ['[data-testid*="study-name"]', '[data-testid*="title"]',
+                     'main h1', 'main h2', 'h1', 'h2'];
+        for (const s of sel) {
+            const el = document.querySelector(s);
+            const t = el && (el.innerText || '').trim();
+            if (t && t.length > 3 && t.length < 120) return t;
+        }
+        return (document.title || '').split('|')[0].trim();
+    }"""
+    try:
+        return (pw_bridge.run(lambda b: b.active_page().evaluate(_JS)) or "").strip()[:100]
+    except Exception:
+        return ""
+
+
+# Studies that are listed but lead nowhere. Matched on the guarded site only
+# (a study detail page): on an external questionnaire the same words can be
+# part of a question, and aborting a survey halfway on a false positive costs
+# far more than reopening a dead study once more.
+_DEAD_END_MARKERS = (
+    (r"you are not eligible|not eligible (?:to|for) (?:take part|participate|this)"
+     r"|you do not (?:meet|match) the (?:requirements|criteria)", "non idoneo"),
+    (r"no longer available|no longer accepting|is full|places? (?:are |have been )?"
+     r"(?:full|taken)|study (?:is|has been) (?:closed|completed)", "non più disponibile"),
+    (r"you have already (?:completed|taken part|submitted)", "già svolto"),
+    (r"screened out", "screened out"),
+)
+
+# Studies that need headphones, a camera or a mic: opt-in, because skipping
+# them is a choice about what work to accept, not a safety rule.
+_AV_TEXT_MARKERS = (
+    (r"\bheadphones?\b|\bearphones?\b|\bcuffie\b|\bauricolari\b", "cuffie richieste"),
+    (r"watch (?:the |this |a )?(?:short |brief )?(?:video|clip|advert)"
+     r"|guard(?:a|erai) (?:il |un |questo )?video", "video da guardare"),
+    (r"listen to (?:the |this |an? )?(?:audio|recording|clip|sound|speech)"
+     r"|ascolt(?:a|erai) (?:l'|un |il )?(?:audio|registrazione)", "audio da ascoltare"),
+    (r"audio (?:clip|recording|stimuli|task)|video (?:clip|recording|stimuli|task)", "stimoli audio/video"),
+    (r"\bwebcam\b|\beye.?tracking\b|face recording|record (?:your )?(?:voice|face|screen)"
+     r"|\bmicrofono\b|\bmicrophone\b", "webcam/microfono"),
+)
+
+
+def _detect_dead_end(text: str) -> str:
+    for pattern, reason in _DEAD_END_MARKERS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return reason
+    return ""
+
+
+def _detect_av(text: str = "", check_text: bool = True) -> str:
+    """Audio/video requirement on the current page, as a short reason, or "".
+
+    Two signals. A real media element or an embedded player is checked on
+    any page, because it cannot be mistaken for prose. The wording ("you
+    will watch a video", "headphones required") is only read on the study
+    description, where `check_text` is passed True by the caller.
+    """
+    _JS = r"""() => {
+        const out = [];
+        const media = [...document.querySelectorAll('audio, video')]
+            .filter(el => el.offsetParent !== null || el.autoplay || el.src || el.currentSrc);
+        if (media.length) out.push('tag ' + media[0].tagName.toLowerCase());
+        const players = /youtube|youtu\.be|vimeo|soundcloud|wistia|dailymotion|brightcove|jwplayer|kaltura/i;
+        if ([...document.querySelectorAll('iframe')].some(f => players.test(f.src || '')))
+            out.push('player incorporato');
+        return out.join(', ');
+    }"""
+    try:
+        found = pw_bridge.run(lambda b: b.active_page().evaluate(_JS)) or ""
+    except Exception:
+        found = ""
+    if found:
+        return found
+    if check_text and text:
+        for pattern, reason in _AV_TEXT_MARKERS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return reason
+    return ""
 
 
 class WanderGuard:
@@ -505,12 +672,13 @@ class StudyTimer:
     the status_line injected into the agent's turn tells it to wait.
     """
 
-    def __init__(self):
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
         self.start_time: float | None = None
         self.min_seconds: float = 0
 
     def start(self, min_seconds: float):
-        self.start_time = time.monotonic()
+        self.start_time = self.clock()
         self.min_seconds = float(min_seconds)
 
     def reset(self):
@@ -520,7 +688,7 @@ class StudyTimer:
     def elapsed(self) -> float:
         if self.start_time is None:
             return 0.0
-        return time.monotonic() - self.start_time
+        return self.clock() - self.start_time
 
     def remaining(self) -> float:
         if self.start_time is None or self.min_seconds <= 0:
@@ -541,6 +709,20 @@ class StudyTimer:
         return (f"Study timer: {self.elapsed():.0f}s elapsed, "
                 f"{rem:.0f}s still needed (minimum {self.min_seconds:.0f}s). "
                 "Do NOT submit yet — use the `wait` action on the last page.")
+
+
+# Submitting a few seconds early is not worth another whole model step: past
+# this margin the agent is allowed to finish, under it it is told to wait.
+TERMINATE_GRACE_SECONDS = 30
+
+
+def terminate_refusal(timer: "StudyTimer") -> str:
+    """Why `terminate` must not go through yet, or "" if it may."""
+    if timer.is_active() and timer.remaining() > TERMINATE_GRACE_SECONDS:
+        return (f"TERMINATE REFUSED: study timer has {int(timer.remaining())}s remaining "
+                f"(minimum {timer.min_seconds:.0f}s). "
+                "Use the `wait` action to wait (e.g. wait 30), then try again.")
+    return ""
 
 
 def _near_checkbox_state(x: float, y: float):
@@ -865,7 +1047,7 @@ STANDING_RULES = (
 
 def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
               stop_event=None, messages: list = None, batch_fill: bool = False,
-              wander_seconds: float = 0):
+              wander_seconds: float = 0, skip_av: bool = False):
     """Resumable agent loop. See module docstring for the event protocol.
 
     `messages` lets a caller continue the same conversation across several
@@ -888,6 +1070,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
     used for injected sub-tasks. Each distinct page (URL + field-id set) is
     only attempted once, so a page Fara revisits falls back to normal
     vision-driven interaction.
+
+    `skip_av`, when true, abandons a study whose page needs audio, video, a
+    webcam or a microphone, instead of relying on the task text to tell the
+    model to avoid them. Either way, a study ruled out here is remembered in
+    study_cache so later cycles do not open it again.
     """
     _prune_old_runs()
     if run_dir is None:
@@ -915,6 +1102,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         study_timer = StudyTimer()
         _last_guarded_duration: float | None = None  # persists across clicks within a study entry
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
+        _current_study_id: str | None = None  # id of the study being looked at / taken
+        _current_study_title: str = ""  # its name, read on Prolific while we can still see it
 
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
@@ -922,6 +1111,25 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 return
 
             here = get_current_url()
+            if not here:
+                # An empty URL is not "no page": it is the bridge failing to
+                # read one, and every rule below keys off this string. Read as
+                # "not on Prolific" it silently switches off the guarded-site
+                # rules, the wander guard, the study timer and the batch-fill
+                # suppression, and the run carries on blind -- which is exactly
+                # what happened with a tab whose renderer had wedged. Give the
+                # page a few seconds (a navigation in flight reads empty too),
+                # then hand the cycle back to the driver, which waits and
+                # recovers the tab before retrying.
+                for _ in range(3):
+                    time.sleep(1.0)
+                    here = get_current_url()
+                    if here:
+                        break
+            if not here:
+                raise BrowserStateError(
+                    "the browser bridge reports no URL for the active tab "
+                    "(wedged renderer or lost CDP connection)")
             if is_forbidden_url(here):
                 back = safe_page_for(here)
                 pw_bridge.goto(back)
@@ -983,11 +1191,81 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             _prev_was_guarded = here_guarded
 
             # Reset timer when back at the studies list (timer re-arms for next study).
-            if here_guarded and _LIST_PATH.match(urlparse(here).path or ""):
+            on_list = here_guarded and bool(_LIST_PATH.match(urlparse(here).path or ""))
+            if on_list:
                 study_timer.reset()
                 _restore_user_speed()
                 _last_guarded_duration = None
                 _prev_was_guarded = False
+                _current_study_id = None
+                _current_study_title = ""
+
+            # --- studies that lead nowhere (and, opt-in, audio/video ones) ---
+            # A study that is listed but not doable gets opened again on every
+            # cycle: the model has no memory across cycles, so without this it
+            # re-discovers the same dead end for as long as it stays listed.
+            # The wording is only read on the study page, where it is a
+            # description; on an external questionnaire only real media
+            # elements count, because aborting a survey halfway on a false
+            # positive costs much more than one wasted click.
+            m_study = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
+            if m_study:
+                _current_study_id = m_study.group(1)
+                # Read the name here, on Prolific: once the agent is inside the
+                # external questionnaire the page title is the survey tool's,
+                # which is no use for telling the model what to skip.
+                _current_study_title = _study_title() or _current_study_title
+
+            skip_reason = ""
+            if m_study:
+                known = study_cache.entries().get(_current_study_id)
+                if known:
+                    # Opened again anyway (the title hint is only a hint): bounce
+                    # out before the model spends steps rediscovering it.
+                    skip_reason = known.get("reason", "scartato in un ciclo precedente")
+                else:
+                    page_text = _page_text()
+                    skip_reason = _detect_dead_end(page_text)
+                    if not skip_reason and skip_av:
+                        av = _detect_av(page_text, check_text=True)
+                        if av:
+                            skip_reason = f"audio/video: {av}"
+            elif skip_av and not here_guarded and study_timer.is_active():
+                av = _detect_av(check_text=False)
+                if av:
+                    skip_reason = f"audio/video: {av}"
+
+            if skip_reason:
+                title = _current_study_title or _study_title()
+                key = _current_study_id or title or here
+                study_cache.mark(key, skip_reason, title=title, url=here)
+                abandoned = study_timer.is_active()
+                study_timer.reset()
+                _restore_user_speed()
+                _last_guarded_duration = None
+                _current_study_id = None
+                _current_study_title = ""
+                try:
+                    pw_bridge.goto(studies_url())
+                    pw_bridge.wait_for_content()
+                    _prev_was_guarded = True
+                except Exception:
+                    pass
+                pending_user_response = (
+                    f"That study was ruled out automatically ({skip_reason}) and you were "
+                    "taken back to the list of studies. Do not open it again: pick another "
+                    "study, or follow your task instructions if none is eligible.")
+                label = f"«{title}»" if title else "lo studio aperto"
+                _notify_telegram(f"⏭ Studio saltato: {label}\n{skip_reason}")
+                injected = yield {"type": "notice",
+                                  "text": (f"Studio saltato ({skip_reason}): {label}"
+                                           + (", survey abbandonata" if abandoned else "")
+                                           + ". Non verrà riaperto nei prossimi cicli."),
+                                  "messages": messages}
+                if injected:   # an instruction typed while this was happening
+                    pending_user_response += "\n\n" + injected
+
+            skip_hint = study_cache.prompt_line() if on_list else ""
 
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
@@ -997,10 +1275,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 text = pending_user_response
                 pending_user_response = ""
             elif step == 1:
-                text = task + STANDING_RULES
+                text = task + STANDING_RULES + (f"\n\n{skip_hint}" if skip_hint else "")
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
+                prefix += skip_hint
                 timer_line = study_timer.status_line()
                 if timer_line:
                     prefix += timer_line + "\n"
@@ -1134,12 +1413,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             }
 
             if action_type == "terminate":
-                if study_timer.is_active() and study_timer.remaining() > 30:
-                    rem = int(study_timer.remaining())
-                    pending_user_response = (
-                        f"TERMINATE REFUSED: study timer has {rem}s remaining "
-                        f"(minimum {study_timer.min_seconds:.0f}s). "
-                        "Use the `wait` action to wait (e.g. wait 30), then try again.")
+                refusal = terminate_refusal(study_timer)
+                if refusal:
+                    pending_user_response = refusal
                     continue
                 yield step_event
                 answer = args.get("answer", "")

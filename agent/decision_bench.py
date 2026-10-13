@@ -43,5 +43,7 @@ for name, field, check in ITEMS:
     print(f"{ok}/3  {name:70s} {[str(x)[:22] for x in answers]}", flush=True)
 tot = sum(r["pass"] for r in rows)
 res = {"label": LABEL, "passed": tot, "total": 3 * len(ITEMS), "median_call_s": round(st.median(total_t), 2), "rows": rows}
-Path.home().joinpath("web-agent/bench_models", f"decision_{LABEL}.json").write_text(json.dumps(res, indent=2, ensure_ascii=False))
+OUT = Path(__file__).resolve().parent.parent / "bench" / "bench_models"
+OUT.mkdir(parents=True, exist_ok=True)
+(OUT / f"decision_{LABEL}.json").write_text(json.dumps(res, indent=2, ensure_ascii=False))
 print(f"\nTOTAL {tot}/{3*len(ITEMS)} | median call {res['median_call_s']}s")

@@ -1,6 +1,8 @@
 import sys, time, json
+from pathlib import Path
 from playwright.sync_api import sync_playwright
-OUT = "/home/riccardo/web-agent/gui_shots"
+OUT = str(Path(__file__).resolve().parent.parent / "var" / "gui_shots")
+Path(OUT).mkdir(parents=True, exist_ok=True)
 res = []
 def check(name, ok, detail=""):
     res.append(ok); print(f"{'PASS' if ok else 'FAIL'}  {name:52s} {detail}")

@@ -46,7 +46,20 @@
   .stats { display: flex; gap: 6px; }
   .stat { color: var(--muted); font-size: 12px; padding: 3px 9px; background: var(--panel-2); border-radius: 6px; }
   .stat b { color: var(--text); font-weight: 600; margin-left: 3px; }
+  .stat.timer.wait { color: var(--warn); background: var(--warn-dim); }
+  .stat.timer.wait b { color: var(--warn); }
+  .stat.timer.ok { color: var(--good); background: var(--good-dim); }
+  .stat.timer.ok b { color: var(--good); }
   .spacer { flex: 1 1 auto; }
+  .speed { display: inline-flex; margin-right: 8px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .speed button {
+    border: 0; border-radius: 0; padding: 5px 9px; font-size: 12px; cursor: pointer;
+    background: var(--panel-2); color: var(--muted);
+  }
+  .speed button + button { border-left: 1px solid var(--border); }
+  .speed button:hover { color: var(--text); }
+  .speed button.on { background: var(--accent); color: #fff; }
+  .speed button.on.auto { background: var(--warn-dim); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
 
   button, input, textarea, select {
     font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
@@ -234,8 +247,14 @@
     <span class="stat">Batch<b id="stBatch">0</b></span>
     <span class="stat" id="stErrWrap" style="display:none">Errori<b id="stErr">0</b></span>
     <span class="stat">Tempo<b id="stTime">0:00</b></span>
+    <span class="stat timer" id="stTimerWrap" style="display:none">Studio<b id="stTimer">0:00</b></span>
   </div>
   <span class="spacer"></span>
+  <span class="speed" id="speedBox">
+    <button data-speed="normal" title="Qualità massima: screenshot interi, 1024 token">🐢 Normale</button>
+    <button data-speed="hurry" title="Veloce: screenshot al 75%, 512 token">⚡ Veloce</button>
+    <button data-speed="super_fast" title="Super veloce: screenshot al 50% in JPEG, 384 token, meno contesto">🚀 Super</button>
+  </span>
   <a href="/dashboard" target="_blank" id="dashBtn" title="Dashboard performance" style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:6px;background:rgba(255,255,255,0.07);color:#a0aec0;text-decoration:none;font-size:16px;margin-right:8px;transition:background .15s" onmouseover="this.style.background='rgba(255,255,255,0.13)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">📊</a>
   <button id="runBtn" class="primary">▶ Avvia</button>
 </header>
@@ -317,6 +336,10 @@
           <div class="opt">
             <div class="lbl"><b>Compilazione rapida form</b><span>Legge tutte le domande della pagina e risponde in un colpo solo, invece di cliccare campo per campo.</span></div>
             <label class="switch"><input type="checkbox" id="batchFillBox"><span class="slider"></span></label>
+          </div>
+          <div class="opt">
+            <div class="lbl"><b>Salta studi con audio o video</b><span>Se la pagina chiede cuffie, video, webcam o microfono, lo studio viene abbandonato dal codice e non riaperto nei cicli successivi.</span></div>
+            <label class="switch"><input type="checkbox" id="skipAvBox"><span class="slider"></span></label>
           </div>
           <div class="opt">
             <div class="lbl"><b>Parti dall'indirizzo in alto</b><span>Spento: parte dalla pagina già aperta (consigliato dopo un login manuale).</span></div>
@@ -414,7 +437,7 @@ document.querySelectorAll('.keys button').forEach(b => b.onclick = () => postJSO
 /* ---------- draft autosave (navigateOnStart deliberately NOT persisted:
    a stale "on" silently sent the agent away from a logged-in page) ---------- */
 const DRAFT_KEY = 'fara_gui_draft';
-const DRAFT_FIELDS = ['contextBox', 'taskBox', 'urlBox', 'maxRounds', 'loopBox', 'pollInterval', 'presetNameBox', 'batchFillBox', 'wanderSecs'];
+const DRAFT_FIELDS = ['contextBox', 'taskBox', 'urlBox', 'maxRounds', 'loopBox', 'pollInterval', 'presetNameBox', 'batchFillBox', 'wanderSecs', 'skipAvBox'];
 function saveDraft() {
   const d = {};
   for (const id of DRAFT_FIELDS) { const el = $(id); d[id] = el.type === 'checkbox' ? el.checked : el.value; }
@@ -453,7 +476,7 @@ $('runBtn').onclick = async () => {
   const res = await postJSON('/start_agent', {
     task, url, max_rounds: parseInt($('maxRounds').value, 10) || 20, loop: $('loopBox').checked,
     poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
-    wander_seconds: wanderValue(),
+    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked,
   });
   if (res.error) addRow(`<div class="row error">${esc(res.error)}</div>`);
 };
@@ -461,6 +484,57 @@ $('taskBox').addEventListener('input', () => $('taskErr').classList.remove('show
 
 $('injectBtn').onclick = () => { const b = $('injectBox'); if (b.value.trim()) { postJSON('/agent/inject', {text: b.value.trim()}); b.value = ''; } };
 $('injectBox').addEventListener('keydown', e => { if (e.key === 'Enter') $('injectBtn').click(); });
+
+/* ---------- speed modes ---------- */
+const SPEED_LABEL = { normal: 'normale', hurry: 'veloce', super_fast: 'super veloce' };
+let speed = { mode: 'normal', user: 'normal', auto: false };
+function renderSpeed() {
+  document.querySelectorAll('.speed button').forEach(b => {
+    const on = b.dataset.speed === speed.mode;
+    b.classList.toggle('on', on);
+    b.classList.toggle('auto', on && !!speed.auto);
+  });
+  $('speedBox').title = speed.auto
+    ? `Alzata da sola a ${SPEED_LABEL[speed.mode]}: lo studio sta sforando il tempo minimo. `
+      + `Torna a ${SPEED_LABEL[speed.user]} quando lo studio finisce.`
+    : 'Quanto in fretta deve andare il modello, a scapito della qualità.';
+}
+document.querySelectorAll('.speed button').forEach(b => {
+  b.onclick = async () => {
+    const res = await postJSON('/agent/speed', { mode: b.dataset.speed });
+    if (res.speed) { speed = res.speed; renderSpeed(); }
+  };
+});
+renderSpeed();
+
+/* ---------- study timer (minimum completion time) ---------- */
+const stimer = { min: 0, elapsed: 0, t0: 0, active: false };
+function setTimer(m) {
+  if (!m) { stimer.active = false; renderTimer(); return; }
+  stimer.min = m.min_seconds || 0;
+  stimer.elapsed = m.elapsed || 0;
+  stimer.t0 = Date.now();
+  stimer.active = true;
+  renderTimer();
+}
+function renderTimer() {
+  const w = $('stTimerWrap');
+  if (!stimer.active) { w.style.display = 'none'; return; }
+  const el = stimer.elapsed + (Date.now() - stimer.t0) / 1000;
+  w.style.display = '';
+  if (stimer.min > 0) {
+    const done = el >= stimer.min;
+    w.className = 'stat timer ' + (done ? 'ok' : 'wait');
+    $('stTimer').textContent = fmtTime(el) + ' / ' + fmtTime(stimer.min);
+    w.title = done ? 'Tempo minimo raggiunto: può inviare.'
+                   : 'Mancano ' + fmtTime(stimer.min - el) + ' al minimo dichiarato dallo studio.';
+  } else {
+    w.className = 'stat timer';
+    $('stTimer').textContent = fmtTime(el);
+    w.title = 'Studio in corso, nessun tempo minimo rilevato.';
+  }
+}
+setInterval(() => { if (stimer.active) renderTimer(); }, 1000);
 
 /* ---------- presets ---------- */
 let presets = [];
@@ -476,6 +550,7 @@ $('loadPresetBtn').onclick = () => {
   $('contextBox').value = p.context || ''; $('taskBox').value = p.task || ''; $('urlBox').value = p.url || '';
   $('maxRounds').value = p.max_rounds || 60; $('loopBox').checked = !!p.loop; $('pollInterval').value = p.poll_interval || 60;
   $('batchFillBox').checked = !!p.batch_fill;
+  $('skipAvBox').checked = !!p.skip_av;
   $('wanderSecs').value = p.wander_seconds ?? 90;
   $('navigateOnStart').checked = false;   // loading a preset must never auto-send the agent to a URL
   $('presetNameBox').value = p.name; saveDraft();
@@ -486,7 +561,7 @@ $('savePresetBtn').onclick = async () => {
   await postJSON('/presets', { name, context: $('contextBox').value, task: $('taskBox').value, url: $('urlBox').value,
     max_rounds: parseInt($('maxRounds').value, 10) || 60, loop: $('loopBox').checked,
     poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
-    wander_seconds: wanderValue() });
+    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked });
   await loadPresetList(); $('presetSelect').value = name;
 };
 $('deletePresetBtn').onclick = async () => {
@@ -690,6 +765,10 @@ function applyLive(m) {
     if (!live.phase) { live.phase = 'think'; live.t0 = Date.now(); }
   } else if (m.type === 'target') {
     showTarget(m); return;
+  } else if (m.type === 'timer' || m.type === 'timer_start') {
+    setTimer(m); return;
+  } else if (m.type === 'speed') {
+    speed = { mode: m.mode, user: m.user, auto: m.auto }; renderSpeed(); return;
   }
   renderLiveSoon();
 }
@@ -710,6 +789,10 @@ function applyState(d) {
   runId = d.run_id;
   running = d.running; startedAt = d.started_at;
   if (!d.running) { stopping = false; if (live.phase) { live.phase = null; renderLive(); } } else stopping = d.stopping || stopping;
+  if (d.speed) { speed = d.speed; renderSpeed(); }
+  if (!d.running || !d.study_timer) { if (stimer.active) setTimer(null); }
+  else if (!stimer.active) setTimer(d.study_timer);     // seed on load; live events keep it ticking
+  if (d.running) $('skipAvBox').checked = !!d.skip_av;
   pendingQuestion = d.pending_question; renderAsk();
   const s = d.stats || {};
   $('stCycleWrap').style.display = d.loop ? '' : 'none';
