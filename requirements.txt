@@ -1,0 +1,18 @@
+# Host-side dependencies (Python 3.12).
+#
+#   python3 -m venv venv_pw
+#   venv_pw/bin/pip install -r requirements.txt
+#
+# No `playwright install` needed: Playwright attaches over CDP to the
+# Chromium already running inside the browser container, it does not
+# download or launch a browser of its own.
+#
+# Everything else the agent uses is either in the standard library
+# (the Telegram bot, the HTTP server, the model calls) or inside the
+# Docker image (Chromium, Xvfb, xdotool, scrot, x11vnc, socat).
+
+playwright==1.63.0
+pillow==12.3.0
+
+# Only used by the legacy CDP path (browser/cdp.py, controller_pw/survey_loop.py).
+websocket-client==1.9.2

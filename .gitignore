@@ -7,24 +7,20 @@ venv_pw/
 __pycache__/
 *.pyc
 
-# --- Profili del browser (cookie, login, cache: dati personali) --------------
-browser-profile/
-browser-profile-pw/
-browser-profile-test/
+# --- Runtime: log delle run, profili del browser (cookie e login), scarti ----
+var/
 
 # --- Dati personali / locali -------------------------------------------------
-controller_pw/identity.json
-controller_pw/presets.json
+agent/identity.json
+agent/presets.json
+agent/study_cache.json
 
-# --- Log delle run, screenshot e file temporanei -----------------------------
-logs/
-logs_pw/
-logs_test/
-gui_shots/
-gui_shots_live/
-data_pw/_*.png
-data_test/_*.png
-fara-test-*.png
+# --- Segreti: i .example sono versionati, questi no --------------------------
+agent/telegram_config.py
+scripts/cloud/fara.env
+
+# --- Screenshot temporanei dentro le fixture montate come /data --------------
+fixtures/*/_*.png
 STOP
 *.out
-!bench_*.out
+!bench/*.out
