@@ -1,11 +1,12 @@
 """Orchestrate old-vs-Playwright full-agent runs, sequentially, with a
 clean browser state before each and an independent success check after."""
 import json, os, subprocess, sys, time
-sys.path.insert(0, "/home/riccardo/web-agent/controller_pw")
+from pathlib import Path
+W = str(Path(__file__).resolve().parent.parent)
+sys.path.insert(0, f"{W}/agent")
 import pw_bridge as pb
-W = "/home/riccardo/web-agent"
 IMPL = {"old": ("python3", f"{W}/controller_oldbench"),
-        "new": (f"{W}/venv_pw/bin/python", f"{W}/controller_pw")}
+        "new": (f"{W}/venv_pw/bin/python", f"{W}/agent")}
 CHECK = {"multipage": ("#done2", "SUBMITTED"), "newtab": ("#done", "SUBMITTED"),
          "iframe": ("#ok", "IFRAME-SUBMITTED"), "trusted": ("#res", "TRUSTED-SUBMITTED")}
 def reset():
