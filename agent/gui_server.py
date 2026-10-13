@@ -436,6 +436,7 @@ def _status_payload(since: int = 0, with_events: bool = True, fresh_url: bool = 
             payload["events"] = [e for e in state["events"] if e.get("seq", 0) > since]
     payload["url"] = _cached_url() if fresh_url else _url_cache["v"]
     payload["speed"] = agent_core.speed_state()
+    payload["model"] = agent_core.model_speed()
     return payload
 
 
@@ -653,11 +654,66 @@ def _inhibit_sleep():
 # does not, so the wait grows instead of hammering the same error.
 ERROR_BACKOFF = (30, 60, 120, 300)
 
+# Between cycles the list is watched from the DOM instead of with the model:
+# on 13 Oct 196 cycles out of 211 found it empty, ~7 model calls each. The
+# check keeps the cadence the loop already had (a 10 s pause plus a ~38 s
+# empty cycle, about 45 s) -- it saves the GPU, it does not make the agent
+# arrive any sooner. A full cycle still runs every FULL_CYCLE_EVERY seconds
+# in case the DOM reading is wrong.
+LIST_CHECK_MIN_SECONDS = 2
+FULL_CYCLE_EVERY = 15 * 60
+
 
 def _backoff(consecutive_errors: int) -> int:
     """Seconds to wait before retrying, by how many cycles failed in a row."""
     i = max(1, int(consecutive_errors)) - 1
     return ERROR_BACKOFF[min(i, len(ERROR_BACKOFF) - 1)]
+
+
+def _refresh_list(home_url: str):
+    """Back to the starting page, freshly loaded. A plain reload of the
+    CURRENT page wasn't enough: after a finished survey the current page is
+    the "submission received" screen, so every later cycle reloaded that,
+    saw "already done" and terminated -- the loop never got back to the
+    studies list. Navigating also refreshes SPA dashboards."""
+    try:
+        if home_url:
+            pw_bridge.reset_to(home_url)
+        else:
+            pw_bridge.reload()
+        pw_bridge.wait_for_content()
+    except Exception:
+        pass
+
+
+def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
+    """Refresh and read the list from the DOM until there is something for the
+    model to look at (or it is time for a safety cycle). True if Stop was
+    pressed while waiting."""
+    every = max(float(poll_interval or 0), LIST_CHECK_MIN_SECONDS)
+    since = time.time()
+    checks = 0
+    while True:
+        if stop_event.wait(every):       # wakes the instant Stop is pressed
+            return True
+        _refresh_list(home_url)
+        checks += 1
+        try:
+            seen = agent_core.studies_list_state()
+        except Exception:
+            seen = "unknown"
+        if seen == "studies":
+            agent_core.capture_page("studies_list")
+        if seen != "empty" or time.time() - since > FULL_CYCLE_EVERY:
+            if checks > 1:
+                _push_event({"type": "notice",
+                             "text": f"Elenco controllato {checks} volte senza modello: "
+                                     + ("ora c'è qualcosa." if seen == "studies" else
+                                        "ciclo completo di controllo." if seen == "empty" else
+                                        "pagina non riconosciuta, passo al modello.")})
+            return False
+        hub.publish("live", {"type": "phase", "phase": "watch", "ts": time.time(),
+                             "checks": checks})
 
 
 def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval: float,
@@ -731,25 +787,10 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
                 home_url = start_page_url
             if not ok or not loop or stop_event.is_set():
                 break
-            if stop_event.wait(poll_interval):   # wakes the instant Stop is pressed
+            if _wait_for_studies(home_url, poll_interval, stop_event):
                 return
-            # Go back to the starting page (the dashboard) before the next
-            # cycle. A plain reload of the CURRENT page wasn't enough: after
-            # a finished survey the current page is the "submission
-            # received" screen, so every later cycle reloaded that, saw
-            # "already done" and terminated -- the loop never got back to
-            # the studies list. Navigating also refreshes SPA dashboards.
-            try:
-                if home_url:
-                    pw_bridge.reset_to(home_url)
-                else:
-                    pw_bridge.reload()
-                pw_bridge.wait_for_content()
-            except Exception:
-                pass
     except Exception as e:
         _push_event({"type": "error", "message": str(e)})
-        import traceback
         tb = traceback.format_exc()[-300:]
         agent_core._notify_telegram(f"❌ Errore agent!\n{type(e).__name__}: {str(e)[:150]}\n\n{tb}")
     finally:
@@ -763,49 +804,52 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
         _publish_state()
 
 
+def _run_record(tf) -> dict | None:
+    """One run for the dashboard, from its summary.json when there is one.
+
+    Runs written before summaries existed are summarized once and the
+    result saved next to them, so the dashboard stops re-parsing every
+    transcript on every request. The run in progress is never cached: its
+    summary is written by run_agent when it ends.
+    """
+    from datetime import datetime
+    run_dir = tf.parent
+    try:
+        started = datetime.strptime(run_dir.name.replace("run_", ""), "%Y%m%d_%H%M%S")
+    except Exception:
+        return None
+    summ_file = run_dir / "summary.json"
+    s = None
+    if summ_file.exists():
+        try:
+            s = json.loads(summ_file.read_text())
+        except Exception:
+            s = None
+    if s is None:
+        screens = list(run_dir.glob("screenshot_*.png"))
+        ended = (datetime.fromtimestamp(max(x.stat().st_mtime for x in screens))
+                 if screens else started)
+        s = agent_core.summarize_transcript(_read_transcript(tf).splitlines(), started, ended)
+        finished = s["outcome"] != "INCOMPLETE" or time.time() - ended.timestamp() > 3600
+        if finished:
+            try:
+                summ_file.write_text(json.dumps(s, indent=1))
+            except Exception:
+                pass
+    ended = datetime.fromisoformat(s["ended"]) if s.get("ended") else started
+    outcome = "TERMINATE" if s["outcome"] == "STOPPED" else s["outcome"]
+    return {"started": started, "ended": ended, "duration_s": s.get("duration_s", 0),
+            "steps": s.get("steps", 0), "outcome": outcome, "answer": s.get("answer", ""),
+            "code_source": s.get("code_source"), "where": s.get("steps_where") or {},
+            "gen_tps": s.get("gen_tps_median")}
+
+
 def _build_dashboard() -> str:
     """Read all run transcripts and return a self-contained HTML dashboard."""
     from collections import defaultdict
     from datetime import datetime
 
-    runs = _transcript_files()
-    records = []
-    for tf in runs:
-        run_name = tf.parent.name
-        try:
-            started = datetime.strptime(run_name.replace("run_", ""), "%Y%m%d_%H%M%S")
-        except Exception:
-            continue
-        lines = _read_transcript(tf).splitlines()
-        steps, outcome, answer = 0, "INCOMPLETE", ""
-        for line in lines:
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            s = d.get("step", 0)
-            if isinstance(s, int):
-                steps = max(steps, s)
-            at = d.get("action_type", "")
-            if at == "terminate":
-                ans = d.get("args", {}).get("answer", "")
-                answer = ans
-                if ans.startswith("CODE:"):
-                    outcome = "CODE"
-                elif ans == "NOCODE":
-                    outcome = "NOCODE"
-                elif ans == "NONE":
-                    outcome = "NONE"
-                else:
-                    outcome = "TERMINATE"
-        screens = list(tf.parent.glob("screenshot_*.png"))
-        ended = started
-        if screens:
-            ended = datetime.fromtimestamp(max(s.stat().st_mtime for s in screens))
-        duration_s = max(0, round((ended - started).total_seconds()))
-        records.append({"started": started, "ended": ended,
-                        "duration_s": duration_s, "steps": steps,
-                        "outcome": outcome, "answer": answer[:80]})
+    records = [r for r in (_run_record(tf) for tf in _transcript_files()) if r]
 
     total = len(records)
     completed = [r for r in records if r["outcome"] in ("CODE", "NOCODE")]
@@ -899,14 +943,55 @@ def _build_dashboard() -> str:
     rows_html = ""
     for r in reversed(completed):
         chip_cls = "chip-CODE" if r["outcome"] == "CODE" else "chip-NOCODE"
+        src = {"url": "URL", "model": "schermo"}.get(r.get("code_source") or "", "—")
         rows_html += f"""<tr>
   <td class="mono">{fmt_dt(r['started'])}</td>
   <td><span class="chip {chip_cls}">{r['outcome']}</span></td>
   <td>{fmt_dur(r['duration_s'])}</td>
   <td class="mono muted">{r['steps']} step</td>
+  <td class="mono muted">{src}</td>
   <td class="mono ans">{r['answer']}</td></tr>"""
     if not rows_html:
-        rows_html = '<tr><td colspan="5" class="muted center pad20">Nessuno studio completato ancora</td></tr>'
+        rows_html = '<tr><td colspan="6" class="muted center pad20">Nessuno studio completato ancora</td></tr>'
+
+    # --- where the time goes ---
+    def _bucket(r):
+        if r["outcome"] in ("CODE", "NOCODE"):
+            return "done"
+        if r["outcome"] == "NONE":
+            return "empty"
+        return "failed"
+    tsum = {"done": 0, "empty": 0, "failed": 0}
+    for r in records:
+        tsum[_bucket(r)] += r["duration_s"]
+    t_all = max(1, sum(tsum.values()))
+    where = {"list": 0, "study": 0, "elsewhere": 0}
+    for r in records:
+        for k in where:
+            where[k] += (r.get("where") or {}).get(k, 0)
+    s_all = max(1, sum(where.values()))
+    speeds = [r["gen_tps"] for r in records[-50:] if r.get("gen_tps")]
+    speed_html = (f'{sorted(speeds)[len(speeds)//2]:.1f} token/s' if speeds
+                  else 'non ancora misurata')
+    time_rows = "".join(
+        f'<tr><td>{label}</td><td class="mono">{fmt_dur(tsum[k])}</td>'
+        f'<td class="mono muted">{tsum[k]/t_all*100:.0f}%</td></tr>'
+        for k, label in (("empty", "Elenco vuoto (cicli NONE)"),
+                         ("done", "Studi completati"),
+                         ("failed", "Cicli interrotti o falliti")))
+    step_rows = "".join(
+        f'<tr><td>{label}</td><td class="mono">{where[k]}</td>'
+        f'<td class="mono muted">{where[k]/s_all*100:.0f}%</td></tr>'
+        for k, label in (("list", "Sull'elenco studi"), ("study", "Dentro uno studio"),
+                         ("elsewhere", "Altrove su Prolific")))
+    time_html = f"""<div class="section">
+  <div class="section-title">Dove va il tempo</div>
+  <table><thead><tr><th>Cicli</th><th>Tempo</th><th>Quota</th></tr></thead>
+  <tbody>{time_rows}</tbody></table>
+  <table style="margin-top:14px"><thead><tr><th>Passi</th><th>Numero</th><th>Quota</th></tr></thead>
+  <tbody>{step_rows}</tbody></table>
+  <div class="muted" style="margin-top:10px">Velocità del modello (ultime run): {speed_html}</div>
+</div>"""
 
     # --- outcome bar: split into meaningful segments ---
     # use sqrt scale to prevent NONE from eating 99% of the bar
@@ -1233,11 +1318,13 @@ tbody tr:hover td {{ background: var(--surface2); }}
   </div>
 </div>
 
+{time_html}
+
 <div class="section">
   <div class="section-title">Studi completati ({len(completed)})</div>
   <table>
     <thead><tr>
-      <th>Inizio</th><th>Esito</th><th>Durata</th><th>Steps</th><th>Codice / risposta</th>
+      <th>Inizio</th><th>Esito</th><th>Durata</th><th>Steps</th><th>Codice da</th><th>Codice / risposta</th>
     </tr></thead>
     <tbody>{rows_html}</tbody>
   </table>
@@ -1443,7 +1530,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/start_agent":
                 body = self._read_json()
+                context = str(body.get("context", "")).strip()
                 task = str(body.get("task", ""))
+                if context:
+                    task = context + "\n\n" + task
                 url = str(body.get("url", ""))
                 max_rounds = int(body.get("max_rounds", 20))
                 loop = bool(body.get("loop", False))
@@ -1569,6 +1659,97 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _pick_preset(presets: list, name: str = ""):
+    """(preset, None) or (None, message). Empty name -> the first preset;
+    otherwise an exact name (any case), else a unique partial match."""
+    if not presets:
+        return None, "❌ Nessun preset salvato. Avvia manualmente dalla dashboard."
+    name = (name or "").strip().lower()
+    if not name:
+        return presets[0], None
+    exact = [p for p in presets if p.get("name", "").lower() == name]
+    if exact:
+        return exact[0], None
+    partial = [p for p in presets if name in p.get("name", "").lower()]
+    if len(partial) == 1:
+        return partial[0], None
+    names = "\n".join(f"• {p.get('name')}" for p in (partial or presets))
+    why = "Più preset corrispondono" if partial else "Nessun preset corrisponde"
+    return None, f"❓ {why} a «{name}»:\n{names}"
+
+
+def _daily_summary_text(day=None) -> str:
+    """What happened on `day` (default today), from the run transcripts,
+    the skipped-studies memory and the submissions cache."""
+    from datetime import date, datetime as _dt
+    day = day or date.today()
+    tag = day.strftime("%Y%m%d")
+    runs = [f for f in _transcript_files() if f.parent.name.startswith(f"run_{tag}")]
+    done, none, other = [], 0, 0
+    for f in runs:
+        outcome = None
+        for line in _read_transcript(f).splitlines():
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("action_type") == "terminate":
+                outcome = (d.get("args") or {}).get("answer", "")
+                src = d.get("code_source", "modello")
+        if outcome and (outcome.startswith("CODE:") or outcome == "NOCODE"):
+            done.append(f"{outcome}" + (" (da URL)" if src == "url" else ""))
+        elif outcome == "NONE":
+            none += 1
+        else:
+            other += 1
+    skipped = [v for v in study_cache.entries().values()
+               if _dt.fromtimestamp(v.get("ts", 0)).date() == day]
+    lines = [f"📊 Riepilogo {day.strftime('%d/%m')}",
+             f"🔄 Cicli: {len(runs)} (elenco vuoto {none}, interrotti {other})",
+             f"✅ Studi completati: {len(done)}"]
+    lines += [f"   • {d}" for d in done]
+    lines.append(f"⏭ Studi scartati: {len(skipped)}")
+    lines += [f"   • {v.get('title') or 'senza titolo'} — {v.get('reason')}" for v in skipped[:8]]
+    with state_lock:
+        errs = (state.get("stats") or {}).get("errors", 0)
+    if errs:
+        lines.append(f"⚠️ Errori nella run in corso: {errs}")
+    speed = agent_core.model_speed()
+    if speed:
+        lines.append(f"🧠 Modello: {speed['median_gen_tps']:.1f} token/s (mediana recente)")
+    earned, cur = 0.0, "£"
+    for s in list(_submissions_cache.get("data") or []):
+        try:
+            when = _dt.strptime(s.get("date_full", ""), "%d %b %Y, %H:%M").date()
+        except ValueError:
+            continue
+        if when == day and s.get("reward") and s.get("status", "").lower() in ("approved", "awaiting review"):
+            earned += float(s["reward"]); cur = s.get("currency", "£")
+    if earned:
+        lines.append(f"💰 Approvati o in revisione oggi: {cur}{earned:.2f}")
+    return "\n".join(lines)
+
+
+SUMMARY_HOUR = int(os.environ.get("FARA_SUMMARY_HOUR", "21"))
+
+
+def _daily_summary_loop():
+    """Send the day's summary on Telegram once a day at SUMMARY_HOUR."""
+    if TEST_INSTANCE:
+        return
+    from datetime import datetime as _dt, timedelta
+    while True:
+        now = _dt.now()
+        at = now.replace(hour=SUMMARY_HOUR, minute=0, second=0, microsecond=0)
+        if at <= now:
+            at += timedelta(days=1)
+        time.sleep((at - now).total_seconds())
+        try:
+            agent_core._notify_telegram(_daily_summary_text())
+        except Exception:
+            pass
+
+
 def _telegram_bot_loop():
     """Background thread: polls Telegram for commands."""
     import urllib.request as _ur
@@ -1641,6 +1822,8 @@ def _telegram_bot_loop():
             {"command": "normal",  "description": "Modalità normale (qualità massima)"},
             {"command": "hurry",   "description": "Modalità veloce (immagini ridotte)"},
             {"command": "superfast","description": "Modalità super-veloce (massima velocità)"},
+            {"command": "presets", "description": "Elenco dei preset (/start <nome>)"},
+            {"command": "riepilogo", "description": "Riepilogo della giornata"},
             {"command": "help",    "description": "Lista comandi"},
         ]}).encode()
         req = _ur.Request(f"{base}/setMyCommands", data=cmds,
@@ -1649,11 +1832,10 @@ def _telegram_bot_loop():
     except Exception:
         pass
 
-    def _do_start() -> str:
-        presets = load_presets()
-        if not presets:
-            return "❌ Nessun preset salvato. Avvia manualmente dalla dashboard."
-        p = presets[0]
+    def _do_start(name: str = "") -> str:
+        p, err = _pick_preset(load_presets(), name)
+        if err:
+            return err
         with state_lock:
             if state["running"]:
                 return "ℹ️ Agente già in esecuzione."
@@ -1673,10 +1855,14 @@ def _telegram_bot_loop():
             state["phase"]     = None
             state["skip_av"]   = bool(p.get("skip_av", False))
         _publish_state()
+        context = str(p.get("context", "")).strip()
+        task = str(p.get("task", ""))
+        if context:
+            task = context + "\n\n" + task
         threading.Thread(
             target=agent_driver,
             args=(
-                str(p.get("task", "")),
+                task,
                 "",   # no forced navigation — start from wherever the browser is
                 int(p.get("max_rounds", 20)),
                 bool(p.get("loop", False)),
@@ -1689,7 +1875,7 @@ def _telegram_bot_loop():
         ).start()
         return f"▶️ Agente avviato — preset: {p.get('name', '?')}"
 
-    def _do_restart() -> str:
+    def _do_restart(name: str = "") -> str:
         with state_lock:
             was_running = state["running"]
         if was_running:
@@ -1704,7 +1890,7 @@ def _telegram_bot_loop():
             pw_bridge.wait_for_content()
         except Exception:
             pass
-        return _do_start()
+        return _do_start(name)
 
     def _do_status() -> str:
         with state_lock:
@@ -1846,12 +2032,19 @@ def _telegram_bot_loop():
                 else:
                     tg_send("ℹ️ Agente già fermo.")
             elif text in ("/start", "start", "/avvia", "avvia"):
-                tg_send(_do_start())
+                tg_send(_do_start(arg))
+            elif text in ("/presets", "presets", "/preset", "preset"):
+                ps = load_presets()
+                tg_send("📋 Preset salvati:\n" + "\n".join(f"• {p.get('name')}" for p in ps)
+                        + "\n\n/start <nome> per avviarne uno (basta una parte del nome)"
+                        if ps else "Nessun preset salvato.")
+            elif text in ("/riepilogo", "riepilogo", "/summary", "summary"):
+                tg_send(_daily_summary_text())
             elif text in ("/status", "status", "/stato", "stato"):
                 tg_send_photo(_do_status())
             elif text in ("/restart", "restart", "/riavvia", "riavvia"):
                 tg_send("🔄 Riavvio in corso...")
-                tg_send(_do_restart())
+                tg_send(_do_restart(arg))
             elif text in ("/inject", "inject", "/istruzione", "istruzione", "/msg", "msg"):
                 if not arg:
                     tg_send("Scrivi anche il testo:\n/inject <istruzione per l'agente>")
@@ -1875,7 +2068,9 @@ def _telegram_bot_loop():
             elif text in ("/help", "help", "/aiuto", "aiuto"):
                 tg_send(
                     "🤖 Comandi disponibili:\n"
-                    "/start — Avvia l'agente\n"
+                    "/start [preset] — Avvia l'agente (il primo preset, o quello indicato)\n"
+                    "/presets — Elenco dei preset\n"
+                    "/riepilogo — Riepilogo di oggi (arriva da solo alle 21)\n"
                     "/stop — Ferma l'agente\n"
                     "/restart — Ferma, torna a studies, riavvia\n"
                     "/status — Stato + screenshot + studi recenti\n"
@@ -1929,6 +2124,7 @@ def main():
     args = parser.parse_args()
     threading.Thread(target=_telegram_bot_loop, daemon=True, name="tg-bot").start()
     threading.Thread(target=_submissions_auto_updater, daemon=True, name="subs-updater").start()
+    threading.Thread(target=_daily_summary_loop, daemon=True, name="daily-summary").start()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"GUI on http://127.0.0.1:{args.port} (loopback only)")
     server.serve_forever()

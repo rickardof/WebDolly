@@ -358,6 +358,30 @@ Durante la run:
   sulla pagina Prolific dello studio, dove sono una descrizione — dentro un
   questionario la stessa frase può essere una domanda, e abbandonare una survey
   a metà per un falso positivo costa molto più di un click sprecato.
+- **Codice di completamento**, tre casi:
+  1. lo studio rimanda a Prolific con `…/submissions/complete?cc=XXXX`:
+     Prolific registra da solo, l'agente legge il codice **dall'URL** e chiude
+     il ciclo senza chiedere niente al modello;
+  2. lo studio mostra il codice **sulla sua pagina** (testo, campo da copiare,
+     iframe, o nel proprio URL tipo `?code=XXXX`): l'agente torna su Prolific,
+     clicca "I'm finished" e scrive il codice nel campo, come prima. In più ora
+     tutti i codici che compaiono durante lo studio vengono annotati, e alla fine
+     confrontati con quello che il modello ha inserito: se non torna, o se ha
+     chiuso con `NOCODE` mentre un codice c'era, arriva un ⚠️ su Telegram. Il
+     controllo segnala e basta, non corregge il modello;
+  3. lo studio non dà nessun codice: il modello chiude con `NOCODE`, come prima.
+     Un URL senza `cc` non vuol dire "niente codice", vuol dire solo che lì non
+     c'è.
+- **Attesa sull'elenco senza modello**: finito un ciclo in loop, la pagina viene
+  ricaricata e letta dal DOM ogni 45 s circa (la cadenza che il loop aveva già).
+  Se Prolific mostra "Waiting for studies" il modello non viene chiamato; parte
+  solo se c'è qualcosa sull'elenco, se la pagina non è riconoscibile, o ogni
+  15 minuti per sicurezza. Il 13 ottobre il 93% dei cicli era "elenco vuoto".
+- **Velocità del modello sotto controllo**: ogni risposta registra i tempi di
+  llama-server (in `/agent/status` e nel transcript). Se la generazione resta
+  sotto i 10 token/s per 6 risposte di fila (di solito sono ~30) arriva un
+  avviso: è successo il 13 ottobre, dopo ore di cache dei prompt riusata sullo
+  stesso slot, e `docker restart fara-test` l'ha risolto.
 - Le istruzioni nei preset (es. saltare studi con audio/video) sono solo testo
   del compito: modificale a piacere.
 
@@ -387,13 +411,20 @@ giallo sul bottone indica proprio questo.
 
 ## Dashboard delle performance
 
-`http://127.0.0.1:8766/dashboard` (o il bottone **📊** nella GUI) legge tutti i
-transcript in `var/logs/pw/run_*/` e mostra: cicli totali, completati (`CODE` /
-`NOCODE`), cicli senza esito (`NONE`), incompleti, durata media per studio
-completato, cicli/ora sul tempo effettivo della sessione, un istogramma
-dell'attività per ora e la tabella degli studi completati con codice, durata e
-numero di passi. Si aggiorna da sola ogni 60 s e, mentre l'agente gira, ha un
-bottone **⏹ Ferma**.
+`http://127.0.0.1:8766/dashboard` (o il bottone **📊** nella GUI) mostra: cicli
+totali, completati (`CODE` / `NOCODE`), cicli senza esito (`NONE`), incompleti,
+durata media per studio completato, cicli/ora, un istogramma dell'attività per
+ora e la tabella degli studi completati con codice, durata, passi e **da dove
+viene il codice** (URL o schermo).
+
+La sezione **Dove va il tempo** divide il tempo tra elenco vuoto, studi
+completati e cicli falliti, e i passi tra elenco, dentro uno studio e altrove su
+Prolific, con la velocità recente del modello. Il 13 ottobre: 72% del tempo
+sull'elenco vuoto, 5% negli studi completati.
+
+Ogni run scrive un `summary.json` accanto al transcript e la dashboard legge
+quelli; per le run più vecchie il riassunto si calcola una volta e si salva. Si
+aggiorna da sola ogni 60 s e, mentre l'agente gira, ha un bottone **⏹ Ferma**.
 
 ## Controllo da Telegram
 
@@ -404,17 +435,22 @@ italiana (`avvia`, `ferma`, `riavvia`, `stato`, `veloce`, `velocissimo`,
 
 | Comando | Cosa fa |
 |---|---|
-| `/start` | avvia l'agente con il **primo preset salvato**, senza navigare: parte da dov'è il browser |
+| `/start [nome]` | avvia l'agente con il preset indicato (basta una parte del nome) o, senza nome, con il primo; non naviga, parte da dov'è il browser |
+| `/presets` | elenca i preset salvati |
 | `/stop` | ferma subito la run (come il tasto ■) |
-| `/restart` | ferma, riporta il browser su `/studies`, riavvia |
+| `/restart [nome]` | ferma, riporta il browser su `/studies`, riavvia |
+| `/riepilogo` | il riepilogo della giornata (arriva comunque da solo alle 21, `FARA_SUMMARY_HOUR`) |
 | `/status` | screenshot live + stato, uptime, ciclo/passi/form/errori, fase, URL, timer dello studio, modalità velocità, quanti studi sono in memoria come scartati, studi recenti e guadagni delle ultime 24 h (solo studi approvati) |
 | `/inject <testo>` | manda un'istruzione extra alla run in corso: l'agente la riceve al passo successivo (come la casella in basso nella GUI) |
 | `/normal`, `/hurry`, `/superfast` | cambiano [modalità di velocità](#modalità-di-velocità) |
 | `/help` | la lista dei comandi |
 
 Notifiche automatiche: 📝 studio iniziato (con la durata stimata e l'URL), ✅
-studio completato (con il codice o `NOCODE`), ❌ errore della run (tipo di
-eccezione e coda del traceback).
+studio completato (con il codice o `NOCODE`, e se il codice viene dall'URL),
+⏭ studio scartato (motivo e link, se vuoi farlo a mano), ⚠️ codice da
+verificare, ⚠️ ciclo fallito con il tempo del prossimo tentativo, 🐌 modello
+lento, ❌ errore della run, 📊 riepilogo serale (cicli, studi completati e
+scartati, errori, velocità del modello, guadagni approvati o in revisione).
 
 Gli "studi recenti" e i guadagni arrivano dalla pagina `submissions` di
 Prolific, letta in una scheda temporanea aperta **solo nella pausa fra due
@@ -515,6 +551,9 @@ l'endpoint `/tokenize`, stima i token con un fallback a ~4 caratteri per token.
 | `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | dove tornare quando uno studio viene abbandonato |
 | `FARA_STUDY_CACHE` | `agent/study_cache.json` | memoria degli studi scartati |
 | `FARA_STUDY_CACHE_DAYS` | `14` | dopo quanti giorni uno studio scartato può essere riaperto |
+| `FARA_SLOW_TPS` | `10` | sotto questa velocità di generazione (mediana di 6 risposte) arriva l'avviso "modello lento" |
+| `FARA_SUMMARY_HOUR` | `21` | ora del riepilogo giornaliero su Telegram |
+| `FARA_CAPTURE_DIR` | `var/captures` | dove salvare l'HTML delle pagine Prolific che servono per i test |
 | `FARA_TEST_INSTANCE` | *(vuota)* | `1` su un secondo server di prova: niente bot Telegram (due poller sullo stesso token si rubano i messaggi) e niente lettura delle submission (aprirebbe una scheda nel browser vero) |
 | `FARA_ENABLE_THINKING` | `0` | `1` = lascia il thinking del template. Sul 9B peggiora molto i click, sul 27B è indifferente |
 | `FARA_STREAM_FPS` / `FARA_STREAM_QUALITY` | `5` / `60` | stream MJPEG della GUI |
@@ -536,9 +575,19 @@ di KB ed è l'unica traccia di cosa ha fatto l'agente. Dashboard e conteggio
 degli studi completati leggono entrambe le forme, quindi lo storico delle
 statistiche non si perde.
 
+Ogni run ha anche un `summary.json` (esito, da dove viene il codice, passi
+sull'elenco / nello studio / altrove, velocità mediana del modello), e nel
+transcript una riga per passo con i tempi di llama-server e, a fine studio, il
+confronto tra il codice inserito e quelli visti (`code_check`).
+
 Altri file in `var/logs/pw/`: `gui_server.out` (log del server quando è avviato dagli
 script cloud o da systemd) e `submissions_api_debug.txt` (ultimo esito della
 lettura delle submission di Prolific).
+
+In `var/captures/` finisce l'HTML delle pagine Prolific vere che servono per i
+test (elenco con studi, pagina di uno studio, redirect di completamento), una
+volta al giorno per tipo. Contengono nome e saldo dell'account: si ritagliano e
+si spostano a mano in `fixtures/`.
 
 ## Test e benchmark
 
@@ -569,7 +618,7 @@ FARA_DATA_DIR="$PWD/../fixtures/test" FARA_LOG_ROOT="$PWD/../var/logs/test" \
 | Script | Cosa verifica |
 |---|---|
 | `agent/tests_pw.py` | layer Playwright: ogni risultato è riletto dal DOM finale |
-| `agent/tests_resilience.py` | guardrail e velocità. Metà **offline** (modalità di velocità, veto del timer su `terminate`, rilevamento studi scartati e audio/video, memoria degli studi, rotazione dei log, backoff dei retry): `--offline` la esegue senza browser né rete, in qualunque momento. L'altra metà tocca il DOM e **si rifiuta di partire se una run è in corso** |
+| `agent/tests_resilience.py` | guardrail, velocità, codici, attesa sull'elenco, recupero dei cicli: 117 controlli. Metà **offline** (modalità di velocità, veto del timer su `terminate`, rilevamento studi scartati e audio/video, memoria degli studi, rotazione dei log, backoff dei retry): `--offline` la esegue senza browser né rete, in qualunque momento. L'altra metà tocca il DOM e **si rifiuta di partire se una run è in corso** |
 | `agent/tests_stop.py [base_url]` | quanto ci mette Stop a fermare la run nei 3 casi lenti |
 | `agent/gui_e2e.py` | GUI end-to-end. Ha `http://127.0.0.1:8766` scritto nel codice e avvia una run vera: cambia la porta in 8767 prima di lanciarlo |
 | `agent/gui_live_e2e.py [base_url]` | feed SSE, stream MJPEG, marcatori (rifiuta la porta 8766) |

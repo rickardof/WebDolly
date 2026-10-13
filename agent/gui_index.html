@@ -700,7 +700,7 @@ function render() {
 
 /* ---------- live card: what the agent is doing right now ---------- */
 const live = { phase: null, step: null, text: '', info: '', t0: 0 };
-const PHASE_TXT = { observe: 'Guardo lo schermo…', think: 'Il modello ragiona…', act: 'Eseguo l’azione…', form: 'Compilo il modulo…' };
+const PHASE_TXT = { observe: 'Guardo lo schermo…', think: 'Il modello ragiona…', act: 'Eseguo l’azione…', form: 'Compilo il modulo…', watch: 'Elenco vuoto, ricontrollo senza modello…' };
 let liveQueued = false;
 function renderLiveSoon() { if (!liveQueued) { liveQueued = true; requestAnimationFrame(() => { liveQueued = false; renderLive(); }); } }
 function liveThought() {

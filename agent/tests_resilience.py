@@ -17,6 +17,7 @@ Two halves:
 """
 import argparse
 import gzip
+import threading as _th_mod
 import json
 import sys
 import tempfile
@@ -235,6 +236,170 @@ def offline():
         seq = [gs._backoff(n) for n in range(1, 7)]
         record("backoff grows then flattens at 5 min", seq == [30, 60, 120, 300, 300, 300], str(seq))
         record("backoff is defined for a nonsense count", gs._backoff(0) == 30 and gs._backoff(-3) == 30)
+
+        # --- completion code: Prolific redirect vs the study's own page ----
+        for url, want in [
+            ("https://app.prolific.com/submissions/complete?cc=C1A2B3", "C1A2B3"),
+            ("https://app.prolific.co/submissions/complete/?cc=Cover_F8033DF8&x=1", "Cover_F8033DF8"),
+            ("https://app.prolific.com/submissions/complete", ""),      # no code: no opinion
+            ("https://app.prolific.com/submissions", ""),
+            ("https://survey.example.com/end?cc=FAKE1", ""),          # only Prolific's redirect counts
+            ("https://app.prolific.com/submissions/complete?cc=<x>", ""),
+        ]:
+            record(f"code from URL: {url[8:60]!r}", ac.completion_code(url) == want,
+                   f"got={ac.completion_code(url)!r}")
+        for text, want in [
+            ("Thank you! Your completion code is: C1A2B3X9. Copy it into Prolific.", ["C1A2B3X9"]),
+            ("Prolific code: Cover_F8033DF8", ["Cover_F8033DF8"]),
+            ("Your survey completion code\n\nCX7Y2Z", ["CX7Y2Z"]),
+            ("Your completion code will be shown on the next page.", []),
+            ("Thank you for taking part in this study.", []),
+        ]:
+            record(f"code on the study's page: {text[:30]!r}", ac.codes_on_page(text) == want,
+                   f"got={ac.codes_on_page(text)}")
+
+        for url, want in [("https://app.booktest.io/thanks?code=PLKXLQ&lang=it", ["PLKXLQ"]),
+                          ("https://x.example/end?completion_code=C9X", ["C9X"]),
+                          ("https://x.example/?page=2&id=55", [])]:
+            record(f"code in the study's URL: {url[8:45]!r}", ac.codes_in_url(url) == want)
+        for ans, seen, want in [("CODE: PLKXLQ", ["PLKXLQ"], "match"),
+                                ("CODE: PLKXLO", ["PLKXLQ"], "mismatch"),
+                                ("NOCODE", ["PLKXLQ"], "missed"),
+                                ("NOCODE", [], "not_found"),
+                                ("CODE: X1", [], "not_found")]:
+            record(f"code check {ans} vs {seen} -> {want}", ac.check_code(ans, seen) == want)
+
+        # --- list watching: only a clear "empty" may skip the model -------
+        L = "https://app.prolific.com/studies"
+        for url, text, want in [
+            (L, "Studies ... Waiting for studies ... Note: you do not need to refresh", "empty"),
+            (L, "Studies  Shopping survey  £3.00  5 mins  Take part", "studies"),
+            (L, "", "unknown"),                                   # page not readable
+            ("https://app.prolific.com/studies/" + "a" * 24, "Waiting for studies", "unknown"),
+            ("https://app.prolific.com/auth/login", "Log in", "unknown"),
+        ]:
+            record(f"list state {url[8:40]}.. -> {want}", ac.list_state_from(url, text) == want)
+
+        # --- model speed watch --------------------------------------------
+        alerts = []
+        saved_n, saved_live = ac._notify_telegram, ac._live
+        ac._notify_telegram, ac._live = (lambda m: alerts.append(m)), (lambda m: None)
+        ac._gen_tps.clear(); ac._last_slow_alert = 0.0
+        try:
+            for _ in range(10):
+                ac._record_timing({"predicted_n": 5, "predicted_per_second": 1.0})
+            record("very short answers never count as slow", not alerts and not ac._gen_tps)
+            for _ in range(ac.SLOW_WINDOW):
+                ac._record_timing({"predicted_n": 100, "predicted_per_second": 33.0, "prompt_n": 1400})
+            record("normal speed raises nothing", not alerts and ac.model_speed()["median_gen_tps"] == 33.0)
+            for _ in range(ac.SLOW_WINDOW):
+                ac._record_timing({"predicted_n": 100, "predicted_per_second": 2.4})
+            record("a sustained collapse is reported on Telegram", len(alerts) == 1, str(alerts)[:60])
+            for _ in range(ac.SLOW_WINDOW):
+                ac._record_timing({"predicted_n": 100, "predicted_per_second": 2.4})
+            record("...once per hour, not at every step", len(alerts) == 1)
+        finally:
+            ac._notify_telegram, ac._live = saved_n, saved_live
+            ac._gen_tps.clear(); ac._last_slow_alert = 0.0
+
+        # --- per-run summary ----------------------------------------------
+        sid = "b" * 24
+        lines = [json.dumps(x) for x in [
+            {"type": "diag", "step": 1, "url": L, "guarded": True, "timer_active": False},
+            {"type": "diag", "step": 2, "url": f"{L}/{sid}", "guarded": True, "timer_active": False},
+            {"type": "diag", "step": 3, "url": "https://q.example.com/s", "guarded": False,
+             "timer_active": True, "model": {"gen_tps": 30.0}},
+            {"type": "diag", "step": 4, "url": "https://q.example.com/s", "guarded": False,
+             "timer_active": True, "model": {"gen_tps": 32.0}},
+            {"step": 5, "action_type": "terminate", "args": {"answer": "CODE: C1A2"},
+             "code_source": "url"},
+        ]]
+        s = ac.summarize_transcript(lines)
+        record("summary: outcome and code source", s["outcome"] == "CODE" and s["code_source"] == "url")
+        record("summary: where the steps went",
+               s["steps_where"] == {"list": 1, "study": 2, "elsewhere": 1}, str(s["steps_where"]))
+        record("summary: the study id is kept", s["studies"] == [sid])
+        record("summary: an unfinished run reads as INCOMPLETE",
+               ac.summarize_transcript(lines[:3])["outcome"] == "INCOMPLETE")
+
+        # --- Telegram presets ---------------------------------------------
+        ps = [{"name": "Survey research (QA)"}, {"name": "Survey lunghe"}, {"name": "Test"}]
+        record("/start with no name takes the first preset", gs._pick_preset(ps)[0] is ps[0])
+        record("/start matches the exact name in any case", gs._pick_preset(ps, "test")[0] is ps[2])
+        record("/start takes a unique partial match", gs._pick_preset(ps, "lungh")[0] is ps[1])
+        p_, err = gs._pick_preset(ps, "survey")
+        record("/start refuses an ambiguous name and lists the options",
+               p_ is None and "Survey lunghe" in err)
+        record("/start with no presets says so", gs._pick_preset([], "x")[0] is None)
+        record("the daily summary builds", "Riepilogo" in gs._daily_summary_text())
+
+        # --- the wait between cycles ---------------------------------------
+        seen = iter(["empty", "empty", "studies"])
+        saved = (gs.LIST_CHECK_MIN_SECONDS, gs._refresh_list, ac.studies_list_state, ac.capture_page)
+        gs.LIST_CHECK_MIN_SECONDS, gs._refresh_list = 0, (lambda url: None)
+        ac.studies_list_state, ac.capture_page = (lambda: next(seen)), (lambda kind: None)
+        try:
+            stop2 = _th_mod.Event()
+            t0 = time.time()
+            stopped = gs._wait_for_studies("u", 0, stop2)
+            record("an empty list is re-checked without the model until studies appear",
+                   stopped is False and next(seen, "done") == "done")
+            stop2.set()
+            ac.studies_list_state = lambda: "empty"
+            record("Stop during the wait ends it at once",
+                   gs._wait_for_studies("u", 0, stop2) is True)
+        finally:
+            (gs.LIST_CHECK_MIN_SECONDS, gs._refresh_list, ac.studies_list_state,
+             ac.capture_page) = saved
+
+        # --- the recovery path itself, end to end --------------------------
+        # A cycle that raises must be reported and retried, not end the run.
+        # The first version crashed right here (UnboundLocalError on
+        # `traceback`, shadowed by an import further down the function) and
+        # only the unit test of _backoff existed, so nothing noticed.
+        import queue as _q, threading as _th
+
+        class _Bridge:
+            def reset_to(self, url): calls.append(("reset_to", url))
+            def wait_for_content(self): pass
+            def recycle_tab(self, url): calls.append(("recycle", url)); return True
+
+        calls, cycles, notified = [], [], []
+        stop = _th.Event()
+
+        def fake_cycle(*a, **kw):
+            cycles.append(1)
+            if len(cycles) == 1:
+                raise ValueError("No <tool_call> block in model output")
+            stop.set()
+            return True, None
+
+        saved = (gs.run_one_cycle, gs._backoff, gs.get_current_url, gs.pw_bridge,
+                 gs._inhibit_sleep, ac._notify_telegram)
+        gs.run_one_cycle, gs._backoff = fake_cycle, lambda n: 0
+        gs.get_current_url = lambda: "https://app.prolific.com/studies"
+        gs.pw_bridge, gs._inhibit_sleep = _Bridge(), (lambda: None)
+        ac._notify_telegram = lambda m: notified.append(m)
+        with gs.state_lock:
+            gs.state.update(stop_event=stop, answer_queue=_q.Queue(), running=True,
+                            events=[], seq=0,
+                            stats={"cycle": 0, "steps": 0, "batch_fills": 0, "errors": 0})
+        try:
+            gs.agent_driver("task", "", 5, True, 0.01)
+        finally:
+            (gs.run_one_cycle, gs._backoff, gs.get_current_url, gs.pw_bridge,
+             gs._inhibit_sleep, ac._notify_telegram) = saved
+        errs = [e.get("message", "") for e in gs.state["events"] if e.get("type") == "error"]
+        record("a failed cycle is retried instead of ending the run", len(cycles) == 2,
+               f"cicli={len(cycles)}")
+        record("the failure is reported once, with the retry delay",
+               len(errs) == 1 and "riprovo" in errs[0], str(errs)[:90])
+        record("nothing crashes inside the recovery itself",
+               not any("traceback" in e or "local variable" in e for e in errs))
+        record("the browser is put back on a known page before retrying",
+               calls and calls[0][0] == "reset_to", str(calls))
+        record("Telegram gets the failed cycle and the retry delay",
+               any("ValueError" in m and "Riprovo tra" in m for m in notified), str(notified)[:80])
     finally:
         ac.pw_bridge = real_bridge
 
@@ -263,6 +428,9 @@ FIXTURES = {
 </body>""",
     "test_media.html": """<!doctype html><meta charset=utf-8><body style="font:16px sans-serif">
 <h1>Listening task</h1><video id=v src="data:video/mp4;base64,AAAA" controls width=320></video></body>""",
+    "test_code_end.html": """<!doctype html><meta charset=utf-8><body style="font:16px sans-serif">
+<h1>Thank you!</h1><label for=c>Your Prolific code</label> <input id=c readonly value="ZX81AB">
+<iframe srcdoc="<p>Completion code: IFR4ME</p>" width=300 height=60></iframe></body>""",
     "test_nomedia.html": """<!doctype html><meta charset=utf-8><body style="font:16px sans-serif">
 <h1>Plain questionnaire</h1><p>Twelve questions about your week.</p></body>""",
 }
@@ -335,6 +503,13 @@ def dom(force: bool, port: int):
            ac._study_title())
     goto("test_nomedia.html")
     record("a plain page is not flagged", ac._detect_av(check_text=False) == "")
+
+    # 4b. codes on a custom end page: in a copy box and inside an iframe
+    goto("test_code_end.html")
+    time.sleep(0.5)
+    found = ac.codes_on_page(ac._end_page_text())
+    record("code in a read-only field is found", "ZX81AB" in found, str(found))
+    record("code inside an iframe is found", "IFR4ME" in found, str(found))
 
     # 5. extra tabs are closed after a study
     pb.run(lambda b: [b._active.context.new_page().goto("about:blank") for _ in range(2)])

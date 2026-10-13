@@ -1,110 +1,126 @@
 # Next steps
 
-Stato al 13 ottobre 2026. Ordinato per urgenza, non per dimensione.
-Quello che è stato chiuso è in fondo, in [Fatto](#fatto), con una riga su come
-verificarlo.
+Ordinati per impatto. I numeri vengono dai log del 13 ottobre (08:44 → 14:10):
+
+| | |
+|---|---|
+| tempo sull'elenco vuoto | 72% (196 cicli su 211 erano "niente da fare") |
+| tempo negli studi completati | 5% — 3 studi, mediana 36 passi, 5 min |
+| tempo in cicli falliti | 23% — uno da 127 passi su un task esterno, mai finito |
+| velocità del modello | ~33 token/s sano; 17 e poi 2,4 dopo ore di cache riusata |
 
 ---
 
-## 1. Ruotare i segreti (manuale, da fare una volta)
+## 1. Fermare uno studio che non va da nessuna parte
 
-I file sono usciti dalla repo (`.gitignore` + `.example`), ma **restano nella
-storia di git** e sono già stati pushati su `origin/main`. Il repo è privato,
-quindi non è un incidente; i due valori però sono ancora validi.
+**Perché** — `run_20261013_101546`: 116 passi dentro un task esterno senza
+arrivare in fondo; il preset ha `max_rounds: 1500`, quindi niente l'avrebbe
+fermato. È la fetta più grossa del 23% di tempo nei cicli falliti.
 
-- [ ] token del bot: `/revoke` su @BotFather, poi riscrivere
-      `agent/telegram_config.py`
-- [ ] chiave dell'API del modello: rigenerarla e riscrivere `scripts/cloud/fara.env`
-- [ ] solo se il repo diventa pubblico: riscrivere la storia
-      (`git filter-repo --invert-paths --path scripts/cloud/fara.env --path
-      agent/telegram_config.py`) e force-push
+- [ ] budget per studio in tempo e passi, proporzionato alla durata dichiarata
+      (es. 3× la stima, con un minimo), separato da `max_rounds`
+- [ ] rilevamento "fermo": stesso screenshot (hash percettivo) per N passi, o la
+      stessa azione ripetuta senza che la pagina cambi
+- [ ] allo scatto, il punto 2
 
-## 2. Far girare la metà DOM dei test
+Lo stato c'è già (`StudyTimer`, `_current_study_id`, `summary.json` dice già
+quanti passi finiscono "dentro uno studio"). **Sforzo**: piccolo.
 
-`agent/tests_resilience.py` esegue 54 controlli offline, ma la metà che
-tocca il browser (bottone disabilitato, recupero del click su checkbox, durata
-letta dalla card giusta, `<video>` in pagina, chiusura delle schede extra) non è
-mai stata eseguita: si rifiuta di partire con una run in corso, com'è giusto.
+## 2. Restituire lo studio invece di abbandonarlo
 
-- [ ] il container di prova è già pronto (fermo, CDP :9334): il comando esatto
-      è nel README, sezione "Test e benchmark"
-- [ ] `docker start fara-browser-test` e lanciarlo
-- [ ] aggiungere i casi che restano scoperti: `terminate` rifiutato dentro una
-      run vera, e la riga della cache iniettata nel prompt sull'elenco studi
+**Quando va restituito** — ogni volta che l'agente ha *iniziato* uno studio
+(ha cliccato "Take part", su Prolific lo studio risulta tuo) e poi smette senza
+finirlo. Oggi succede in tre casi, e in tutti l'agente naviga via e basta:
 
-## 3. Watchdog del browser
+1. con "salta studi con audio o video" attivo, il `<video>` compare **dentro**
+   la survey, quando lo studio è già preso;
+2. il ciclo si interrompe a metà studio (errore, scheda bloccata, `max_rounds`);
+3. con il punto 1, lo studio si blocca o sfora il budget.
 
-La scheda bloccata ora si recupera da sola (`pw_bridge.recycle_tab`), ma il
-container no: se muore Chromium, ogni tentativo fallisce allo stesso modo
-finché non intervieni a mano.
+Non serve invece quando lo studio viene scartato **prima** di prenderlo (non
+idoneo, pieno, audio/video letto nella descrizione): lì non c'è niente da
+restituire.
 
-- [ ] se il CDP non risponde per N tentativi, `docker restart` del container e
-      ripartenza da `/studies`
-- [ ] notifica Telegram distinta ("browser riavviato"), per distinguerla da un
-      errore del modello
-- [ ] `/screen.png` passa da `scrot`, quindi mostra l'ultimo frame disegnato
-      anche quando il renderer è bloccato: la GUI sembra viva mentre non lo è.
-      Un segnale di "pagina non risponde" nella barra userebbe il dato che ora
-      c'è già (URL illeggibile)
+**Perché conta** — uno studio preso e lasciato resta "attivo" fino al timeout
+del ricercatore: il posto resta occupato per tutto quel tempo, e i timeout
+pesano sul profilo più di un "Return" esplicito.
 
-## 4. Telegram: scegliere il preset
+- [ ] percorso di uscita: pagina dello studio su Prolific → "Return" → conferma,
+      fatto in codice sul DOM, con il modello solo come ripiego
+- [ ] usarlo nei tre casi sopra, con notifica Telegram e motivo
+- [ ] serve l'HTML vero di quel flusso (vedi punto 4)
 
-`_do_start()` usa `presets[0]`, quindi dal telefono si lancia un solo profilo di
-lavoro. `/inject` invece ora c'è.
+**Sforzo** — medio.
 
-- [ ] `/start <nome>` con match parziale sul nome del preset
-- [ ] `/presets` per listarli (o una inline keyboard con un bottone per preset)
+## 3. Tasso di approvazione e guadagno reale
 
-## 5. Lettura delle submission fragile
+La dashboard ora dice dove va il tempo, ma non quanti studi vengono approvati
+o rifiutati: quello viene dalla pagina delle submission, letta con regex
+sull'`innerText`, che si azzera in silenzio al primo cambio di layout.
 
-`_fetch_submissions()` fa regex sull'`innerText` della pagina Prolific: dipende
-da lingua, layout e stringhe come `AWAITING REVIEW`. Se cambia qualcosa torna
-zero righe e `/status` dice "nessuna submission" senza spiegare perché (il
-motivo finisce in `var/logs/pw/submissions_api_debug.txt`).
+- [ ] HTML della pagina submission in `fixtures/` + test offline del parser
+- [ ] lettura delle righe della tabella invece del testo
+- [ ] approvati / in revisione / rifiutati / timeout nella dashboard e nel
+      riepilogo serale
+- [ ] avviso su Telegram quando la pagina carica ma il parsing torna vuoto
 
-- [ ] salvare l'HTML in `fixtures/test/` e scrivere un test offline del parser
-      (nessun browser, nessuna rete: come la metà offline di `tests_resilience`)
-- [ ] leggere il DOM strutturato (righe della tabella) invece del testo
-- [ ] se il parsing torna vuoto ma la pagina ha caricato, mandare un warning su
-      Telegram invece di restare in silenzio
+## 4. Fixture Prolific vere
 
-## 6. Cloud: verificare davvero su ARM
+L'agente ora salva da solo l'HTML delle pagine utili in `var/captures/` (elenco
+con studi, pagina di uno studio, redirect di completamento), una volta al giorno
+per tipo. Resta da:
 
-I path sono stati uniformati (`FARA_HOME`), ma niente è stato provato su una VM.
+- [ ] ritagliarle (via nome e saldo) e spostarle in `fixtures/`
+- [ ] catturare anche il flusso di "Return" e la pagina submission (servono ai
+      punti 2 e 3)
+- [ ] test DOM su quelle pagine: lettura dell'elenco con studi veri, codice di
+      completamento sulla pagina vera
 
-- [ ] confermare che `browser/Dockerfile` (bookworm + chromium + scrot +
-      xdotool) builda e fa screenshot su arm64
-- [ ] un ciclo completo end-to-end col modello via API, salvando il risultato in
-      `bench/bench_models/` come gli altri (oggi i bench coprono solo 27B e 9B locali)
-- [ ] `FARA_MODEL=gemini-2.0-flash` è vecchio: valutare un modello recente e
-      rifare il confronto grounding/batch-fill con `model_bench.py`
+## 5. Evitare che la cache del modello si degradi di nuovo
 
-## 7. Conteggio token approssimato con le API cloud
+Il 13 ottobre la generazione è scesa da ~33 a 17 token/s alle 12:51 e a 2,4 alle
+13:58, mentre una richiesta nuova andava ancora a 24-33: si era degradata la
+cache dei prompt dello slot che l'agente riusava da ore. `docker restart
+fara-test` l'ha risolta; ora arriva un avviso 🐌 se ricapita. Per evitarlo:
 
-Senza `llama-server` non c'è `/tokenize`, quindi `_tokenize_count()` stima
-~4 caratteri per token. È conservativo sul testo ma non vale per le immagini, e
-`MEASURED_IMAGE_TOKENS = 1262` è tarato su Fara: con un altro modello il budget
-di contesto può sforare, e con le API si paga a token.
+- [ ] riavviare llama-server con `--slot-save-path`: abilita
+      `POST /slots/<id>?action=erase`, e l'agente può svuotare la cache del suo
+      slot a inizio ciclo (ogni ciclo riparte comunque da una conversazione
+      nuova, quindi non si perde niente)
+- [ ] in alternativa, riavvio automatico del container quando scatta l'avviso
+      (più brutale, da decidere)
+- [ ] tenere d'occhio la velocità nei prossimi giorni: ora è nel `summary.json`
+      di ogni run e nella dashboard
 
-- [ ] misurare quanto costa in token un'immagine sul provider usato e aggiornare
-      la costante (o renderla una env var)
-- [ ] usare l'endpoint di conteggio del provider quando esiste
-- [ ] loggare i token effettivi di ogni chiamata nel transcript, così il consumo
-      si vede nella dashboard
+## 6. Ricostruire le immagini del browser
 
-## 8. Dashboard: ricalcolo completo a ogni richiesta
+Il fix al lock del profilo (`docker/browser/entrypoint.sh` cancella i
+`Singleton*` vecchi all'avvio) entra solo con le immagini ricostruite. Finché
+non si fa, ogni container ricreato resta senza CDP finché qualcuno non toglie il
+lock a mano, come è successo due volte il 13 ottobre.
 
-`_build_dashboard()` rilegge e riparsa *tutti* i transcript a ogni GET (ora anche
-quelli compressi), e la pagina si auto-ricarica ogni 60 s. Su una VM piccola è
-lavoro inutile su un server single-process che serve anche lo stream MJPEG.
+- [ ] `docker build -t fara-browser docker/browser/` e
+      `docker build -t fara-browser-pw docker/browser-pw/`, poi ricreare
+      `fara-browser-pw` e `fara-browser-test` (comandi nel README); con l'agente
+      fermo
 
-- [ ] cache del risultato invalidata dall'evento `done`
-- [ ] o un `summary.json` per run, scritto a fine ciclo
-- [ ] mostrare i guadagni (già letti per Telegram) accanto ai cicli/ora
-- [ ] mostrare gli studi in memoria come scartati (oggi solo via
-      `GET /study_cache`)
+---
 
-## 9. Code di pulizia dopo il trasloco
+## Affidabilità e infrastruttura
+
+### 7. Watchdog del container del browser
+La scheda bloccata si recupera da sola, il container no.
+- [ ] CDP muto per N tentativi → `docker restart fara-browser-pw` e ripartenza
+- [ ] nella barra della GUI un segnale "pagina non risponde" quando l'URL non si
+      legge: lo screenshot passa da `scrot` e sembra vivo anche quando non lo è
+
+### 8. Cloud (solo se si passa a un modello via API)
+- [ ] build dell'immagine del browser su arm64 e un ciclo completo sulla VM
+- [ ] bench del modello remoto in `bench/bench_models/`, come gli altri
+- [ ] conteggio token vero (oggi stima ~4 caratteri/token; l'immagine è tarata
+      su Fara)
+
+## Pulizia rimasta dal trasloco
 
 La repo è stata riorganizzata (vedi [Fatto](#fatto)); restano due residui che
 richiedono una tua decisione.
@@ -123,23 +139,45 @@ richiedono una tua decisione.
 
 ## Idee, non ancora decise
 
-- `hurry` manda ancora PNG: su uno screenshot vero sono ~380 KB contro i ~50 KB
-  del JPEG di `super_fast`. Irrilevante col modello in locale, non con un'API a
-  pagamento: valutare JPEG q80 anche per `hurry`.
 - Gli screen-out che avvengono **dentro** la survey esterna non entrano nella
-  memoria degli studi scartati (di proposito: lì le stesse frasi possono essere
-  una domanda). Si potrebbe riconoscere il rientro su Prolific con stato
-  "screened out" subito dopo, che è un segnale pulito.
-- Riconoscere gli studi che sforano sistematicamente il tempo dichiarato e
-  declassarli, invece di sceglierli solo per ricompensa.
-
----
+  memoria degli studi scartati. Il rientro su Prolific con stato "screened out"
+  subito dopo è un segnale pulito per registrarli.
+- Riconoscere dall'elenco (DOM) quali studi sono già nella memoria degli
+  scartati, e non chiamare il modello se l'elenco contiene solo quelli.
 
 ## Fatto
 
+- **Attesa sull'elenco senza modello** — tra un ciclo e l'altro la pagina viene
+  ricaricata e letta dal DOM ogni ~45 s (la cadenza che il loop aveva già); il
+  modello parte solo se c'è qualcosa, se la pagina non è riconoscibile o ogni
+  15 minuti. Verificato sulla pagina vera ("Waiting for studies" → `empty`).
+- **Codice di completamento** — dall'URL del redirect Prolific (`?cc=`) in
+  codice; quando il codice è sulla pagina dello studio (testo, campo da copiare,
+  iframe, URL della pagina) viene annotato durante lo studio e confrontato con
+  quello che il modello inserisce su Prolific: ⚠️ se non torna o se chiude con
+  `NOCODE` mentre un codice c'era. Gli studi senza codice restano come prima.
+- **Metriche** — `summary.json` per run (esito, da dove viene il codice, dove
+  sono andati i passi, velocità del modello); la dashboard li legge invece di
+  riparsare tutto, e mostra "Dove va il tempo" e la colonna "Codice da".
+- **Notifiche** — studio scartato con link per farlo a mano, codice da
+  verificare, modello lento, riepilogo serale alle 21 (`/riepilogo` a richiesta),
+  `/presets`, `/start <nome>` e `/restart <nome>`.
+- **Velocità del modello** — i tempi di llama-server si registrano a ogni
+  risposta (transcript, `/agent/status`, dashboard) con avviso sotto i 10
+  token/s. La misura ha trovato il vero collo di bottiglia: cache dei prompt
+  degradata (2,4 token/s invece di 33), risolta riavviando `fara-test`. L'idea
+  di mandare JPEG anche in `hurry` è caduta: a parità di risoluzione i token
+  dell'immagine sono gli stessi, cambiano solo i byte su localhost.
+- **Bug nel recupero dei cicli** — un `import traceback` dentro `agent_driver`
+  rendeva il nome locale a tutta la funzione, e il ramo che doveva riprovare
+  dopo 30 s andava in crash con `UnboundLocalError`: è successo davvero, al
+  riavvio del modello, e ha fermato la run. Corretto, con un test che esegue
+  tutto il percorso di recupero e che col codice vecchio fallisce.
+- **Metà DOM dei test eseguita** per la prima volta sullo stack isolato:
+  `tests_resilience.py` 117/117.
 - **Segreti fuori dalla repo** — `agent/telegram_config.py` e
   `scripts/cloud/fara.env` sono ignorati da git, con `.example` commentati al loro
-  posto; resta solo da ruotare i valori (§1). Verifica:
+  posto. Verifica:
   `git check-ignore -v agent/telegram_config.py scripts/cloud/fara.env`.
 - **Path di `scripts/cloud/` uniformati** — tutti gli script usano `FARA_HOME`
   (default `~/web-agent`), `sync-to-cloud.sh` ricava la sorgente da dove si

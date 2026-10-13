@@ -20,6 +20,15 @@ done
 
 x11vnc -display :99 -forever -shared -nopw -quiet -rfbport 5900 &
 
+# A recreated container has a new hostname, and Chromium refuses a profile
+# whose SingletonLock names another host ("profile appears to be in use by
+# another Chromium process") -- the browser never starts and CDP stays dead.
+# Only one Chromium ever runs in this container, so a lock found at startup
+# is always stale.
+rm -f /home/browser/chromium-profile/SingletonLock \
+      /home/browser/chromium-profile/SingletonSocket \
+      /home/browser/chromium-profile/SingletonCookie
+
 exec chromium \
   --no-sandbox \
   --disable-gpu \

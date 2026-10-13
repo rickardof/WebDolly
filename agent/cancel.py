@@ -101,7 +101,7 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
         if resp.status >= 400:
             raise RuntimeError(f"HTTP {resp.status} from {u.path}: "
                                f"{resp.read()[:300].decode(errors='replace')}")
-        parts, usage, finish = [], {}, None
+        parts, usage, finish, timings = [], {}, None, {}
         for raw in resp:
             line = raw.strip()
             if not line.startswith(b"data:"):
@@ -112,6 +112,8 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
             chunk = json.loads(data)
             if chunk.get("usage"):
                 usage = chunk["usage"]
+            if chunk.get("timings"):          # llama-server only
+                timings = chunk["timings"]
             for ch in chunk.get("choices", []):
                 delta = ch.get("delta", {})
                 if delta.get("content"):
@@ -124,7 +126,7 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
         return {"choices": [{"message": {"role": "assistant", "content": "".join(parts)},
-                             "finish_reason": finish}], "usage": usage}
+                             "finish_reason": finish}], "usage": usage, "timings": timings}
     except BaseException:
         if _cancel.is_set():
             raise Cancelled() from None

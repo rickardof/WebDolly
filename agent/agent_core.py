@@ -31,7 +31,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 import urllib.request
 
 from PIL import Image
@@ -260,6 +260,60 @@ def set_hurry(enabled: bool):
     set_speed("hurry" if enabled else "normal")
 
 
+# --- model speed watch -------------------------------------------------------
+# Measured on 13 Oct: after hours of prompt-cache reuse on one llama-server
+# slot, generation fell from ~33 to 17 and then 2.4 tokens/s while a fresh
+# request still ran at 24-33 -- the model was fine, the reused slot was not.
+# Nothing in the agent noticed: it just took 50 s a step. So every call's
+# timings are kept, logged, and a sustained collapse is reported.
+SLOW_TPS = float(os.environ.get("FARA_SLOW_TPS", "10"))
+SLOW_WINDOW = 6                 # consecutive calls looked at
+SLOW_ALERT_EVERY = 3600         # seconds between two Telegram alerts
+_gen_tps: list = []
+_last_slow_alert = 0.0
+last_timing: dict = {}
+
+
+def _record_timing(timings: dict):
+    """Keep the speed of the last calls and warn when it collapses."""
+    global last_timing, _last_slow_alert
+    if not timings:
+        last_timing = {}
+        return
+    last_timing = {
+        "prompt_n": timings.get("prompt_n"),
+        "prompt_tps": round(timings.get("prompt_per_second") or 0, 1),
+        "gen_n": timings.get("predicted_n"),
+        "gen_tps": round(timings.get("predicted_per_second") or 0, 1),
+        "cache_n": timings.get("cache_n"),
+    }
+    if (timings.get("predicted_n") or 0) < 20:      # too short to say anything
+        return
+    _gen_tps.append(last_timing["gen_tps"])
+    del _gen_tps[:-SLOW_WINDOW]
+    if len(_gen_tps) < SLOW_WINDOW:
+        return
+    med = sorted(_gen_tps)[len(_gen_tps) // 2]
+    if med >= SLOW_TPS:
+        return
+    _live({"type": "notice", "text": f"Modello lento: {med:.1f} token/s di mediana sulle "
+                                      f"ultime {SLOW_WINDOW} risposte (soglia {SLOW_TPS:.0f})."})
+    if time.time() - _last_slow_alert > SLOW_ALERT_EVERY:
+        _last_slow_alert = time.time()
+        _notify_telegram(
+            f"🐌 Modello lento: {med:.1f} token/s (di solito ~30).\n"
+            "Di solito è la cache di llama-server degradata dopo ore di uso: "
+            "`docker restart fara-test` la riporta a posto.")
+
+
+def model_speed() -> dict:
+    """Recent generation speed, for the GUI/API."""
+    if not _gen_tps:
+        return {}
+    return {"median_gen_tps": sorted(_gen_tps)[len(_gen_tps) // 2],
+            "last": last_timing, "slow_threshold": SLOW_TPS}
+
+
 def call_fara(messages: list, step: int = None) -> str:
     payload = {
         "model": FARA_MODEL,
@@ -274,6 +328,7 @@ def call_fara(messages: list, step: int = None) -> str:
     result = cancel.post_chat(FARA_URL, payload, timeout=120,
                               on_delta=lambda t: _live({"type": "token", "step": step, "text": t}),
                               extra_headers=extra_hdrs)
+    _record_timing(result.get("timings") or {})
     return result["choices"][0]["message"]["content"]
 
 
@@ -478,6 +533,178 @@ def is_forbidden_url(url: str) -> bool:
 
 _LIST_PATH = re.compile(r"^/studies/?$", re.IGNORECASE)
 _STUDY_PATH = re.compile(r"^/studies/([0-9a-fA-F]{24})/?$", re.IGNORECASE)
+_COMPLETE_PATH = re.compile(r"^/submissions/complete/?$", re.IGNORECASE)
+
+
+_FILLER = r"(?:is|below|here|in|on|into|to|prolific|please|enter|paste|copy|the|your|following|this)"
+_PAGE_CODE = re.compile(
+    r"(?:completion|confirmation|survey|prolific|study)\s*(?:code|id)\b"
+    r"(?:[\s:,.\-]+" + _FILLER + r"\b)*[\s:,.\-]*"
+    # the code itself can't be the next keyword ("Prolific code / completion
+    # code: X" must yield X, not swallow "completion")
+    r"(?!(?:completion|confirmation|survey|prolific|study)\b)"
+    r"([A-Za-z0-9][A-Za-z0-9_\-]{3,40})", re.IGNORECASE)
+_NOT_A_CODE = {"will", "and", "when", "after", "must", "should", "has", "have"}
+
+
+def _end_page_text(limit: int = 40000) -> str:
+    """Page text for code hunting: every frame (iframes included, through
+    Playwright, which can enter cross-origin ones) plus the values of text
+    fields whose label mentions a code -- end pages often put the code in a
+    read-only box to copy, and innerText leaves field values out."""
+    _JS = r"""() => {
+        const parts = [document.body ? document.body.innerText : ''];
+        for (const el of document.querySelectorAll(
+                'input:not([type=password]):not([type=hidden]), textarea')) {
+            const v = (el.value || '').trim();
+            if (!v || v.length > 60) continue;
+            const ctx = [el.getAttribute('aria-label'), el.placeholder, el.name, el.id,
+                         ...(el.labels ? [...el.labels].map(l => l.innerText) : []),
+                         el.parentElement ? el.parentElement.innerText : ''].join(' ');
+            if (/code/i.test(ctx)) parts.push('completion code: ' + v);
+        }
+        return parts.join('\n');
+    }"""
+
+    def _collect(b):
+        out = []
+        for f in b.active_page().frames:
+            try:
+                out.append(f.evaluate(_JS) or "")
+            except Exception:
+                pass
+        return "\n".join(out)
+    try:
+        return (pw_bridge.run(_collect) or "")[:limit]
+    except Exception:
+        return _page_text(limit)
+
+
+def codes_on_page(text: str) -> list:
+    """Completion codes printed on a custom end page ("Your completion code
+    is: C1A2B3"). Many studies end on their own page instead of redirecting
+    to Prolific, so the code lives only on screen. Used to double-check what
+    the model read, never to replace it."""
+    out = []
+    for m in _PAGE_CODE.finditer(text or ""):
+        c = m.group(1)
+        if c.lower() in _NOT_A_CODE or (c.isalpha() and c.islower()) or c in out:
+            continue          # an ordinary word, or already seen
+        out.append(c)
+    return out
+
+
+_CODE_PARAM = re.compile(r"(^|[_\-])(cc|code|completion[_\-]?code|completioncode|pcode)$", re.IGNORECASE)
+
+
+def codes_in_url(url: str) -> list:
+    """Codes carried in an external page's URL (?code=PLKXLQ). Seen on 13 Oct:
+    a survey's thank-you page had the code only in its own address, and the
+    model typed it into Prolific from there."""
+    try:
+        out = []
+        for k, vals in parse_qs(urlparse(url or "").query).items():
+            if _CODE_PARAM.search(k):
+                for v in vals:
+                    v = v.strip()
+                    if re.fullmatch(r"[A-Za-z0-9_\-]{3,40}", v) and v not in out:
+                        out.append(v)
+        return out
+    except Exception:
+        return []
+
+
+def check_code(answer: str, seen: list) -> str:
+    """Compare the model's final answer with the codes seen during the study.
+
+    "match"     the code it reported was seen on a page
+    "mismatch"  codes were seen, the one it reported is not among them
+    "missed"    it reported NOCODE but a code was on screen: likely a lost payment
+    "not_found" nothing recognisable was seen -- no opinion
+    """
+    if not seen:
+        return "not_found"
+    if answer == "NOCODE":
+        return "missed"
+    code = answer.split(":", 1)[1].strip() if answer.startswith("CODE:") else ""
+    return "match" if code in seen else "mismatch"
+
+
+def completion_code(url: str) -> str:
+    """The completion code Prolific carries in its own redirect, or "".
+
+    A finished survey sends the participant to
+    app.prolific.com/submissions/complete?cc=XXXX. Reading it from there is
+    exact; reading it off the screen is the model's job only when there is
+    nothing in the URL. Not every study has a code (some complete without
+    one and the model answers NOCODE): an empty result here means "no
+    opinion", never "no code".
+    """
+    try:
+        pr = urlparse(url or "")
+        if not _on_guarded_site(url) or not _COMPLETE_PATH.match(pr.path or ""):
+            return ""
+        cc = (parse_qs(pr.query).get("cc") or [""])[0].strip()
+        return cc if re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", cc) else ""
+    except Exception:
+        return ""
+
+
+# The empty-list page, as Prolific words it (seen on screen 13 Oct 2026).
+_EMPTY_LIST_MARKERS = ("waiting for studies",)
+
+
+def studies_list_state() -> str:
+    """What the studies list shows right now, read from the DOM, no model.
+
+    "empty"   -- the list page with Prolific's waiting message
+    "studies" -- the list page without it, i.e. something to look at
+    "unknown" -- not on the list, logged out, page not readable...
+
+    Only "empty" is ever trusted to skip the model. Anything else falls back
+    to a normal cycle, so a layout change costs a model call, never a study.
+    """
+    url = get_current_url()
+    if not url or not _on_guarded_site(url) or not _LIST_PATH.match(urlparse(url).path or ""):
+        return "unknown"
+    return list_state_from(url, _page_text(8000))
+
+
+def list_state_from(url: str, text: str) -> str:
+    """The decision behind studies_list_state(), on a URL and the page text."""
+    if not url or not _on_guarded_site(url) or not _LIST_PATH.match(urlparse(url).path or ""):
+        return "unknown"
+    text = (text or "").lower()
+    if not text.strip():
+        return "unknown"
+    if any(m in text for m in _EMPTY_LIST_MARKERS):
+        return "empty"
+    return "studies"
+
+
+CAPTURE_DIR = Path(os.environ.get("FARA_CAPTURE_DIR",
+                                  Path(__file__).resolve().parent.parent / "var" / "captures"))
+
+
+def capture_page(kind: str) -> None:
+    """Save the current page's HTML once per kind per day.
+
+    Real Prolific pages (a list with studies, a study page, the completion
+    redirect, the return flow) are what the DOM tests and the code paths
+    built on selectors need, and they only show up during real runs. They
+    land in var/ (ignored by git: they carry the account's name and balance)
+    to be trimmed and promoted to fixtures/ by hand.
+    """
+    try:
+        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        out = CAPTURE_DIR / f"{kind}_{datetime.now():%Y%m%d}.html"
+        if out.exists():
+            return
+        html = pw_bridge.evaluate("document.documentElement.outerHTML") or ""
+        if html:
+            out.write_text(f"<!-- {get_current_url()} -->\n{html}")
+    except Exception:
+        pass
 
 
 def studies_url() -> str:
@@ -1045,6 +1272,73 @@ STANDING_RULES = (
 )
 
 
+def summarize_transcript(lines: list, started: datetime = None, ended: datetime = None) -> dict:
+    """One run, reduced to what the dashboard and the daily summary need.
+
+    Where the steps went is read from the per-step diag lines: on the
+    studies list, inside a study (the external questionnaire, timer
+    running), or elsewhere on Prolific.
+    """
+    steps, answer, source = 0, "", None
+    where = {"list": 0, "study": 0, "elsewhere": 0}
+    gen = []
+    studies = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(d.get("step"), int):
+            steps = max(steps, d["step"])
+        if d.get("action_type") == "terminate":
+            answer = (d.get("args") or {}).get("answer", "")
+            source = d.get("code_source") or source or "model"
+        if d.get("type") == "diag":
+            url = d.get("url") or ""
+            if d.get("timer_active") and not d.get("guarded"):
+                where["study"] += 1
+            elif d.get("guarded") and _LIST_PATH.match(urlparse(url).path or ""):
+                where["list"] += 1
+            else:
+                where["elsewhere"] += 1
+            m = _STUDY_PATH.match(urlparse(url).path or "")
+            if m and m.group(1) not in studies:
+                studies.append(m.group(1))
+            if d.get("code_source"):
+                source = d["code_source"]
+            tps = (d.get("model") or {}).get("gen_tps")
+            if tps:
+                gen.append(tps)
+    if answer.startswith("CODE:"):
+        outcome = "CODE"
+    elif answer in ("NOCODE", "NONE", "STOPPED"):
+        outcome = answer
+    else:
+        outcome = "INCOMPLETE" if not answer else "TERMINATE"
+    out = {"steps": steps, "outcome": outcome, "answer": answer[:80],
+           "code_source": source if outcome in ("CODE", "NOCODE") else None,
+           "steps_where": where, "studies": studies,
+           "gen_tps_median": sorted(gen)[len(gen) // 2] if gen else None}
+    if started:
+        out["started"] = started.isoformat(timespec="seconds")
+    if started and ended:
+        out["ended"] = ended.isoformat(timespec="seconds")
+        out["duration_s"] = max(0, round((ended - started).total_seconds()))
+    return out
+
+
+def write_run_summary(run_dir: Path) -> None:
+    """summary.json next to the transcript, so the dashboard reads one small
+    file per run instead of re-parsing every transcript on every request."""
+    try:
+        started = datetime.strptime(run_dir.name.replace("run_", ""), "%Y%m%d_%H%M%S")
+        lines = (run_dir / "transcript.jsonl").read_text(errors="replace").splitlines()
+        summary = summarize_transcript(lines, started, datetime.now())
+        (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+    except Exception:
+        pass
+
+
 def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
               stop_event=None, messages: list = None, batch_fill: bool = False,
               wander_seconds: float = 0, skip_av: bool = False):
@@ -1104,6 +1398,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
         _current_study_id: str | None = None  # id of the study being looked at / taken
         _current_study_title: str = ""  # its name, read on Prolific while we can still see it
+        _seen_codes: list = []  # completion codes spotted on the study's own pages
 
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
@@ -1155,6 +1450,26 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                        "text": f"Più di {n} s fuori dall'elenco studi senza svolgerne uno: riportato a /studies.",
                        "messages": messages}
 
+            # Back on Prolific with the completion code in the URL: the
+            # submission is already made, so finish here instead of asking the
+            # model to read the code off the screen.
+            cc = completion_code(here)
+            if cc:
+                capture_page("complete")
+                answer = f"CODE: {cc}"
+                transcript.write(json.dumps({
+                    "step": step, "action_type": "terminate", "args": {"answer": answer},
+                    "code_source": "url", "url": here}) + "\n")
+                transcript.flush()
+                _restore_user_speed()
+                _close_extra_tabs()
+                _notify_telegram(f"Fara studio completato ✅\n{answer} (dall'URL)\n"
+                                 f"Ciclo: {run_dir.name if run_dir else '?'}")
+                yield {"type": "notice", "text": f"Codice di completamento letto dall'URL: {cc}",
+                       "messages": messages}
+                yield {"type": "done", "answer": answer, "messages": messages}
+                return
+
             if batch_fill and not _on_guarded_site(here):
                 batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
                     task, attempted_form_signatures, survey_memory)
@@ -1199,6 +1514,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _prev_was_guarded = False
                 _current_study_id = None
                 _current_study_title = ""
+                _seen_codes = []
 
             # --- studies that lead nowhere (and, opt-in, audio/video ones) ---
             # A study that is listed but not doable gets opened again on every
@@ -1211,6 +1527,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             m_study = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
             if m_study:
                 _current_study_id = m_study.group(1)
+                capture_page("study")
                 # Read the name here, on Prolific: once the agent is inside the
                 # external questionnaire the page title is the survey tool's,
                 # which is no use for telling the model what to skip.
@@ -1256,7 +1573,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "taken back to the list of studies. Do not open it again: pick another "
                     "study, or follow your task instructions if none is eligible.")
                 label = f"«{title}»" if title else "lo studio aperto"
-                _notify_telegram(f"⏭ Studio saltato: {label}\n{skip_reason}")
+                link = (f"\nhttps://app.prolific.com/studies/{key}"
+                        if _STUDY_PATH.match(f"/studies/{key}") else "")
+                _notify_telegram(f"⏭ Studio saltato: {label}\n{skip_reason}{link}\n"
+                                 "Se ti interessa, puoi farlo a mano.")
                 injected = yield {"type": "notice",
                                   "text": (f"Studio saltato ({skip_reason}): {label}"
                                            + (", survey abbandonata" if abandoned else "")
@@ -1264,6 +1584,14 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                                   "messages": messages}
                 if injected:   # an instruction typed while this was happening
                     pending_user_response += "\n\n" + injected
+
+            # Codes shown on the study's own pages, collected as they appear:
+            # by the time the model reports one it is back on Prolific, where
+            # the original page can no longer be checked.
+            if study_timer.is_active() and not here_guarded:
+                for c in codes_in_url(here) + codes_on_page(_end_page_text()):
+                    if c not in _seen_codes:
+                        _seen_codes.append(c)
 
             skip_hint = study_cache.prompt_line() if on_list else ""
 
@@ -1396,6 +1724,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 "timer_elapsed": round(study_timer.elapsed(), 1) if study_timer.is_active() else None,
                 "timer_remaining": round(study_timer.remaining(), 1) if study_timer.is_active() else None,
                 "timer_min_sec": study_timer.min_seconds if study_timer.is_active() else None,
+                "model": last_timing or None,
                 "last_guarded_duration": _last_guarded_duration,
             }
             if action_type == "left_click" and here_guarded:
@@ -1421,6 +1750,25 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 answer = args.get("answer", "")
                 _restore_user_speed()
                 _close_extra_tabs()
+                check = None
+                if answer.startswith("CODE:") or answer == "NOCODE":
+                    # Compare what the model reported with every code seen on
+                    # the study's pages, plus the one Prolific shows after the
+                    # submission ("Completion code: PLKXLQ"). Never overrides
+                    # the model: it only flags what needs a human look.
+                    seen = _seen_codes + [c for c in codes_on_page(_end_page_text())
+                                          if c not in _seen_codes]
+                    check = check_code(answer, seen)
+                    if check in ("mismatch", "missed"):
+                        what = ("ha chiuso senza codice" if check == "missed"
+                                else f"ha inserito {answer.split(':', 1)[1].strip()}")
+                        _notify_telegram(f"⚠️ Codice da verificare: il modello {what}, "
+                                         f"ma sulle pagine dello studio c'era "
+                                         f"{', '.join(seen[:3])}.\n{here}")
+                transcript.write(json.dumps({"step": step, "type": "diag", "code_source": "model",
+                                             "answer": answer, "code_check": check,
+                                             "codes_seen": _seen_codes[:5]}) + "\n")
+                transcript.flush()
                 if answer.startswith("CODE:") or answer == "NOCODE":
                     _notify_telegram(f"Fara studio completato ✅\n{answer}\nCiclo: {run_dir.name if run_dir else '?'}")
                 yield {"type": "done", "answer": answer, "messages": messages}
@@ -1443,3 +1791,4 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                "messages": messages}
     finally:
         transcript.close()
+        write_run_summary(run_dir)
