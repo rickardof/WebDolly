@@ -157,38 +157,40 @@ def take_screenshot(run_dir: Path, step: int) -> Image.Image:
     return img
 
 
-# How much of the screen each speed mode hands to the model. Fewer pixels mean
-# fewer image tokens, which is where most of a step's latency sits.
-SPEED_SCALE = {"normal": 1.0, "hurry": 0.75, "super_fast": 0.5}
+# History images are degraded in speed modes to save tokens; the CURRENT
+# screenshot stays full-res so the model can click accurately.
+# Measured token counts (patches): 1.0→1260, 0.5→714, 0.25→308, 0.15→77
+HISTORY_SCALE = {"normal": 1.0, "hurry": 0.5, "super_fast": 0.25}
 
 
-def encode_for_model(img: Image.Image) -> str:
-    """Screenshot as a data URL, at the resolution the current speed mode asks
-    for.
-
-    Resampled ONCE, straight from the full-resolution screenshot: scaling down
-    and then letting smart_resize scale part of the way back up cost more bytes
-    than sending the original (measured: 411 KB vs 376 KB for `hurry` on a real
-    1440x900 screenshot) because the blur it introduces is what PNG compresses
-    worst. One LANCZOS step keeps the same token count and the sharp text.
-    """
-    scale = SPEED_SCALE.get(_speed_mode, 1.0)
+def _encode_image(img: Image.Image, scale: float = 1.0,
+                  jpeg: bool = False) -> str:
+    """Encode an image as a data URL at the given scale."""
     h, w = img.height, img.width
     if scale != 1.0:
         h, w = max(1, int(h * scale)), max(1, int(w * scale))
     rh, rw = fp.smart_resize(h, w)
-    # LANCZOS only where there is something to lose: at scale 1.0 the resize is
-    # a sub-percent nudge to the model's grid and the sharper filter would just
-    # cost bytes.
     resized = img.resize((rw, rh), Image.LANCZOS) if scale != 1.0 else img.resize((rw, rh))
     buf = io.BytesIO()
-    if _speed_mode == "super_fast":
-        resized.save(buf, format="JPEG", quality=60)
+    if jpeg:
+        resized.save(buf, format="JPEG", quality=55)
         mime = "image/jpeg"
     else:
         resized.save(buf, format="PNG")
         mime = "image/png"
     return f"data:{mime};base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def encode_for_model(img: Image.Image) -> str:
+    """Current screenshot — always full resolution for click accuracy."""
+    return _encode_image(img, scale=1.0, jpeg=False)
+
+
+def encode_for_history(img: Image.Image) -> str:
+    """Older screenshot being kept in context — degraded in speed modes to
+    save tokens while preserving the current screenshot's full resolution."""
+    scale = HISTORY_SCALE.get(_speed_mode, 1.0)
+    return _encode_image(img, scale=scale, jpeg=(scale < 1.0))
 
 
 # Whether the chat template opens a <think> block for the model to reason in.
@@ -448,16 +450,56 @@ def _image_turn_idxs(messages: list) -> list:
     ]
 
 
+# In speed modes, history images are degraded BEFORE trimming counts: re-encoded
+# at lower resolution so they cost fewer tokens, letting the model keep more
+# visual context without blowing the budget. The last image (current screenshot)
+# is never touched — it needs full resolution for accurate clicks.
+_TRIM_MAX_IMAGES   = {"normal": 10, "hurry": 8, "super_fast": 5}
+_TRIM_TO_IMAGES    = {"normal": 5,  "hurry": 3, "super_fast": 2}
+
+
+def _degrade_history_images(messages: list):
+    """Re-encode older screenshots at the speed-appropriate lower resolution.
+    Skips the most recent image (always full-res for clicking)."""
+    if _speed_mode == "normal":
+        return
+    image_idxs = _image_turn_idxs(messages)
+    if len(image_idxs) < 2:
+        return
+    scale = HISTORY_SCALE.get(_speed_mode, 1.0)
+    if scale >= 1.0:
+        return
+    # Degrade all but the last (most recent) image
+    for i in image_idxs[:-1]:
+        for c in messages[i]["content"]:
+            if c.get("type") != "image_url":
+                continue
+            url = c["image_url"]["url"]
+            # Already degraded (JPEG) — skip
+            if "image/jpeg" in url:
+                continue
+            try:
+                header, b64 = url.split(",", 1)
+                raw = base64.b64decode(b64)
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                c["image_url"]["url"] = _encode_image(img, scale=scale, jpeg=True)
+            except Exception:
+                pass
+
+
 def _trim_to_budget(messages: list, budget: int = CONTEXT_TOKEN_BUDGET,
                      max_images: int | None = None,
                      trim_to: int | None = None) -> int:
     """Brings `messages` under `budget`, verified against the real
     tokenizer at every stage rather than assumed. Returns the real token
     count after trimming (0 trims performed if already under budget)."""
+    # First pass: degrade history images in speed modes (cheap, no data lost)
+    _degrade_history_images(messages)
+
     if max_images is None:
-        max_images = 5 if _speed_mode == "super_fast" else MAX_IMAGES_IN_CONTEXT
+        max_images = _TRIM_MAX_IMAGES.get(_speed_mode, MAX_IMAGES_IN_CONTEXT)
     if trim_to is None:
-        trim_to = 2 if _speed_mode == "super_fast" else TRIM_TO_IMAGES
+        trim_to = _TRIM_TO_IMAGES.get(_speed_mode, TRIM_TO_IMAGES)
     image_idxs = _image_turn_idxs(messages)
     if len(image_idxs) > max_images:
         keep_from = len(image_idxs) - trim_to
@@ -650,8 +692,9 @@ def completion_code(url: str) -> str:
         return ""
 
 
-# The empty-list page, as Prolific words it (seen on screen 13 Oct 2026).
 _EMPTY_LIST_MARKERS = ("waiting for studies",)
+# "showing: 0/0 studies" (or "0 / 0") — Prolific's counter when the list is empty.
+_EMPTY_LIST_RE = re.compile(r"showing\s*:?\s*0\s*/\s*0\s*stud", re.IGNORECASE)
 
 
 def studies_list_state() -> str:
@@ -678,6 +721,8 @@ def list_state_from(url: str, text: str) -> str:
     if not text.strip():
         return "unknown"
     if any(m in text for m in _EMPTY_LIST_MARKERS):
+        return "empty"
+    if _EMPTY_LIST_RE.search(text):
         return "empty"
     return "studies"
 
@@ -758,13 +803,9 @@ _DEAD_END_MARKERS = (
 # them is a choice about what work to accept, not a safety rule.
 _AV_TEXT_MARKERS = (
     (r"\bheadphones?\b|\bearphones?\b|\bcuffie\b|\bauricolari\b", "cuffie richieste"),
-    (r"watch (?:the |this |a )?(?:short |brief )?(?:video|clip|advert)"
-     r"|guard(?:a|erai) (?:il |un |questo )?video", "video da guardare"),
     (r"listen to (?:the |this |an? )?(?:audio|recording|clip|sound|speech)"
      r"|ascolt(?:a|erai) (?:l'|un |il )?(?:audio|registrazione)", "audio da ascoltare"),
-    (r"audio (?:clip|recording|stimuli|task)|video (?:clip|recording|stimuli|task)", "stimoli audio/video"),
-    (r"\bwebcam\b|\beye.?tracking\b|face recording|record (?:your )?(?:voice|face|screen)"
-     r"|\bmicrofono\b|\bmicrophone\b", "webcam/microfono"),
+    (r"audio (?:clip|recording|stimuli|task)", "stimoli audio"),
 )
 
 
@@ -785,12 +826,12 @@ def _detect_av(text: str = "", check_text: bool = True) -> str:
     """
     _JS = r"""() => {
         const out = [];
-        const media = [...document.querySelectorAll('audio, video')]
+        const audio = [...document.querySelectorAll('audio')]
             .filter(el => el.offsetParent !== null || el.autoplay || el.src || el.currentSrc);
-        if (media.length) out.push('tag ' + media[0].tagName.toLowerCase());
-        const players = /youtube|youtu\.be|vimeo|soundcloud|wistia|dailymotion|brightcove|jwplayer|kaltura/i;
+        if (audio.length) out.push('tag audio');
+        const players = /soundcloud/i;
         if ([...document.querySelectorAll('iframe')].some(f => players.test(f.src || '')))
-            out.push('player incorporato');
+            out.push('player audio incorporato');
         return out.join(', ');
     }"""
     try:
@@ -1123,6 +1164,19 @@ def dispatch_action(action_type: str, args: dict) -> str:
         cancel.sleep(duration)
         return f"wait {duration}s"
 
+    if action_type == "run_js":
+        code = args.get("code", "")
+        if not code.strip():
+            return "run_js: no code provided"
+        wrapped = f"(async () => {{ {code} }})()"
+        try:
+            result = pw_bridge.run(
+                lambda b: b.active_page().evaluate(wrapped),
+                timeout=120)
+            return f"run_js: {str(result)[:500]}"
+        except Exception as e:
+            return f"run_js error: {type(e).__name__}: {str(e)[:200]}"
+
     if action_type in ("pause_and_memorize_fact", "read_page_answer_question"):
         return f"{action_type} (not implemented, no-op)"
 
@@ -1233,29 +1287,39 @@ def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None)
 # with. Kept short and placed last-but-prominent: rules buried deep in a
 # long preset were measured to be ignored (pay rate considered in 1 of 436
 # study-list steps when it was rule #12 of a ~2500-token preset).
-STANDING_RULES = (
+_STANDING_RULES_FULL = (
     "\n\nSTANDING RULES (always apply):\n"
     "1. Choosing a study: compare ALL study cards first; among the eligible ones open the "
     "one with the highest reward rate per hour (the £/hr or $/hr shown), not just the first.\n"
-    "2. NO AUDIO, EVER: a study that involves audio in ANY form is not eligible and must never be "
-    "opened or started -- listening to sounds, speech, music or recordings, watching videos with "
-    "sound, 'audio playback', headphones or speakers required, or an 'Audio' icon/label on its "
-    "card. A study that needs no microphone or camera is STILL excluded if it needs listening. "
-    "Before pressing 'Take part in this study', read its requirements section; if it mentions "
-    "any of this, do not take part and treat the study as not available. Do not argue that "
-    "listening-only is acceptable: it is not.\n"
-    "3. Answer quality: read every question and its instructions fully; if it says which "
-    "option to pick (attention check), pick exactly that. Keep every answer consistent with "
+    "2. NO AUDIO, EVER: a study that requires LISTENING to audio (sounds, speech, music, "
+    "recordings, 'audio playback', headphones or speakers) is not eligible. An 'Audio' "
+    "icon/label on the card means skip it. Videos are OK as long as the study does not "
+    "require hearing their sound — you can watch silent or muted videos. Microphone or "
+    "camera requirements alone do NOT disqualify a study. "
+    "Before pressing 'Take part in this study', read the requirements section; if it "
+    "mentions listening or audio playback, do not take part.\n"
+    "3. Answer quality: read every question and its FULL text carefully before answering. "
+    "ATTENTION CHECKS are critical — questions like 'select Strongly Agree', 'choose option 3', "
+    "'what colour is the sky', or 'please select X to show you are paying attention' MUST be "
+    "answered exactly as instructed, even if the answer seems wrong in context. Failing an "
+    "attention check can invalidate the entire submission. Keep every answer consistent with "
     "the persona and with your earlier answers in the same survey. Write specific, relevant "
     "open-ended answers in the survey's language, never generic filler.\n"
     "4. Scope: your only job is to take part in studies that meet the criteria and, when none "
     "is available, to wait and re-check the list of studies for new ones. Never open the "
     "'About you' section of the site or answer profile questionnaires outside a study.\n"
+    "4a. After clicking 'Take part in this study', the button turns grey/disabled while loading — "
+    "this is NORMAL. Wait a few seconds for the study to open; do NOT go back or assume it failed.\n"
     "4b. After finishing a survey: ALWAYS switch back to the Prolific tab before calling "
     "terminate. On the Prolific tab: (a) click 'I'm finished'; (b) if a completion-code field "
     "appears, enter the code you received, or if no code was given click 'I didn't receive a "
     "completion code' (or type NOCODE in the field if that link is absent); (c) confirm/submit. "
     "Only after this Prolific-side step call terminate with CODE:<code> or NOCODE.\n"
+    "4c. Broken / screened-out studies: if the external survey is stuck, broken, or you were "
+    "screened out and cannot finish, use Ctrl+Shift+Tab to switch to the Prolific tab (do NOT "
+    "use history_back — the survey is in a separate tab). On the Prolific tab click "
+    "'Cancel participation' (a red button), confirm in the modal, then terminate with NOCODE. "
+    "Do NOT keep refreshing or waiting — cancel and move on.\n"
     "5. Minimum study time: the estimated completion time shown on the study page is a minimum "
     "you must respect. A 'Study timer' line will appear in your status once you enter a study. "
     "If you reach what looks like the final submit/finish page and the timer says time remains, "
@@ -1268,8 +1332,31 @@ STANDING_RULES = (
     "qualifies. You may present a truth selectively or adapt phrasing to fit the screener "
     "(e.g. 'I use AI tools every day' if the persona does). You must NEVER invent facts that "
     "directly contradict the given persona (age, nationality, profession, stated experience), "
-    "and never claim qualifications the persona does not have."
+    "and never claim qualifications the persona does not have.\n"
+    "7. Speed: when a survey has many identical repeated trials (e.g. 60 A/B comparisons, "
+    "repeated Likert scales), use `run_js` to batch-complete them in one step instead of "
+    "clicking through each one manually. Write JS that clicks the selection button, submits, "
+    "waits for the next trial to load, and repeats in a loop for the remaining trials."
 )
+
+_STANDING_RULES_COMPACT = (
+    "\n\nRULES: "
+    "1. Pick the highest £/hr study. "
+    "2. NO AUDIO — skip studies requiring listening/speakers/headphones. Videos OK if no audio needed. "
+    "3. Read FULL question text before answering. ATTENTION CHECKS are critical — answer exactly as instructed even if it seems wrong. Stay consistent with persona; no filler. "
+    "4. Only do studies, nothing else. After 'Take part' button goes grey, WAIT — it's loading. "
+    "After survey: Prolific tab → 'I'm finished' → enter code → confirm → terminate. "
+    "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
+    "5. Respect minimum time — wait if timer says time remains. "
+    "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
+    "7. For repetitive trials (many A/B comparisons, repeated scales), use run_js to batch them in one step."
+)
+
+
+def _standing_rules() -> str:
+    if _speed_mode == "normal":
+        return _STANDING_RULES_FULL
+    return _STANDING_RULES_COMPACT
 
 
 def summarize_transcript(lines: list, started: datetime = None, ended: datetime = None) -> dict:
@@ -1603,7 +1690,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 text = pending_user_response
                 pending_user_response = ""
             elif step == 1:
-                text = task + STANDING_RULES + (f"\n\n{skip_hint}" if skip_hint else "")
+                text = task + _standing_rules() + (f"\n\n{skip_hint}" if skip_hint else "")
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""

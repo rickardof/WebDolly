@@ -35,6 +35,7 @@ import cancel
 import pw_bridge
 import agent_core
 import study_cache
+import pusher_listener
 from agent_core import run_agent, docker_exec, get_current_url, KEY_MAP, DATA_DIR, CONTAINER
 
 HERE = Path(__file__).parent
@@ -686,16 +687,48 @@ def _refresh_list(home_url: str):
         pass
 
 
+def _ensure_pusher(stop_event):
+    """Start the Pusher CDP sniffer if not already running."""
+    if TEST_INSTANCE:
+        return
+    pl = pusher_listener.get_listener()
+    if pl.connected:
+        return
+    pl.start()
+
+
 def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
     """Refresh and read the list from the DOM until there is something for the
     model to look at (or it is time for a safety cycle). True if Stop was
-    pressed while waiting."""
+    pressed while waiting.
+
+    When the Pusher listener is connected, react instantly to push events
+    instead of sleeping the full poll_interval between DOM checks."""
     every = max(float(poll_interval or 0), LIST_CHECK_MIN_SECONDS)
     since = time.time()
     checks = 0
+    unknowns = 0
+    pl = pusher_listener.get_listener()
     while True:
-        if stop_event.wait(every):       # wakes the instant Stop is pressed
+        if stop_event.is_set():
             return True
+        # Wait for stop OR Pusher event OR poll timeout, whichever first.
+        # Check stop_event in short increments so both can interrupt.
+        pushed = False
+        if pl.connected:
+            deadline = time.monotonic() + every
+            while time.monotonic() < deadline:
+                if stop_event.is_set():
+                    return True
+                if pl.wait(min(1.0, deadline - time.monotonic())):
+                    pushed = True
+                    break
+        else:
+            if stop_event.wait(every):
+                return True
+        if pushed:
+            _push_event({"type": "notice",
+                         "text": "📡 Pusher: evento ricevuto, controllo lista..."})
         _refresh_list(home_url)
         checks += 1
         try:
@@ -704,7 +737,23 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
             seen = "unknown"
         if seen == "studies":
             agent_core.capture_page("studies_list")
-        if seen != "empty" or time.time() - since > FULL_CYCLE_EVERY:
+            unknowns = 0
+        elif seen == "unknown":
+            unknowns += 1
+        else:
+            unknowns = 0
+        # "studies" → cycle immediately.
+        # "unknown" → tolerate a few times (page loading, SPA glitch) before
+        #   falling back to a model cycle; avoids wasting 5–7 model steps on
+        #   a page that just hasn't rendered yet.
+        # "empty" → keep waiting.
+        # FULL_CYCLE_EVERY → safety cycle regardless.
+        should_cycle = (
+            seen == "studies"
+            or (seen == "unknown" and unknowns >= 3)
+            or time.time() - since > FULL_CYCLE_EVERY
+        )
+        if should_cycle:
             if checks > 1:
                 _push_event({"type": "notice",
                              "text": f"Elenco controllato {checks} volte senza modello: "
@@ -713,7 +762,8 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
                                         "pagina non riconosciuta, passo al modello.")})
             return False
         hub.publish("live", {"type": "phase", "phase": "watch", "ts": time.time(),
-                             "checks": checks})
+                             "checks": checks,
+                             "pusher": pl.connected})
 
 
 def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval: float,
@@ -731,6 +781,8 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
     # cheap to re-judge each cycle.
     home_url = url  # where each new cycle starts from; captured below if not given
     inhibitor = _inhibit_sleep()
+    if loop:
+        _ensure_pusher(stop_event)
     try:
         cycle = 0
         errors_in_a_row = 0
@@ -794,6 +846,7 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
         tb = traceback.format_exc()[-300:]
         agent_core._notify_telegram(f"❌ Errore agent!\n{type(e).__name__}: {str(e)[:150]}\n\n{tb}")
     finally:
+        pusher_listener.stop()
         if inhibitor is not None:
             inhibitor.terminate()
         with state_lock:
@@ -1730,6 +1783,71 @@ def _daily_summary_text(day=None) -> str:
     return "\n".join(lines)
 
 
+def _earnings_text() -> str:
+    """Earnings breakdown: today, this week, this month, all-time (approved only)."""
+    from datetime import date, datetime as _dt, timedelta
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())  # Monday
+    month_start = today.replace(day=1)
+
+    buckets = {"today": 0.0, "week": 0.0, "month": 0.0, "all": 0.0}
+    counts = {"today": 0, "week": 0, "month": 0, "all": 0}
+    pending = 0.0
+    pending_n = 0
+    cur = "£"
+
+    with _submissions_lock:
+        subs = list(_submissions_cache.get("data") or [])
+
+    for s in subs:
+        status = (s.get("status") or "").lower()
+        reward = s.get("reward")
+        if not reward:
+            continue
+        try:
+            amt = float(reward)
+        except (ValueError, TypeError):
+            continue
+        cur = s.get("currency", "£")
+
+        df = s.get("date_full", "")
+        try:
+            try:
+                d = _dt.strptime(df, "%d %b %Y, %H:%M").date()
+            except ValueError:
+                d = _dt.strptime(df, "%d %b %Y").date()
+        except ValueError:
+            d = None
+
+        if status == "approved":
+            buckets["all"] += amt
+            counts["all"] += 1
+            if d:
+                if d >= month_start:
+                    buckets["month"] += amt
+                    counts["month"] += 1
+                if d >= week_start:
+                    buckets["week"] += amt
+                    counts["week"] += 1
+                if d == today:
+                    buckets["today"] += amt
+                    counts["today"] += 1
+        elif status == "awaiting review":
+            pending += amt
+            pending_n += 1
+
+    lines = [
+        "💰 Guadagni",
+        f"   Oggi:       {cur}{buckets['today']:.2f}  ({counts['today']} studi)",
+        f"   Settimana:  {cur}{buckets['week']:.2f}  ({counts['week']} studi)",
+        f"   Mese:       {cur}{buckets['month']:.2f}  ({counts['month']} studi)",
+        f"   Totale:     {cur}{buckets['all']:.2f}  ({counts['all']} studi)",
+    ]
+    if pending:
+        lines.append(f"\n⏳ In revisione: {cur}{pending:.2f} ({pending_n} studi)")
+    return "\n".join(lines)
+
+
 SUMMARY_HOUR = int(os.environ.get("FARA_SUMMARY_HOUR", "21"))
 
 
@@ -1824,6 +1942,7 @@ def _telegram_bot_loop():
             {"command": "superfast","description": "Modalità super-veloce (massima velocità)"},
             {"command": "presets", "description": "Elenco dei preset (/start <nome>)"},
             {"command": "riepilogo", "description": "Riepilogo della giornata"},
+            {"command": "earnings", "description": "Guadagni: oggi, settimana, mese, totale"},
             {"command": "help",    "description": "Lista comandi"},
         ]}).encode()
         req = _ur.Request(f"{base}/setMyCommands", data=cmds,
@@ -1951,6 +2070,9 @@ def _telegram_bot_loop():
             lines.append("🚀 Modalità SUPER-FAST" + (" (automatica)" if agent_core._speed_auto else ""))
         elif agent_core._speed_mode == "hurry":
             lines.append("⚡ Modalità hurry" + (" (automatica)" if agent_core._speed_auto else ""))
+        pl = pusher_listener.get_listener()
+        lines.append("📡 Pusher: " + ("connesso" if pl.connected else "disconnesso")
+                      + (f" ({pl.stats['events']} eventi)" if pl.stats["events"] else ""))
         try:
             n_skipped = len(study_cache.entries())
             if n_skipped:
@@ -2040,6 +2162,8 @@ def _telegram_bot_loop():
                         if ps else "Nessun preset salvato.")
             elif text in ("/riepilogo", "riepilogo", "/summary", "summary"):
                 tg_send(_daily_summary_text())
+            elif text in ("/earnings", "earnings", "/guadagni", "guadagni"):
+                tg_send(_earnings_text())
             elif text in ("/status", "status", "/stato", "stato"):
                 tg_send_photo(_do_status())
             elif text in ("/restart", "restart", "/riavvia", "riavvia"):
@@ -2071,6 +2195,7 @@ def _telegram_bot_loop():
                     "/start [preset] — Avvia l'agente (il primo preset, o quello indicato)\n"
                     "/presets — Elenco dei preset\n"
                     "/riepilogo — Riepilogo di oggi (arriva da solo alle 21)\n"
+                    "/earnings — Guadagni: oggi, settimana, mese, totale\n"
                     "/stop — Ferma l'agente\n"
                     "/restart — Ferma, torna a studies, riavvia\n"
                     "/status — Stato + screenshot + studi recenti\n"
