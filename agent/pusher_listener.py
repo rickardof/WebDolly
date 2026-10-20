@@ -1,19 +1,32 @@
-"""Passive Pusher event sniffer via CDP.
+"""Passive Pusher event sniffer via Playwright's WebSocket API.
 
 Instead of opening a second WebSocket to Pusher (which would show up as a
-duplicate connection for the same user), this module attaches to the
-browser's existing Pusher connection through Chrome DevTools Protocol and
-watches the frames it already receives.
+duplicate connection for the same user), this module piggybacks on the
+browser's existing Pusher connection through Playwright's page.on("websocket")
+listener and watches the frames it already receives.
 
 Architecture:
-  - A daemon thread opens a CDP session on the active page and enables
-    Network domain events
-  - It identifies the Pusher WebSocket by URL (ws-eu.pusher.com) and
-    watches only frames on that specific connection
-  - Any non-internal Pusher event sets a threading.Event that
-    _wait_for_studies can react to instantly
-  - If the CDP session drops (page navigated, tab closed), it reconnects
-    automatically — the browser's own Pusher connection is never touched
+  - A daemon thread registers a ``page.on("websocket")`` listener on the
+    active page via pw_bridge
+  - New WebSocket connections whose URL contains "pusher.com" are tracked;
+    their ``framereceived`` events are parsed for non-internal Pusher events
+  - Any such event sets a threading.Event that _wait_for_studies can react
+    to instantly
+  - A periodic heartbeat checks whether the active page has changed (tab
+    recycled, browser reconnected) and re-attaches if needed
+  - The browser's own Pusher connection is never touched
+
+Event dispatching: Playwright fires WS frame callbacks only while its event
+loop is being pumped (during any pw_bridge call).  _wait_for_studies
+interleaves short ``wait_for_timeout`` pumps with event checks to keep
+latency under ~1 s.  The heartbeat here only needs to detect page changes
+(e.g. recycle_tab), not pump events for responsiveness.
+
+Note: ``page.on("websocket")`` only fires for connections opened AFTER the
+listener is registered, and ``ws.on("close")`` does NOT fire when the browser
+closes the socket during page navigation (only for explicit JS closes).
+The first page navigation (which _wait_for_studies does via _refresh_list)
+triggers Pusher to reconnect, at which point the listener picks it up.
 """
 
 import json
@@ -34,7 +47,7 @@ class PusherSniffer:
         self._connected = False
         self._last_event_ts: float = 0
         self._event_count: int = 0
-        self._pusher_request_ids: set = set()
+        self._listening_page = None
 
     # -- public API --
 
@@ -79,27 +92,23 @@ class PusherSniffer:
         import pw_bridge
         backoff = 2
         while not self._stop.is_set():
-            cdp = None
             try:
-                cdp = pw_bridge.run(self._attach, timeout=10)
+                pw_bridge.run(self._attach, timeout=10)
                 self._connected = True
                 backoff = 2
-                log.info("CDP sniffer attached, tracking %d Pusher WS(s)",
-                         len(self._pusher_request_ids))
+                log.info("Pusher WS listener attached")
                 while not self._stop.wait(30):
                     try:
-                        pw_bridge.run(lambda b: None, timeout=5)
+                        same = pw_bridge.run(self._check_page, timeout=5)
+                        if not same:
+                            log.info("Active page changed, re-attaching")
+                            break
                     except Exception:
                         break
             except Exception as e:
-                log.warning("CDP sniffer attach failed: %s", e)
+                log.warning("Pusher listener attach failed: %s", e)
             finally:
                 self._connected = False
-                if cdp is not None:
-                    try:
-                        pw_bridge.run(lambda b, c=cdp: c.detach(), timeout=5)
-                    except Exception:
-                        pass
             if self._stop.is_set():
                 break
             wait = min(backoff, 30)
@@ -108,43 +117,47 @@ class PusherSniffer:
                 break
             backoff = min(backoff * 2, 30)
 
+    def _check_page(self, bridge):
+        return bridge.active_page() is self._listening_page
+
     def _attach(self, bridge):
-        """Called inside the pw_bridge worker thread."""
+        """Register WS frame listener on the active page.
+
+        ``page.on("websocket")`` persists across navigations on the same
+        Page object, so a single registration survives _refresh_list cycles.
+        Each new Pusher WS that opens (after reload / navigation) fires
+        on_ws again, and its ``framereceived`` callback is wired up fresh.
+        """
         page = bridge.active_page()
-        cdp = page.context.new_cdp_session(page)
-        self._pusher_request_ids = set()
+        if page is self._listening_page:
+            return
+        self._listening_page = page
+        sniffer = self
 
-        def on_ws_created(params):
-            url = params.get("url", "")
-            rid = params.get("requestId", "")
-            if PUSHER_WS_MARKER in url:
-                self._pusher_request_ids.add(rid)
-                log.info("Pusher WS detected: %s (rid=%s)", url[:80], rid[:20])
-
-        def on_frame(params):
-            rid = params.get("requestId", "")
-            if rid not in self._pusher_request_ids:
+        def on_ws(ws):
+            if PUSHER_WS_MARKER not in ws.url:
                 return
-            data = params.get("response", {}).get("payloadData", "")
-            try:
-                msg = json.loads(data)
-            except (json.JSONDecodeError, TypeError):
-                return
-            event = msg.get("event", "")
-            if (event
-                    and not event.startswith("pusher:")
-                    and not event.startswith("pusher_internal:")):
-                channel = msg.get("channel", "")
-                self._event_count += 1
-                self._last_event_ts = time.time()
-                log.info("Pusher event #%d: %s on %s", self._event_count,
-                         event, channel)
-                self._event.set()
+            log.info("Pusher WS detected: %s", ws.url[:80])
 
-        cdp.on("Network.webSocketCreated", on_ws_created)
-        cdp.on("Network.webSocketFrameReceived", on_frame)
-        cdp.send("Network.enable")
-        return cdp
+            def on_frame(data):
+                try:
+                    msg = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    return
+                event = msg.get("event", "")
+                if (event
+                        and not event.startswith("pusher:")
+                        and not event.startswith("pusher_internal:")):
+                    channel = msg.get("channel", "")
+                    sniffer._event_count += 1
+                    sniffer._last_event_ts = time.time()
+                    log.info("Pusher event #%d: %s on %s",
+                             sniffer._event_count, event, channel)
+                    sniffer._event.set()
+
+            ws.on("framereceived", on_frame)
+
+        page.on("websocket", on_ws)
 
 
 # Module-level singleton

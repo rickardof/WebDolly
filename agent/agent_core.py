@@ -40,6 +40,7 @@ import fara_prompt as fp
 import cancel
 import form_fill_pw as form_fill
 import study_cache
+import study_memory
 import os
 import re
 import pw_bridge
@@ -755,6 +756,68 @@ def capture_page(kind: str) -> None:
 def studies_url() -> str:
     """Where to go back to when a study has to be abandoned."""
     return os.environ.get("FARA_STUDIES_URL", "https://app.prolific.com/studies")
+
+
+_DOM_HINT_JS = r"""(args) => {
+    const [nav, arrows] = args;
+    const vh = window.innerHeight;
+    let best = null;
+    const sels = 'button, input[type=submit], input[type=button], [role=button]';
+    for (const el of document.querySelectorAll(sels)) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 5 || r.height < 5) continue;
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+        const t = ((el.tagName === 'INPUT' ? el.value : el.textContent) || '')
+            .trim().replace(/\s+/g, ' ');
+        const lo = t.toLowerCase();
+        const meta = [el.id, el.name, el.getAttribute('aria-label'), el.title]
+            .filter(Boolean).join(' ').toLowerCase();
+        const match = arrows.includes(lo)
+            || nav.some(n => lo === n || lo.startsWith(n + ' '))
+            || /(^|[\s_-])next(button|[\s_-]|$)/.test(meta);
+        if (!match) continue;
+        const cx = Math.round(r.left + r.width / 2);
+        const cy = Math.round(r.top + r.height / 2);
+        best = {t: t.slice(0, 30), cx, cy, below: cy >= vh, above: cy < 0};
+    }
+    return best;
+}"""
+
+_NAV_LABELS = [
+    "next", "continue", "submit", "proceed", "start", "begin",
+    "avanti", "continua", "invia", "procedi", "conferma", "inizia",
+    "next page", "next question", "save and continue",
+]
+_NAV_ARROWS = [">>", ">", "→", "»", "›", "->", "=>"]
+
+
+def _dom_nav_hint() -> str:
+    """Find the primary navigation button on the page and report its location."""
+    def _search(b):
+        page = b.active_page()
+        frames = page.frames
+        for fr in frames:
+            try:
+                hit = fr.evaluate(_DOM_HINT_JS, [_NAV_LABELS, _NAV_ARROWS])
+                if hit:
+                    return hit
+            except Exception:
+                continue
+        return None
+    try:
+        btn = pw_bridge.run(_search, timeout=5)
+    except Exception:
+        return ""
+    if not btn:
+        return ""
+    mx = round(btn["cx"] * fp.DISPLAY_SIZE / fp.VIEWPORT_WIDTH)
+    my = round(btn["cy"] * fp.DISPLAY_SIZE / fp.VIEWPORT_HEIGHT)
+    label = btn["t"]
+    if btn.get("below"):
+        return f'["{label}" button is below the visible area — scroll down to reach it.]\n'
+    if btn.get("above"):
+        return f'["{label}" button is above the visible area — scroll up.]\n'
+    return f'["{label}" button at ({mx},{my})]\n'
 
 
 def _page_text(limit: int = 20000) -> str:
@@ -1486,6 +1549,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _current_study_id: str | None = None  # id of the study being looked at / taken
         _current_study_title: str = ""  # its name, read on Prolific while we can still see it
         _seen_codes: list = []  # completion codes spotted on the study's own pages
+        _used_run_js: bool = False  # whether run_js was used during this cycle
+        _survey_url: str = ""  # URL of the external survey (for study_memory)
 
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
@@ -1587,6 +1652,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     study_timer.start(0)
                     _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
                 _timer_started_this_step = True
+                _survey_url = here
                 _live({"type": "notice", "text": f"[timer] transition detected: guarded→external | duration={effective_duration}min"})
                 dur_str = f" (~{effective_duration:.0f} min)" if effective_duration else ""
                 _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
@@ -1681,6 +1747,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         _seen_codes.append(c)
 
             skip_hint = study_cache.prompt_line() if on_list else ""
+            nav_hint = ""
+            mem_hint = ""
+            if not on_list:
+                nav_hint = _dom_nav_hint()
+                if not here_guarded and study_timer.is_active():
+                    mem_hint = study_memory.hint_for(here)
 
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
@@ -1694,7 +1766,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
-                prefix += skip_hint
+                prefix += skip_hint + nav_hint + mem_hint
                 timer_line = study_timer.status_line()
                 if timer_line:
                     prefix += timer_line + "\n"
@@ -1787,6 +1859,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
 
+            if action_type == "run_js" and not result_desc.startswith("run_js error"):
+                _used_run_js = True
+
             if action_type == "left_click" and not pending_user_response:
                 coord = args.get("coordinate")
                 if coord and _check_disabled_near(coord[0], coord[1]):
@@ -1858,6 +1933,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 transcript.flush()
                 if answer.startswith("CODE:") or answer == "NOCODE":
                     _notify_telegram(f"Fara studio completato ✅\n{answer}\nCiclo: {run_dir.name if run_dir else '?'}")
+                if _survey_url:
+                    study_memory.record(_survey_url, run_js_used=_used_run_js,
+                                        steps=step, outcome=answer[:20])
                 yield {"type": "done", "answer": answer, "messages": messages}
                 return
 

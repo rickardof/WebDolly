@@ -713,14 +713,22 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
         if stop_event.is_set():
             return True
         # Wait for stop OR Pusher event OR poll timeout, whichever first.
-        # Check stop_event in short increments so both can interrupt.
+        # Playwright dispatches WS frame callbacks only while its event loop
+        # is pumped (during pw_bridge calls).  Interleave short pump bursts
+        # with event checks so a Pusher push is detected within ~1 s.
         pushed = False
         if pl.connected:
             deadline = time.monotonic() + every
             while time.monotonic() < deadline:
                 if stop_event.is_set():
                     return True
-                if pl.wait(min(1.0, deadline - time.monotonic())):
+                try:
+                    pw_bridge.run(
+                        lambda b: b.active_page().wait_for_timeout(200),
+                        timeout=3)
+                except Exception:
+                    pass
+                if pl.wait(min(0.8, deadline - time.monotonic())):
                     pushed = True
                     break
         else:
