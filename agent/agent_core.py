@@ -1231,11 +1231,19 @@ def dispatch_action(action_type: str, args: dict) -> str:
         code = args.get("code", "")
         if not code.strip():
             return "run_js: no code provided"
-        wrapped = f"(async () => {{ {code} }})()"
+        stripped = code.strip()
+        # Don't double-wrap if the model already sent an IIFE
+        if stripped.startswith('(') and stripped.rstrip(';').endswith(')'):
+            wrapped = stripped
+        else:
+            wrapped = f"(async () => {{ {stripped} }})()"
         try:
             result = pw_bridge.run(
                 lambda b: b.active_page().evaluate(wrapped),
                 timeout=120)
+            if result is None:
+                return ("run_js: completed (no return value). The code ran but "
+                        "returned nothing — check the next screenshot for effects.")
             return f"run_js: {str(result)[:500]}"
         except Exception as e:
             return f"run_js error: {type(e).__name__}: {str(e)[:200]}"
@@ -1399,7 +1407,11 @@ _STANDING_RULES_FULL = (
     "7. Speed: when a survey has many identical repeated trials (e.g. 60 A/B comparisons, "
     "repeated Likert scales), use `run_js` to batch-complete them in one step instead of "
     "clicking through each one manually. Write JS that clicks the selection button, submits, "
-    "waits for the next trial to load, and repeats in a loop for the remaining trials."
+    "waits for the next trial to load, and repeats in a loop for the remaining trials. "
+    "IMPORTANT: use standard DOM APIs only — ':contains()' is NOT valid CSS. To find a "
+    "button by text, use: Array.from(document.querySelectorAll('button'))"
+    ".find(b => b.textContent.includes('Submit')). Do NOT wrap your code in (async () => "
+    "{ ... })() — the runner already does that."
 )
 
 _STANDING_RULES_COMPACT = (
@@ -1412,7 +1424,8 @@ _STANDING_RULES_COMPACT = (
     "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
     "5. Respect minimum time — wait if timer says time remains. "
     "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
-    "7. For repetitive trials (many A/B comparisons, repeated scales), use run_js to batch them in one step."
+    "7. For repetitive trials (many A/B comparisons, repeated scales), use run_js to batch them "
+    "in one step. Use standard DOM APIs — ':contains()' is NOT CSS. Do NOT wrap in (async () => {})()."
 )
 
 
@@ -1762,7 +1775,22 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 text = pending_user_response
                 pending_user_response = ""
             elif step == 1:
-                text = task + _standing_rules() + (f"\n\n{skip_hint}" if skip_hint else "")
+                resume_hint = ""
+                if not on_list:
+                    resume_hint = f"\n\nCurrent URL: {here}\n"
+                    if here_guarded and m_study:
+                        resume_hint += (
+                            "You are resuming on a Prolific study page. A previous run was "
+                            "working on this study. Continue it — open the survey if needed, "
+                            "or enter the completion code if the survey is done. "
+                            "Do NOT go back to the studies list.")
+                    else:
+                        resume_hint += (
+                            "You are resuming inside an external survey. A previous run was "
+                            "working through it. Continue where you left off — complete the "
+                            "current question and proceed. Do NOT navigate back to Prolific "
+                            "until the survey is complete.")
+                text = task + _standing_rules() + (f"\n\n{skip_hint}" if skip_hint else "") + resume_hint
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""

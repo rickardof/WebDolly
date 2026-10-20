@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fara · Statistiche</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238b8cff'/%3E%3Cstop offset='1' stop-color='%235f8bff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M11 23V9h10M11 16h7' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<script>
+  try { const t = localStorage.getItem('fara_theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  /* ================================================================ tokens (shared with the panel) */
+  :root {
+    --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ease: cubic-bezier(.2, .8, .2, 1);
+  }
+  :root, [data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #07080c; --glow-1: rgba(118, 120, 255, .14); --glow-2: rgba(56, 214, 196, .06);
+    --surface: #0e1016; --surface-2: #13161e; --surface-3: #1a1e29; --surface-4: #232836;
+    --line: rgba(150, 162, 195, .085); --line-2: rgba(150, 162, 195, .15);
+    --text: #eceef4; --text-2: #a6adbd; --text-3: #687085;
+    --accent: #8d8eff; --accent-2: #5d8dff;
+    --ok: #3ddc97; --warn: #f6b74a; --bad: #ff6b6e;
+    --shadow: 0 10px 30px -16px rgba(0, 0, 0, .7); --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .75);
+    --hl: inset 0 1px 0 rgba(255, 255, 255, .035);
+    /* chart roles — validated with the dataviz checks (contrast >= 3:1 on --surface, CVD-safe neighbours) */
+    --c-done: #3ddc97; --c-fail: #f6b74a; --c-empty: #596277; --c-blue: #3987e5; --c-bad: #ff6b6e;
+    --seq-1: #1c5cab; --seq-2: #2a78d6; --seq-3: #5598e7; --seq-4: #86b6ef; --c-idle: #1d2230;
+    --grid: rgba(150, 162, 195, .09); --axis: rgba(150, 162, 195, .24);
+  }
+  [data-theme="light"] {
+    color-scheme: light;
+    --bg: #f3f4f8; --glow-1: rgba(99, 102, 241, .10); --glow-2: rgba(20, 184, 166, .07);
+    --surface: #ffffff; --surface-2: #f7f8fb; --surface-3: #eef0f6; --surface-4: #e3e6ef;
+    --line: rgba(17, 24, 48, .075); --line-2: rgba(17, 24, 48, .13);
+    --text: #111522; --text-2: #4a5367; --text-3: #8a92a6;
+    --accent: #5b5cf0; --accent-2: #3b74f2;
+    --ok: #0d9a68; --warn: #c47a08; --bad: #e0383e;
+    --shadow: 0 10px 26px -16px rgba(17, 24, 48, .28); --shadow-lg: 0 24px 50px -24px rgba(17, 24, 48, .3);
+    --hl: inset 0 1px 0 rgba(255, 255, 255, .9);
+    --c-done: #0d9a68; --c-fail: #c47a08; --c-empty: #878ea0; --c-blue: #2a78d6; --c-bad: #e0383e;
+    --seq-1: #86b6ef; --seq-2: #5598e7; --seq-3: #2a78d6; --seq-4: #184f95; --c-idle: #e8ebf2;
+    --grid: rgba(17, 24, 48, .07); --axis: rgba(17, 24, 48, .2);
+  }
+
+  /* ================================================================ base */
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; min-height: 100vh; font: 13px/1.45 var(--font); color: var(--text);
+    background: radial-gradient(1100px 560px at -8% -18%, var(--glow-1), transparent 62%),
+                radial-gradient(900px 520px at 108% 118%, var(--glow-2), transparent 60%), var(--bg);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss01", "ss03";
+  }
+  .ic { display: block; flex: 0 0 auto; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent); outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ================================================================ top bar */
+  .topbar {
+    position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; padding: 10px 20px; min-height: 62px;
+    background: color-mix(in srgb, var(--surface) 72%, transparent); border-bottom: 1px solid var(--line);
+    backdrop-filter: saturate(150%) blur(16px); -webkit-backdrop-filter: saturate(150%) blur(16px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: #fff;
+    background: linear-gradient(140deg, var(--accent), var(--accent-2)); box-shadow: 0 8px 22px -8px var(--accent), inset 0 1px 0 rgba(255, 255, 255, .25); }
+  .brand-txt { display: flex; flex-direction: column; line-height: 1.12; }
+  .brand-txt b { font-size: 15px; letter-spacing: -.015em; }
+  .brand-txt span { font-size: 10.5px; color: var(--text-3); font-weight: 500; letter-spacing: .04em; }
+  .vsep { width: 1px; height: 28px; background: var(--line-2); }
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 11px; border-radius: 999px; font-weight: 600; font-size: 12px;
+    color: var(--text-2); background: var(--surface-3); border: 1px solid var(--line); white-space: nowrap; }
+  .pill .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+  .pill.running, .pill.waiting { --pc: var(--ok); color: var(--pc); background: color-mix(in srgb, var(--pc) 12%, transparent); border-color: color-mix(in srgb, var(--pc) 30%, transparent); }
+  .pill.waiting { --pc: var(--warn); }
+  .pill.running .dot, .pill.waiting .dot { background: var(--pc); }
+  .pill.running .dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1.5px solid var(--pc); animation: ping 1.8s var(--ease) infinite; }
+  .pill .live-meta { font: 500 11.5px var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1 1 auto; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: 10px;
+    border: 1px solid var(--line-2); background: var(--surface-3); color: var(--text); font: 600 12.5px var(--font); cursor: pointer; white-space: nowrap;
+    transition: background .15s, border-color .15s, color .15s, transform .06s; }
+  .btn:hover { background: var(--surface-4); }
+  .btn:active { transform: translateY(1px); }
+  .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+  .btn-ghost:hover { background: var(--surface-3); color: var(--text); border-color: var(--line); }
+  .btn-danger { color: var(--bad); background: color-mix(in srgb, var(--bad) 11%, transparent); border-color: color-mix(in srgb, var(--bad) 38%, transparent); }
+  .btn-danger:hover { background: color-mix(in srgb, var(--bad) 18%, transparent); }
+  .btn-danger.armed { color: #fff; background: var(--bad); border-color: var(--bad); }
+  .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; color: var(--text-2); background: transparent; border: 1px solid transparent; cursor: pointer; }
+  .icon-btn:hover { background: var(--surface-3); color: var(--text); border-color: var(--line); }
+
+  /* ================================================================ page */
+  .page { max-width: 1480px; margin: 0 auto; padding: 18px 20px 40px; transition: opacity .2s; }
+  .page.refreshing .card, .page.refreshing .tile { opacity: .62; }
+  .filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); box-shadow: var(--hl); }
+  .seg button { height: 30px; padding: 0 13px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; transition: color .15s, background .15s; }
+  .seg button:hover { color: var(--text); }
+  .seg button.on { color: var(--text); background: var(--surface-4); box-shadow: var(--hl), 0 1px 3px rgba(0, 0, 0, .3); }
+  .seg.mini { padding: 2px; border-radius: 10px; }
+  .seg.mini button { height: 24px; padding: 0 9px; font-size: 11.5px; border-radius: 8px; white-space: nowrap; }
+  .range-txt { font-size: 12px; color: var(--text-3); }
+  .range-txt b { color: var(--text-2); font-weight: 600; }
+  .updated { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--hl), var(--shadow); min-width: 0; transition: opacity .2s; }
+  .grid { display: grid; gap: 14px; }
+
+  /* KPI tiles */
+  .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .tile { position: relative; padding: 14px 16px 13px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+  .tile .k { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+  .tile .k .ic { color: var(--text-3); }
+  .tile .v { font-size: 28px; font-weight: 650; letter-spacing: -.025em; line-height: 1.1; color: var(--text); white-space: nowrap; }
+  .tile .v small { font-size: 13px; font-weight: 600; color: var(--text-3); letter-spacing: 0; margin-left: 4px; }
+  .tile .sub { display: flex; align-items: center; gap: 8px; min-height: 18px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; }
+  .delta { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 999px; font-weight: 600; font-size: 11px; }
+  .delta.up-good, .delta.down-good { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .delta.up-bad, .delta.down-bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
+  .delta.flat, .delta.neutral { color: var(--text-2); background: var(--surface-3); }
+  .tile .spark { position: absolute; right: 14px; top: 42px; width: 70px; height: 28px; }
+  .meter { height: 6px; border-radius: 6px; background: color-mix(in srgb, var(--c-done) 18%, transparent); overflow: hidden; margin-top: 2px; }
+  .meter i { display: block; height: 100%; border-radius: 6px; background: var(--c-done); transition: width .5s var(--ease); }
+
+  /* chart cards */
+  .row-a { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); margin-bottom: 14px; }
+  .row-b { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 14px; }
+  .row-c { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: start; }
+  .card-h { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 10px; padding: 14px 16px 0; }
+  .card-h > div:first-child { flex: 1 1 220px; min-width: 0; }
+  .card-h h2 { margin: 0; font-size: 13.5px; font-weight: 700; letter-spacing: -.005em; }
+  .card-h p { margin: 2px 0 0; font-size: 11.5px; color: var(--text-3); }
+  .card-h .tools { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+  .tbtn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--text-3); font: 600 11.5px var(--font); cursor: pointer; }
+  .tbtn:hover, .tbtn.on { color: var(--text); background: var(--surface-3); border-color: var(--line); }
+  .card-b { padding: 10px 16px 16px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 16px 0; font-size: 12px; color: var(--text-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend .sw { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
+  .legend .ln { width: 14px; height: 2px; border-radius: 2px; background: var(--c); }
+  .legend .ic { color: var(--text-3); }
+  .chart { position: relative; width: 100%; }
+  .chart svg { display: block; width: 100%; overflow: visible; }
+  .card.fill { display: flex; flex-direction: column; }
+  .card.fill > .card-b { flex: 1; display: flex; flex-direction: column; }
+  .card.fill .chart { flex: 1; }
+  .card.fill .chart > svg { position: absolute; left: 0; top: 0; }
+  .chart .tick { font: 500 10.5px var(--mono); fill: var(--text-3); font-variant-numeric: tabular-nums; }
+  .chart .gl { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+  .chart .base { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+  .chart .hit { fill: transparent; cursor: default; outline: none; }
+  .chart .col.dim { opacity: .35; }
+  .chart .col { transition: opacity .12s; }
+  .chart .cell { transition: opacity .12s; }
+  .chart .cell:hover, .chart .cell:focus { stroke: var(--text); stroke-width: 1.5; outline: none; }
+  .chart .sep { stroke: var(--axis); stroke-width: 1; stroke-dasharray: 2 3; opacity: .7; shape-rendering: crispEdges; }
+  .chart .thr { stroke: var(--c-bad); stroke-width: 1; stroke-dasharray: 5 4; opacity: .8; shape-rendering: crispEdges; }
+  .chart .thr-l { fill: var(--text-2); }
+  .chart .val-l { font: 600 11.5px var(--font); fill: var(--text); }
+  .empty-chart { display: grid; place-items: center; text-align: center; gap: 6px; padding: 34px 10px; color: var(--text-3); font-size: 12.5px; }
+  .empty-chart .ic { color: var(--text-3); margin: 0 auto; }
+
+  /* bar lists (part-to-whole as labelled rows) */
+  .blist { display: flex; flex-direction: column; gap: 11px; }
+  .blist + .blist { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+  .blist h3 { margin: 0 0 1px; font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--text-3); }
+  .bl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 10px; align-items: center; }
+  .bl .lab { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); font-weight: 500; }
+  .bl .lab .ic { color: var(--text-3); }
+  .bl .val { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+  .bl .val b { color: var(--text); font-weight: 650; }
+  .bl .track { grid-column: 1 / -1; height: 8px; border-radius: 8px; background: var(--surface-3); overflow: hidden; }
+  .bl .track i { display: block; height: 100%; border-radius: 8px; background: var(--c); min-width: 2px; transition: width .5s var(--ease); }
+
+  /* submissions */
+  .money { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+  .money .big { font-size: 30px; font-weight: 650; letter-spacing: -.03em; }
+  .money .pending { font-size: 12px; color: var(--text-3); }
+  .money .pending b { color: var(--text-2); }
+  .sublist { margin-top: 16px; display: flex; flex-direction: column; }
+  .sublist .si { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+  .sublist .si:first-child { border-top: 0; }
+  .si .st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .si .sr2 { font: 600 12px var(--font); white-space: nowrap; }
+  .si .sd { font-size: 11.5px; color: var(--text-3); }
+  .chip { justify-self: end; display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    color: var(--c); background: color-mix(in srgb, var(--c) 13%, transparent); white-space: nowrap; }
+
+  /* tables */
+  .tabs { display: flex; gap: 4px; padding: 4px; margin: 12px 16px 0; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); width: fit-content; max-width: calc(100% - 32px); overflow-x: auto; }
+  .tabs button { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; white-space: nowrap; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.on { color: var(--text); background: var(--surface-4); box-shadow: var(--hl); }
+  .tabs .n { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 999px; background: var(--surface-3); color: var(--text-3); }
+  .tbl-wrap { overflow-x: auto; }
+  .tbl-wrap th, .tbl-wrap td { white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; padding: 9px 10px; font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); border-bottom: 1px solid var(--line-2); white-space: nowrap; position: sticky; top: 0; background: var(--surface); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--surface-3) 55%, transparent); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
+  td.mono { font-family: var(--mono); font-size: 12px; }
+  td.dim { color: var(--text-3); }
+  .code { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border-radius: 7px; font: 600 12px var(--mono); color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 26%, transparent); }
+  .copy { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; }
+  .copy:hover { opacity: 1; background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .more { display: flex; justify-content: center; padding: 10px 0 2px; }
+  .tview { max-height: 320px; overflow: auto; }
+
+  /* tooltip */
+  .tip { position: fixed; z-index: 50; pointer-events: none; min-width: 170px; max-width: 280px; padding: 10px 12px; border-radius: 12px;
+    background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); opacity: 0; transform: translateY(4px); transition: opacity .1s, transform .1s; }
+  .tip.show { opacity: 1; transform: none; }
+  .tip .tt { font-size: 11.5px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
+  .tip .tr { display: grid; grid-template-columns: 12px auto 1fr; align-items: center; gap: 7px; font-size: 12px; padding: 2px 0; }
+  .tip .tr i { width: 12px; height: 3px; border-radius: 2px; background: var(--c); }
+  .tip .tr b { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+  .tip .tr span { color: var(--text-3); }
+  .tip .tf { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text-3); }
+
+  .ntfs { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
+  .ntf { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); font-weight: 500; animation: rise .25s var(--ease); }
+  .ntf .ic { color: var(--ok); }
+  .foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 18px; font-size: 11.5px; color: var(--text-3); }
+  .foot a { color: var(--accent); font-weight: 600; }
+
+  * { scrollbar-width: thin; scrollbar-color: var(--surface-4) transparent; }
+  @keyframes ping { 0% { transform: scale(.6); opacity: .75; } 100% { transform: scale(1.45); opacity: 0; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+
+  @media (max-width: 1280px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 1080px) { .row-a, .row-b, .row-c { grid-template-columns: minmax(0, 1fr); } .brand-txt span { display: none; } }
+  @media (max-width: 640px) {
+    .page { padding: 12px 10px 30px; } .topbar { padding: 8px 10px; flex-wrap: wrap; } .vsep { display: none; }
+    .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tile .v { font-size: 23px; } .tile .spark { display: none; }
+    .tile .sub { white-space: normal; flex-wrap: wrap; }
+    .updated { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/" title="Torna al pannello">
+    <span class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 20V4h11M7 12h8"/></svg></span>
+    <span class="brand-txt"><b>Statistiche</b><span>Fara · agent console</span></span>
+  </a>
+  <span class="vsep"></span>
+  <span class="pill" id="pill"><span class="dot"></span><span id="pillText">fermo</span><span class="live-meta" id="pillMeta"></span></span>
+  <span class="spacer"></span>
+  <button class="btn btn-danger" id="stopBtn" hidden></button>
+  <a class="btn btn-ghost" href="/" id="backBtn"></a>
+  <button class="icon-btn" id="themeBtn" aria-label="Cambia tema"></button>
+</header>
+
+<main class="page" id="page">
+  <div class="filters">
+    <div class="seg" id="periodSeg" role="radiogroup" aria-label="Periodo">
+      <button data-p="today" role="radio">Oggi</button>
+      <button data-p="7d" role="radio">7 giorni</button>
+      <button data-p="30d" role="radio">30 giorni</button>
+      <button data-p="all" role="radio">Tutto</button>
+    </div>
+    <span class="range-txt" id="rangeTxt"></span>
+    <span class="updated"><span id="updatedTxt"></span><button class="icon-btn" id="refreshBtn" title="Aggiorna adesso" aria-label="Aggiorna adesso"></button></span>
+  </div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <div class="grid row-a">
+    <section class="card fill" id="cardActivity">
+      <div class="card-h"><div><h2>Attività nel tempo</h2><p id="actSub">Cicli per intervallo, per esito</p></div><div class="tools">
+        <div class="seg mini" id="actMode" role="radiogroup" aria-label="Quali cicli"><button data-m="work" role="radio">Con studio</button><button data-m="all" role="radio">Tutti</button></div>
+        <button class="tbtn" data-view="activity"></button></div></div>
+      <div class="legend" id="actLegend"></div>
+      <div class="card-b"><div class="chart" id="chActivity"></div></div>
+    </section>
+    <section class="card" id="cardSplit">
+      <div class="card-h"><div><h2>Dove va il tempo</h2><p>Quota del tempo e dei passi nel periodo</p></div></div>
+      <div class="card-b" id="split"></div>
+    </section>
+  </div>
+
+  <div class="grid row-b">
+    <section class="card fill" id="cardHeat">
+      <div class="card-h"><div><h2>Quando c'è lavoro</h2><p>Cicli che hanno trovato qualcosa da fare, per giorno e ora</p></div><div class="tools"><button class="tbtn" data-view="heat"></button></div></div>
+      <div class="legend" id="heatLegend"></div>
+      <div class="card-b"><div class="chart" id="chHeat"></div></div>
+    </section>
+    <section class="card fill" id="cardModel">
+      <div class="card-h"><div><h2>Velocità del modello</h2><p id="modelSub">Token generati al secondo, mediana per ciclo</p></div><div class="tools"><button class="tbtn" data-view="model"></button></div></div>
+      <div class="card-b"><div class="chart" id="chModel"></div></div>
+    </section>
+  </div>
+
+  <div class="grid row-c">
+    <section class="card" id="cardSubs">
+      <div class="card-h"><div><h2>Submission su Prolific</h2><p id="subsSub">Lette dalla pagina delle submission tra un ciclo e l'altro</p></div></div>
+      <div class="card-b" id="subs"></div>
+    </section>
+    <section class="card" id="cardTables">
+      <div class="card-h"><div><h2>Dettaglio</h2><p>Ogni ciclo del periodo, il più recente in alto</p></div></div>
+      <div class="tabs" id="tblTabs" role="tablist"></div>
+      <div class="card-b"><div class="tbl-wrap" id="tbl"></div></div>
+    </section>
+  </div>
+
+  <div class="foot"><span id="footTxt"></span><a href="/">← Torna al pannello</a></div>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+<div class="ntfs" id="ntfs"></div>
+
+<script>
+/* ============================================================ data */
+let D = /*__DATA__*/null;
+const S = 0, E = 1, DUR = 2, STEPS = 3, OUT = 4, ANS = 5, SRC = 6, WL = 7, WS = 8, WE = 9, TPS = 10;
+const $ = id => document.getElementById(id);
+
+/* ============================================================ formatting */
+const NF = new Intl.NumberFormat('it-IT');
+const NF1 = new Intl.NumberFormat('it-IT', {minimumFractionDigits: 1, maximumFractionDigits: 1});
+const fmtN = n => NF.format(Math.round(n));
+const fmt1 = n => NF1.format(n);
+const fmtPct = x => !isFinite(x) ? '—' : (x === 0 || x >= .1 ? Math.round(x * 100) : NF1.format(x * 100)) + '%';
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s || 0));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), ss = s % 60;
+  if (m < 60) return m + 'm ' + String(ss).padStart(2, '0') + 's';
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  return Math.floor(h / 24) + 'g ' + (h % 24) + 'h';
+}
+const DAYS = ['dom', 'lun', 'mar', 'mer', 'gio', 'ven', 'sab'];
+const MONTHS = ['gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+const hhmm = t => new Date(t * 1000).toLocaleTimeString('it-IT', {hour: '2-digit', minute: '2-digit'});
+const dayLbl = t => { const d = new Date(t * 1000); return `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`; };
+const dateShort = t => { const d = new Date(t * 1000); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; };
+const dt = t => `${dateShort(t)}, ${hhmm(t)}`;
+function moneyFmt(v, cur) { return (cur || '£') + new Intl.NumberFormat('it-IT', {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(v); }
+
+/* ============================================================ icons */
+const IC = {
+  check: '<circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.7 2.7L16.2 9.5"/>',
+  alert: '<path d="M10.3 4L2.4 17.6A2 2 0 0 0 4.1 20.6h15.8a2 2 0 0 0 1.7-3L13.7 4a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4M12 17h.01"/>',
+  inbox: '<path d="M3.5 13.5l2.6-8.1a1.5 1.5 0 0 1 1.4-1h8.9a1.5 1.5 0 0 1 1.4 1l2.7 8.1"/><path d="M3.5 13.5v5a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-5h-5l-1.5 2.5h-4l-1.5-2.5z"/>',
+  cycle: '<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 3.5v5h-5"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/>',
+  gauge: '<path d="M3.5 17.5a8.5 8.5 0 1 1 17 0"/><path d="M12 17.5l4-5.5"/>',
+  coin: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.3-2.8-1.3-1.7 0-2.8.9-2.8 2.1 0 2.9 5.8 1.5 5.8 4.2 0 1.2-1.2 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 6v1.9M12 16.3v1.8"/>',
+  target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/>',
+  table: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/>',
+  chart: '<path d="M3.5 3.5v17h17"/><path d="M7.5 15l4-4.5 3 3 5.5-6.5"/>',
+  refresh: '<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 3.5v5h-5"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6L6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4"/>',
+  moon: '<path d="M20.5 13.2A8.5 8.5 0 1 1 10.8 3.5a6.6 6.6 0 0 0 9.7 9.7z"/>',
+  back: '<path d="M19 12H5M11 18l-6-6 6-6"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" stroke="none"/>',
+  copy: '<rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/>',
+  skip: '<path d="M5 5l9 7-9 7z"/><path d="M18 5v14"/>',
+  hourglass: '<path d="M6 3h12M6 21h12M7.5 3v3.5a4.5 4.5 0 0 0 9 0V3M7.5 21v-3.5a4.5 4.5 0 0 1 9 0V21"/>',
+  ret: '<path d="M9 14l-5-5 5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+  x: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
+  play: '<circle cx="12" cy="12" r="9"/><path d="M10 8.5l5 3.5-5 3.5z"/>',
+  filter: '<path d="M3.5 5.5h17l-6.5 7.5v5.5l-4 2v-7.5z"/>',
+  steps: '<path d="M4 17.5h4v-4h4v-4h4v-4h4"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+  spark: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"/>',
+};
+const icon = (n, s = 16) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n] || ''}</svg>`;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/* ============================================================ outcome model */
+const kind = o => (o === 'CODE' || o === 'NOCODE') ? 'done' : o === 'NONE' ? 'empty' : 'fail';
+const KINDS = [
+  {k: 'done', label: 'Studi completati', short: 'Completati', c: '--c-done', ic: 'check'},
+  {k: 'fail', label: 'Cicli interrotti', short: 'Interrotti', c: '--c-fail', ic: 'alert'},
+  {k: 'empty', label: 'Elenco vuoto', short: 'Elenco vuoto', c: '--c-empty', ic: 'inbox'},
+];
+
+/* ============================================================ period */
+let period = 'today';
+try { period = localStorage.getItem('fara_dash_period') || '7d'; } catch (e) { period = '7d'; }
+const PERIOD_LABEL = {today: 'oggi', '7d': 'ultimi 7 giorni', '30d': 'ultimi 30 giorni', all: 'tutto lo storico'};
+function windowFor(p, now) {
+  if (p === 'today') { const d = new Date(now * 1000); d.setHours(0, 0, 0, 0); return [d.getTime() / 1000, now]; }
+  if (p === '7d') return [now - 7 * 86400, now];
+  if (p === '30d') return [now - 30 * 86400, now];
+  const first = D.runs.length ? D.runs[0][S] : now - 86400;
+  const d = new Date(first * 1000); d.setHours(0, 0, 0, 0);
+  return [d.getTime() / 1000, now];
+}
+const median = a => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+function aggregate(runs) {
+  const n = {done: 0, fail: 0, empty: 0}, t = {done: 0, fail: 0, empty: 0}, w = {list: 0, study: 0, elsewhere: 0};
+  const doneDur = [], doneSteps = [], tps = [];
+  for (const r of runs) {
+    const k = kind(r[OUT]); n[k]++; t[k] += r[DUR];
+    w.list += r[WL]; w.study += r[WS]; w.elsewhere += r[WE];
+    if (k === 'done') { doneDur.push(r[DUR]); doneSteps.push(r[STEPS]); }
+    if (r[TPS]) tps.push(r[TPS]);
+  }
+  const span = runs.length ? Math.max(1, runs[runs.length - 1][E] - runs[0][S]) : 0;
+  return {n, t, w, total: runs.length, doneDur, doneSteps, tps, span};
+}
+
+/* ============================================================ tooltip */
+const tip = $('tip');
+function showTip(evOrEl, title, rows, foot) {
+  tip.textContent = '';
+  const tt = document.createElement('div'); tt.className = 'tt'; tt.textContent = title; tip.appendChild(tt);
+  for (const r of rows) {
+    const line = document.createElement('div'); line.className = 'tr'; line.style.setProperty('--c', r.c || 'var(--text-3)');
+    const key = document.createElement('i');
+    const v = document.createElement('b'); v.textContent = r.v;
+    const l = document.createElement('span'); l.textContent = r.l;
+    line.append(key, v, l); tip.appendChild(line);
+  }
+  if (foot) { const f = document.createElement('div'); f.className = 'tf'; f.textContent = foot; tip.appendChild(f); }
+  let x, y;
+  if (evOrEl.clientX !== undefined) { x = evOrEl.clientX; y = evOrEl.clientY; }
+  else { const b = evOrEl.getBoundingClientRect(); x = b.left + b.width / 2; y = b.top; }
+  tip.classList.add('show');
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let lx = x + 14, ly = y - h - 12;
+  if (lx + w > innerWidth - 8) lx = x - w - 14;
+  if (ly < 8) ly = y + 16;
+  tip.style.left = lx + 'px'; tip.style.top = ly + 'px';
+}
+const hideTip = () => tip.classList.remove('show');
+
+/* ============================================================ helpers for charts */
+function niceMax(v, ticks = 4, int = false) {
+  if (v <= 0) return {max: ticks, step: 1};
+  const raw = v / ticks, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw && (!int || Number.isInteger(s))) || Math.max(int ? 1 : 0, 10 * mag);
+  return {max: Math.ceil(v / step) * step, step};
+}
+// Column with a 4px rounded data-end, square at the baseline.
+function colPath(x, y, w, h, r) {
+  if (h <= 0) return '';
+  r = Math.min(r, w / 2, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+// Height for a chart that fills its card: at least `min`, more when the row is taller.
+function fillHeight(host, min) {
+  host.textContent = ''; host.style.minHeight = min + 'px';
+  return Math.max(min, Math.floor(host.clientHeight));
+}
+function emptyChart(host, text, ic = 'chart') { host.innerHTML = `<div class="empty-chart">${icon(ic, 22)}<div>${esc(text)}</div></div>`; }
+const views = {activity: 'chart', heat: 'chart', model: 'chart'};
+function tableHTML(head, rows, numCols = []) {
+  return `<div class="tview"><table><thead><tr>${head.map((h, i) => `<th class="${numCols.includes(i) ? 'num' : ''}">${esc(h)}</th>`).join('')}</tr></thead>` +
+    `<tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td class="${numCols.includes(i) ? 'num' : ''}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+
+/* ============================================================ KPI tiles */
+function sparkSVG(values, color) {
+  if (values.length < 2 || values.every(v => !v)) return '';
+  const max = Math.max(...values) || 1, n = values.length;
+  const pts = values.map((v, i) => [i / (n - 1) * 74, 24 - v / max * 21]);
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  return `<svg class="spark" viewBox="0 0 74 26" preserveAspectRatio="none" aria-hidden="true"><path d="${d} L74 26 L0 26Z" fill="${color}" opacity=".12"/>` +
+    `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${pts[n - 1][0]}" cy="${pts[n - 1][1]}" r="2.6" fill="${color}"/></svg>`;
+}
+function deltaHTML(cur, prev, upGood, fmt = v => fmtN(v)) {
+  if (prev === null || prev === undefined || !isFinite(prev) || !isFinite(cur)) return '';
+  const d = cur - prev;
+  if (Math.abs(d) < 1e-9) return `<span class="delta flat">= periodo prec.</span>`;
+  const up = d > 0, cls = upGood === null ? 'neutral' : up ? (upGood ? 'up-good' : 'up-bad') : (upGood ? 'down-bad' : 'down-good');
+  return `<span class="delta ${cls}" title="Rispetto al periodo precedente di pari durata">${up ? '▲' : '▼'} ${fmt(Math.abs(d))}</span>`;
+}
+function bucketSeries(runs, a, b, n, pick) {
+  const out = new Array(n).fill(0), size = (b - a) / n;
+  for (const r of runs) { const i = Math.min(n - 1, Math.floor((r[S] - a) / size)); if (i >= 0) out[i] += pick(r); }
+  return out;
+}
+function renderKPIs(runs, prevRuns, A, P, a, b) {
+  const subs = filteredSubs(a, b);
+  const attempted = A.n.done + A.n.fail;
+  const rate = attempted ? A.n.done / attempted : NaN;
+  const prevRate = P && (P.n.done + P.n.fail) ? P.n.done / (P.n.done + P.n.fail) : null;
+  const medDur = median(A.doneDur), medSteps = median(A.doneSteps);
+  const perHour = A.span ? A.total / (A.span / 3600) : NaN;
+  const tpsMed = median(A.tps);
+  const slow = D.slow_tps || 10;
+  const tiles = [];
+  tiles.push(`<div class="card tile"><div class="k">${icon('check', 15)}Studi completati</div>` +
+    `<div class="v">${fmtN(A.n.done)}</div><div class="sub">${deltaHTML(A.n.done, P ? P.n.done : null, true)}<span>${A.n.done === 1 ? 'studio' : 'studi'} nel periodo</span></div>` +
+    sparkSVG(bucketSeries(runs, a, b, 12, r => kind(r[OUT]) === 'done' ? 1 : 0), css('--c-done')) + `</div>`);
+  tiles.push(`<div class="card tile"><div class="k">${icon('target', 15)}Tasso di completamento</div>` +
+    `<div class="v">${fmtPct(rate)}</div><div class="meter" title="Completati su cicli che hanno trovato uno studio"><i style="width:${isFinite(rate) ? rate * 100 : 0}%"></i></div>` +
+    `<div class="sub">${deltaHTML(isFinite(rate) ? rate * 100 : NaN, prevRate === null ? null : prevRate * 100, true, v => Math.round(v) + ' pt')}<span>${fmtN(A.n.done)} su ${fmtN(attempted)} cicli con lavoro</span></div></div>`);
+  tiles.push(`<div class="card tile"><div class="k">${icon('clock', 15)}Tempo per studio</div>` +
+    `<div class="v">${isFinite(medDur) ? fmtDur(medDur) : '—'}</div><div class="sub"><span>${isFinite(medSteps) ? 'mediana · ' + fmtN(medSteps) + ' passi' : 'nessuno studio completato'}</span></div></div>`);
+  tiles.push(`<div class="card tile"><div class="k">${icon('cycle', 15)}Cicli</div>` +
+    `<div class="v">${fmtN(A.total)}</div><div class="sub">${deltaHTML(A.total, P ? P.total : null, null)}<span>${isFinite(perHour) ? fmt1(perHour) + ' all\'ora' : ''}</span></div>` +
+    sparkSVG(bucketSeries(runs, a, b, 12, () => 1), css('--c-blue')) + `</div>`);
+  if (subs.has) {
+    const prevSubs = P ? filteredSubs(a - (b - a), a) : null;
+    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div>` +
+      `<div class="v">${moneyFmt(subs.earned, subs.cur)}</div><div class="sub">${prevSubs && prevSubs.has && period !== 'all' ? deltaHTML(subs.earned, prevSubs.earned, true, v => moneyFmt(v, subs.cur)) : ''}` +
+      `<span>${subs.pending ? moneyFmt(subs.pending, subs.cur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span></div></div>`);
+  } else {
+    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div><div class="v">—</div>` +
+      `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span></div></div>`);
+  }
+  const tpsColor = !isFinite(tpsMed) ? css('--c-blue') : tpsMed < slow ? css('--c-bad') : css('--c-blue');
+  tiles.push(`<div class="card tile"><div class="k">${icon('gauge', 15)}Velocità del modello</div>` +
+    `<div class="v">${isFinite(tpsMed) ? (tpsMed >= 10 ? fmtN(tpsMed) : fmt1(tpsMed)) : '—'}<small>tok/s</small></div>` +
+    `<div class="sub">${isFinite(tpsMed) && tpsMed < slow ? `<span class="delta up-bad">sotto soglia</span>` : ''}<span>${A.tps.length ? 'mediana su ' + fmtN(A.tps.length) + ' cicli' : 'non ancora misurata'}</span></div>` +
+    sparkSVG(runs.filter(r => r[TPS]).slice(-24).map(r => r[TPS]), tpsColor) + `</div>`);
+  $('kpis').innerHTML = tiles.join('');
+}
+
+/* ============================================================ activity (stacked columns) */
+function bucketPlan(a, b) {
+  const span = b - a;
+  if (span <= 1.5 * 86400) return {size: 3600, label: 'ora'};
+  if (span <= 8 * 86400) return {size: 4 * 3600, label: '4 ore'};
+  if (span <= 120 * 86400) return {size: 86400, label: 'giorno'};
+  return {size: 7 * 86400, label: 'settimana'};
+}
+function alignStart(t, size) {
+  const d = new Date(t * 1000);
+  if (size >= 86400) { d.setHours(0, 0, 0, 0); return d.getTime() / 1000; }
+  d.setMinutes(0, 0, 0);
+  const h = size / 3600; d.setHours(Math.floor(d.getHours() / h) * h);
+  return d.getTime() / 1000;
+}
+let ACT = null, actMode = 'work';   // 'work' = only cycles that found a study; 'all' = every cycle
+try { actMode = localStorage.getItem('fara_dash_act') || 'work'; } catch (e) {}
+function renderActivity(runs, a, b) {
+  const host = $('chActivity');
+  const plan = bucketPlan(a, b), start = alignStart(a, plan.size);
+  const n = Math.max(1, Math.ceil((b - start) / plan.size));
+  const buckets = Array.from({length: n}, (_, i) => ({t0: start + i * plan.size, done: 0, fail: 0, empty: 0}));
+  for (const r of runs) { const i = Math.floor((r[S] - start) / plan.size); if (i >= 0 && i < n) buckets[i][kind(r[OUT])]++; }
+  ACT = buckets;
+  const shown = actMode === 'work' ? ['done', 'fail'] : ['done', 'fail', 'empty'];
+  const nEmpty = buckets.reduce((s, x) => s + x.empty, 0), nWork = buckets.reduce((s, x) => s + x.done + x.fail, 0);
+  $('actSub').textContent = actMode === 'work'
+    ? `Cicli che hanno trovato uno studio, per ${plan.label}` + (nEmpty ? ` · ${fmtN(nEmpty)} a elenco vuoto esclusi` : '')
+    : `Tutti i cicli, per ${plan.label}, per esito`;
+  $('actLegend').innerHTML = KINDS.filter(k => shown.includes(k.k)).map(k => `<span><i class="sw" style="--c:var(${k.c})"></i>${icon(k.ic, 13)}${k.short}</span>`).join('');
+  document.querySelectorAll('#actMode button').forEach(x => { const on = x.dataset.m === actMode; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); });
+  if (views.activity === 'table') {
+    host.innerHTML = tableHTML(['Intervallo', 'Completati', 'Interrotti', 'Elenco vuoto', 'Totale'],
+      buckets.filter(x => x.done + x.fail + x.empty).reverse().map(x => [bucketLabel(x.t0, plan.size), x.done, x.fail, x.empty, x.done + x.fail + x.empty]), [1, 2, 3, 4]);
+    return;
+  }
+  if (!runs.length) { emptyChart(host, 'Nessun ciclo in questo periodo', 'cycle'); return; }
+  if (actMode === 'work' && !nWork) { emptyChart(host, `Nessun ciclo ha trovato uno studio: ${fmtN(nEmpty)} cicli a elenco vuoto`, 'inbox'); return; }
+  const H = fillHeight(host, 230), W = host.clientWidth || 600, padL = 34, padR = 6, padT = 10, padB = 26;
+  const pw = W - padL - padR, ph = H - padT - padB;
+  const val = x => shown.reduce((s, k) => s + x[k], 0);
+  const ny = niceMax(Math.max(1, ...buckets.map(val)), 4, true);
+  const svg = svgEl('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img',
+    'aria-label': `${actMode === 'work' ? 'Cicli con uno studio' : 'Cicli'} per ${plan.label}`}, host);
+  for (let v = 0; v <= ny.max + 1e-9; v += ny.step) {
+    const y = padT + ph - v / ny.max * ph;
+    svgEl('line', {x1: padL, x2: W - padR, y1: Math.round(y) + .5, y2: Math.round(y) + .5, class: v === 0 ? 'base' : 'gl'}, svg);
+    const tx = svgEl('text', {x: padL - 8, y: y + 3.5, 'text-anchor': 'end', class: 'tick'}, svg); tx.textContent = fmtN(v);
+  }
+  const slot = pw / n, bw = Math.max(2, Math.min(24, slot * .62)), GAP = 2;
+  const colors = {done: css('--c-done'), fail: css('--c-fail'), empty: css('--c-empty')};
+  xAxis(svg, buckets.map(x => x.t0), plan.size, padL, slot, padT, ph, H);
+  buckets.forEach((x, i) => {
+    const cx = padL + i * slot + slot / 2, x0 = cx - bw / 2;
+    const g = svgEl('g', {class: 'col'}, svg);
+    const total = x.done + x.fail + x.empty;
+    let yTop = padT + ph;
+    const order = shown.filter(k => x[k]);
+    order.forEach((k, j) => {
+      const h = x[k] / ny.max * ph, y = yTop - h, top = j === order.length - 1;
+      const hh = Math.max(0, h - (j ? GAP : 0));
+      if (hh > 0) svgEl('path', {d: top ? colPath(x0, y, bw, hh, Math.min(4, hh)) : `M${x0},${y}h${bw}v${hh}h${-bw}Z`, fill: colors[k]}, g);
+      yTop = y;
+    });
+    const hit = svgEl('rect', {x: padL + i * slot, y: padT, width: slot, height: ph, class: 'hit', tabindex: total ? 0 : -1,
+      'aria-label': `${bucketLabel(x.t0, plan.size)}: ${x.done} completati, ${x.fail} interrotti, ${x.empty} elenco vuoto`}, svg);
+    const on = e => {
+      svg.querySelectorAll('.col').forEach((c, ci) => c.classList.toggle('dim', ci !== i));
+      showTip(e.clientX !== undefined ? e : hit, bucketLabel(x.t0, plan.size),
+        KINDS.map(k => ({c: `var(${k.c})`, v: fmtN(x[k.k]), l: k.short})), `${fmtN(total)} cicli`);
+    };
+    const off = () => { svg.querySelectorAll('.col').forEach(c => c.classList.remove('dim')); hideTip(); };
+    hit.addEventListener('pointermove', on); hit.addEventListener('pointerleave', off);
+    hit.addEventListener('focus', on); hit.addEventListener('blur', off);
+  });
+}
+// Calendar x axis for bucketed columns: under a day, hours every 3 (midnight shows the day);
+// for 4-hour buckets, a faint line at each midnight and the day name centred on its span;
+// for days and weeks, dates spaced so they never touch.
+function xAxis(svg, starts, size, padL, slot, padT, ph, H) {
+  const lab = (x, s) => { const e = svgEl('text', {x, y: H - 8, 'text-anchor': 'middle', class: 'tick'}, svg); e.textContent = s; };
+  const dayName = t => { const d = new Date(t * 1000); return `${DAYS[d.getDay()]} ${d.getDate()}`; };
+  if (size < 86400) {
+    const days = [];
+    starts.forEach((t, i) => {
+      const k = new Date(t * 1000).toDateString();
+      if (!days.length || days[days.length - 1].k !== k) days.push({k, t, i0: i, i1: i + 1}); else days[days.length - 1].i1 = i + 1;
+    });
+    days.forEach((d, j) => {
+      if (!j) return;
+      const x = Math.round(padL + d.i0 * slot) + .5;
+      svgEl('line', {x1: x, x2: x, y1: padT, y2: padT + ph + 5, class: 'gl'}, svg);
+    });
+    if (size >= 4 * 3600) {
+      for (const d of days) { const xa = padL + d.i0 * slot, xb = padL + d.i1 * slot; if (xb - xa >= 46) lab((xa + xb) / 2, dayName(d.t)); }
+    } else {
+      let last = -1e9;
+      starts.forEach((t, i) => {
+        const h = new Date(t * 1000).getHours(), x = padL + i * slot + slot / 2;
+        if (h % 3 || x - last < 46) return;
+        lab(x, h === 0 && i ? dayName(t) : hhmm(t)); last = x;
+      });
+    }
+    return;
+  }
+  let last = -1e9;
+  starts.forEach((t, i) => { const x = padL + i * slot + slot / 2; if (x - last >= 58) { lab(x, dateShort(t)); last = x; } });
+}
+function bucketLabel(t, size) {
+  if (size < 86400) return `${dayLbl(t)}, ${hhmm(t)}–${hhmm(t + size)}`;
+  if (size === 86400) return dayLbl(t);
+  return `settimana dal ${dateShort(t)}`;
+}
+
+/* ============================================================ where the time goes */
+function renderSplit(A) {
+  const host = $('split');
+  if (!A.total) { emptyChart(host, 'Nessun ciclo in questo periodo', 'clock'); return; }
+  const tAll = A.t.done + A.t.fail + A.t.empty || 1, wAll = A.w.list + A.w.study + A.w.elsewhere || 1;
+  const row = (label, ic, c, share, value) =>
+    `<div class="bl"><span class="lab">${icon(ic, 14)}${esc(label)}</span><span class="val"><b>${fmtPct(share)}</b> · ${esc(value)}</span>` +
+    `<span class="track"><i style="--c:${c};width:${(share * 100).toFixed(2)}%"></i></span></div>`;
+  host.innerHTML =
+    `<div class="blist"><h3>Tempo</h3>` + KINDS.map(k => row(k.label, k.ic, `var(${k.c})`, A.t[k.k] / tAll, fmtDur(A.t[k.k]))).join('') + `</div>` +
+    `<div class="blist"><h3>Passi</h3>` +
+    row('Dentro uno studio', 'play', 'var(--c-blue)', A.w.study / wAll, fmtN(A.w.study) + ' passi') +
+    row('Sull\'elenco studi', 'inbox', 'var(--c-blue)', A.w.list / wAll, fmtN(A.w.list) + ' passi') +
+    row('Altrove su Prolific', 'filter', 'var(--c-blue)', A.w.elsewhere / wAll, fmtN(A.w.elsewhere) + ' passi') + `</div>`;
+}
+
+/* ============================================================ heatmap (weekday x hour) */
+let HEAT = null;
+function renderHeat(runs) {
+  const host = $('chHeat');
+  const grid = Array.from({length: 7}, () => Array.from({length: 24}, () => ({runs: 0, active: 0, done: 0})));
+  for (const r of runs) {
+    const d = new Date(r[S] * 1000), wd = (d.getDay() + 6) % 7, h = d.getHours(), c = grid[wd][h];
+    c.runs++; const k = kind(r[OUT]); if (k !== 'empty') c.active++; if (k === 'done') c.done++;
+  }
+  HEAT = grid;
+  const maxA = Math.max(0, ...grid.flat().map(c => c.active));
+  const lvl = c => !c.runs ? -1 : !c.active ? 0 : Math.min(4, Math.max(1, Math.ceil(c.active / Math.max(1, maxA) * 4)));
+  const fills = ['var(--c-idle)', 'var(--seq-1)', 'var(--seq-2)', 'var(--seq-3)', 'var(--seq-4)'];
+  $('heatLegend').innerHTML = `<span><i class="sw" style="--c:transparent;box-shadow:inset 0 0 0 1px var(--line-2)"></i>Agente spento</span>` +
+    `<span><i class="sw" style="--c:var(--c-idle)"></i>Acceso, niente da fare</span>` +
+    `<span>poco <i class="sw" style="--c:var(--seq-1)"></i><i class="sw" style="--c:var(--seq-2)"></i><i class="sw" style="--c:var(--seq-3)"></i><i class="sw" style="--c:var(--seq-4)"></i> tanto</span>`;
+  const WD = ['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'];
+  if (views.heat === 'table') {
+    const rows = [];
+    grid.forEach((row, wd) => row.forEach((c, h) => { if (c.runs) rows.push([WD[wd], `${String(h).padStart(2, '0')}:00`, c.runs, c.active, c.done]); }));
+    host.innerHTML = rows.length ? tableHTML(['Giorno', 'Ora', 'Cicli', 'Con lavoro', 'Completati'], rows, [2, 3, 4]) : '';
+    if (!rows.length) emptyChart(host, 'Nessun ciclo in questo periodo', 'calendar');
+    return;
+  }
+  if (!runs.length) { emptyChart(host, 'Nessun ciclo in questo periodo', 'calendar'); return; }
+  host.textContent = '';
+  const W = host.clientWidth || 600, padL = 34, padT = 4, padB = 22, cw = (W - padL) / 24;
+  const ch0 = Math.max(14, Math.min(26, cw * .78)), avail = fillHeight(host, Math.ceil(padT + 7 * ch0 + padB));
+  const ch = Math.max(ch0, Math.min(cw * .92, (avail - padT - padB) / 7)), H = padT + 7 * ch + padB;
+  const svg = svgEl('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': 'Cicli con lavoro per giorno della settimana e ora'}, host);
+  WD.forEach((d, wd) => { const t = svgEl('text', {x: padL - 8, y: padT + wd * ch + ch / 2 + 3.5, 'text-anchor': 'end', class: 'tick'}, svg); t.textContent = d; });
+  for (let h = 0; h < 24; h += 3) { const t = svgEl('text', {x: padL + h * cw + cw / 2, y: H - 6, 'text-anchor': 'middle', class: 'tick'}, svg); t.textContent = String(h).padStart(2, '0'); }
+  grid.forEach((row, wd) => row.forEach((c, h) => {
+    const L = lvl(c);
+    const r = svgEl('rect', {x: padL + h * cw + 1, y: padT + wd * ch + 1, width: Math.max(1, cw - 2), height: Math.max(1, ch - 2), rx: 3,
+      fill: L < 0 ? 'transparent' : fills[L], stroke: L < 0 ? css('--line-2') : 'none', 'stroke-width': L < 0 ? 1 : 0, class: 'cell',
+      tabindex: c.runs ? 0 : -1, 'aria-label': `${WD[wd]} ${h}:00: ${c.runs} cicli, ${c.active} con lavoro`}, svg);
+    if (!c.runs) return;
+    const on = e => showTip(e.clientX !== undefined ? e : r, `${WD[wd]} · ${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`, [
+      {c: 'var(--seq-3)', v: fmtN(c.active), l: 'cicli con lavoro'},
+      {c: 'var(--c-done)', v: fmtN(c.done), l: 'studi completati'},
+      {c: 'var(--c-empty)', v: fmtN(c.runs), l: 'cicli in tutto'}]);
+    r.addEventListener('pointermove', on); r.addEventListener('pointerleave', hideTip);
+    r.addEventListener('focus', on); r.addEventListener('blur', hideTip);
+  }));
+}
+
+/* ============================================================ model speed (line + threshold) */
+// One point per measured cycle, in order: a time axis squeezed the history into a few
+// clusters separated by empty days. Long pauses (a new session) open a visible gap.
+const SESSION_GAP = 3 * 3600;
+function renderModel(runs) {
+  const host = $('chModel'), slow = D.slow_tps || 10;
+  const pts = runs.filter(r => r[TPS]).map(r => ({t: r[S], v: r[TPS], o: r[OUT]}));
+  $('modelSub').textContent = `Token al secondo, un punto per ciclo · soglia di allarme ${fmtN(slow)}`;
+  if (views.model === 'table') {
+    host.innerHTML = pts.length ? tableHTML(['Ciclo', 'Token/s', 'Esito'], pts.slice().reverse().map(p => [dt(p.t), fmt1(p.v), KINDS.find(k => k.k === kind(p.o)).short]), [1]) : '';
+    if (!pts.length) emptyChart(host, 'Nessuna misura nel periodo', 'gauge');
+    return;
+  }
+  if (pts.length < 2) { emptyChart(host, pts.length ? 'Una sola misura: serve almeno un altro ciclo' : 'Nessuna misura nel periodo', 'gauge'); return; }
+  const H = fillHeight(host, 230), W = host.clientWidth || 600, padL = 34, padR = 12, padT = 14, padB = 26, pw = W - padL - padR, ph = H - padT - padB;
+  const n = pts.length, GAP = 16;
+  const brk = pts.map((q, i) => i > 0 && q.t - pts[i - 1].t > SESSION_GAP);
+  const nBreaks = brk.filter(Boolean).length;
+  const step = Math.max(0.5, (pw - nBreaks * GAP) / (n - 1));
+  const xs = []; let acc = padL;
+  pts.forEach((q, i) => { if (i) acc += step + (brk[i] ? GAP : 0); xs.push(acc); });
+  const ny = niceMax(Math.max(slow * 1.5, ...pts.map(p => p.v)));
+  const Y = v => padT + ph - v / ny.max * ph;
+  const svg = svgEl('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': `Velocità del modello, ${n} cicli misurati`}, host);
+  for (let v = 0; v <= ny.max + 1e-9; v += ny.step) {
+    const y = Math.round(Y(v)) + .5;
+    svgEl('line', {x1: padL, x2: W - padR, y1: y, y2: y, class: v === 0 ? 'base' : 'gl'}, svg);
+    const tx = svgEl('text', {x: padL - 8, y: Y(v) + 3.5, 'text-anchor': 'end', class: 'tick'}, svg); tx.textContent = fmtN(v);
+  }
+  // sessions: a dashed separator in each gap; labels at the start of a day, or the time of a same-day restart
+  let lastR = -1e9;
+  const label = (x, txt) => {
+    const w = txt.length * 6.4, right = W - padR;
+    let anchor = 'start', l = x;
+    if (x + w > right) { anchor = 'end'; l = right - w; x = right; }
+    if (l < lastR + 12) return;
+    const tx = svgEl('text', {x, y: H - 8, 'text-anchor': anchor, class: 'tick'}, svg); tx.textContent = txt; lastR = l + w;
+  };
+  pts.forEach((q, i) => {
+    const newDay = i === 0 || new Date(q.t * 1000).toDateString() !== new Date(pts[i - 1].t * 1000).toDateString();
+    if (brk[i]) {
+      const sx = Math.round(xs[i] - GAP / 2) + .5;
+      svgEl('line', {x1: sx, x2: sx, y1: padT, y2: padT + ph, class: 'sep'}, svg);
+    }
+    if (i === 0 || brk[i] || newDay) label(xs[i], newDay ? `${DAYS[new Date(q.t * 1000).getDay()]} ${new Date(q.t * 1000).getDate()}` : hhmm(q.t));
+  });
+  // threshold (status: critical)
+  const ySlow = Math.round(Y(slow)) + .5;
+  svgEl('line', {x1: padL, x2: W - padR, y1: ySlow, y2: ySlow, class: 'thr'}, svg);
+  const st = svgEl('text', {x: W - padR, y: ySlow - 6, 'text-anchor': 'end', class: 'tick thr-l'}, svg); st.textContent = `soglia ${fmtN(slow)} tok/s`;
+  // line + soft area, one path per session
+  const blue = css('--c-blue');
+  let d = '', area = '', seg = [];
+  const flush = () => {
+    if (seg.length > 1) {
+      const p = seg.map((i, j) => (j ? 'L' : 'M') + xs[i].toFixed(1) + ' ' + Y(pts[i].v).toFixed(1)).join(' ');
+      d += p + ' '; area += `${p} L${xs[seg[seg.length - 1]].toFixed(1)} ${Y(0)} L${xs[seg[0]].toFixed(1)} ${Y(0)} Z `;
+    } else if (seg.length === 1) {
+      area += ''; d += `M${(xs[seg[0]] - 1.5).toFixed(1)} ${Y(pts[seg[0]].v).toFixed(1)} h3 `;
+    }
+    seg = [];
+  };
+  pts.forEach((q, i) => { if (brk[i]) flush(); seg.push(i); });
+  flush();
+  svgEl('path', {d: area, fill: blue, opacity: .1}, svg);
+  svgEl('path', {d, fill: 'none', stroke: blue, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, svg);
+  const surf = css('--surface');
+  for (let i = 0; i < n; i++) if (pts[i].v < slow) svgEl('circle', {cx: xs[i], cy: Y(pts[i].v), r: 4, fill: css('--c-bad'), stroke: surf, 'stroke-width': 2}, svg);
+  // the latest value, labelled once
+  const li = n - 1, lv = pts[li].v, lc = lv < slow ? css('--c-bad') : blue;
+  svgEl('circle', {cx: xs[li], cy: Y(lv), r: 4, fill: lc, stroke: surf, 'stroke-width': 2}, svg);
+  const lt = svgEl('text', {x: xs[li] - 8, y: Y(lv) - 9, 'text-anchor': 'end', class: 'val-l'}, svg); lt.textContent = fmt1(lv);
+  // crosshair
+  const cross = svgEl('line', {y1: padT, y2: padT + ph, stroke: css('--axis'), 'stroke-width': 1, opacity: 0}, svg);
+  const dot = svgEl('circle', {r: 4.5, fill: blue, stroke: surf, 'stroke-width': 2, opacity: 0}, svg);
+  const layer = svgEl('rect', {x: padL - 6, y: padT, width: pw + 12, height: ph, class: 'hit', tabindex: 0, 'aria-label': 'Velocità per ciclo: usa le frecce per scorrere'}, svg);
+  let cur = n - 1;
+  const showAt = (i, e) => {
+    cur = i; const q = pts[i], bad = q.v < slow;
+    cross.setAttribute('x1', xs[i]); cross.setAttribute('x2', xs[i]); cross.setAttribute('opacity', 1);
+    dot.setAttribute('cx', xs[i]); dot.setAttribute('cy', Y(q.v)); dot.setAttribute('opacity', 1);
+    dot.setAttribute('fill', bad ? css('--c-bad') : blue);
+    const k = KINDS.find(kk => kk.k === kind(q.o)), b = svg.getBoundingClientRect();
+    showTip(e || {clientX: b.left + xs[i] * b.width / W, clientY: b.top + Y(q.v) * b.height / H},
+      dt(q.t), [{c: bad ? 'var(--c-bad)' : 'var(--c-blue)', v: fmt1(q.v), l: 'token/s'}],
+      `Ciclo ${i + 1} di ${n}: ${k.short.toLowerCase()}${bad ? ' · sotto soglia' : ''}`);
+  };
+  layer.addEventListener('pointermove', e => {
+    const b = svg.getBoundingClientRect(), x = (e.clientX - b.left) * W / b.width;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] < x) lo = m; else hi = m; }
+    showAt(Math.abs(xs[lo] - x) <= Math.abs(xs[hi] - x) ? lo : hi, e);
+  });
+  const off = () => { cross.setAttribute('opacity', 0); dot.setAttribute('opacity', 0); hideTip(); };
+  layer.addEventListener('pointerleave', off); layer.addEventListener('blur', off);
+  layer.addEventListener('focus', () => showAt(cur));
+  layer.addEventListener('keydown', e => {
+    const k = {ArrowLeft: -1, ArrowRight: 1, PageDown: -10, PageUp: 10}[e.key];
+    if (k) { e.preventDefault(); showAt(Math.max(0, Math.min(n - 1, cur + k))); }
+    if (e.key === 'Home') { e.preventDefault(); showAt(0); }
+    if (e.key === 'End') { e.preventDefault(); showAt(n - 1); }
+  });
+}
+
+/* ============================================================ submissions */
+const SUB_STATUS = {
+  'approved': {l: 'Approvata', c: '--c-done', ic: 'check'},
+  'awaiting review': {l: 'In revisione', c: '--c-blue', ic: 'hourglass'},
+  'active': {l: 'In corso', c: '--c-blue', ic: 'play'},
+  'returned': {l: 'Restituita', c: '--c-empty', ic: 'ret'},
+  'screened out': {l: 'Esclusa', c: '--c-empty', ic: 'filter'},
+  'timed out': {l: 'Scaduta', c: '--c-fail', ic: 'clock'},
+  'rejected': {l: 'Rifiutata', c: '--c-bad', ic: 'x'},
+};
+function filteredSubs(a, b) {
+  const list = (D.submissions || []).filter(s => s.ts && s.ts >= a && s.ts < b);
+  let earned = 0, pending = 0, cur = '£';
+  for (const s of list) {
+    const st = (s.status || '').toLowerCase();
+    if (st === 'approved') earned += s.reward || 0;
+    if (st === 'awaiting review') pending += s.reward || 0;
+    cur = s.currency || cur;
+  }
+  return {list, earned, pending, cur, count: list.length, has: list.length > 0};
+}
+function renderSubs(a, b) {
+  const host = $('subs'), f = filteredSubs(a, b);
+  if (!(D.submissions || []).length) {
+    emptyChart(host, D.submissions_ts ? 'Nessuna submission trovata sulla pagina di Prolific' : 'Le submission vengono lette dalla pagina di Prolific nella pausa tra due cicli: compariranno qui dopo la prima lettura.', 'coin');
+    return;
+  }
+  if (!f.has) { emptyChart(host, 'Nessuna submission in questo periodo', 'coin'); return; }
+  const counts = {};
+  for (const s of f.list) { const k = (s.status || '').toLowerCase(); counts[k] = (counts[k] || 0) + 1; }
+  const max = Math.max(...Object.values(counts));
+  const order = ['approved', 'awaiting review', 'active', 'returned', 'screened out', 'timed out', 'rejected'];
+  const keys = [...order.filter(k => counts[k]), ...Object.keys(counts).filter(k => !order.includes(k))];
+  host.innerHTML = `<div class="money"><span class="big">${moneyFmt(f.earned, f.cur)}</span><span class="pending">approvati${f.pending ? ` · <b>${moneyFmt(f.pending, f.cur)}</b> in revisione` : ''}</span></div>` +
+    `<div class="blist">` + keys.map(k => {
+      const m = SUB_STATUS[k] || {l: k, c: '--c-empty', ic: 'filter'};
+      return `<div class="bl"><span class="lab">${icon(m.ic, 14)}${esc(m.l)}</span><span class="val"><b>${fmtN(counts[k])}</b></span>` +
+        `<span class="track"><i style="--c:var(${m.c});width:${counts[k] / max * 100}%"></i></span></div>`;
+    }).join('') + `</div>` +
+    `<div class="sublist">` + f.list.slice(0, 6).map(s => {
+      const m = SUB_STATUS[(s.status || '').toLowerCase()] || {l: s.status, c: '--c-empty', ic: 'filter'};
+      return `<div class="si"><span class="st" title="${esc(s.title)}">${esc(s.title)}</span><span class="sr2">${s.reward ? moneyFmt(s.reward, s.currency) : ''}</span>` +
+        `<span class="sd">${s.ts ? dt(s.ts) : ''}</span><span class="chip" style="--c:var(${m.c})">${icon(m.ic, 12)}${esc(m.l)}</span></div>`;
+    }).join('') + `</div>`;
+}
+
+/* ============================================================ tables */
+let tblTab = 'done', tblAll = false;
+function renderTables(runs) {
+  const done = runs.filter(r => kind(r[OUT]) === 'done').reverse();
+  const fail = runs.filter(r => kind(r[OUT]) === 'fail').reverse();
+  const skipped = (D.skipped || []).slice().sort((x, y) => (y.ts || 0) - (x.ts || 0));
+  const tabs = [['done', 'Studi completati', done.length], ['fail', 'Cicli interrotti', fail.length], ['skipped', 'Studi scartati', skipped.length]];
+  $('tblTabs').innerHTML = tabs.map(([k, l, n]) => `<button role="tab" data-tab="${k}" class="${k === tblTab ? 'on' : ''}" aria-selected="${k === tblTab}">${l}<span class="n">${n}</span></button>`).join('');
+  const LIMIT = 25, host = $('tbl');
+  const cut = arr => tblAll ? arr : arr.slice(0, LIMIT);
+  const more = arr => arr.length > LIMIT ? `<div class="more"><button class="btn btn-ghost" id="moreBtn">${tblAll ? 'Mostra meno' : 'Mostra tutti (' + arr.length + ')'}</button></div>` : '';
+  let html = '';
+  if (tblTab === 'done') {
+    html = done.length ? `<table><thead><tr><th>Inizio</th><th class="num">Durata</th><th class="num">Passi</th><th>Codice</th><th>Letto da</th></tr></thead><tbody>` +
+      cut(done).map(r => {
+        const code = String(r[ANS] || '').replace(/^CODE:\s*/, '');
+        return `<tr><td>${esc(dt(r[S]))}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
+          `<td>${r[OUT] === 'CODE' ? `<span class="code">${esc(code)}<button class="copy" data-copy="${esc(code)}" title="Copia">${icon('copy', 13)}</button></span>` : '<span class="dim">senza codice</span>'}</td>` +
+          `<td class="dim">${r[SRC] === 'url' ? 'URL di Prolific' : r[SRC] === 'model' ? 'schermo' : '—'}</td></tr>`;
+      }).join('') + `</tbody></table>` + more(done) : '';
+    if (!done.length) html = `<div class="empty-chart">${icon('check', 22)}<div>Nessuno studio completato in questo periodo</div></div>`;
+  } else if (tblTab === 'fail') {
+    html = fail.length ? `<table><thead><tr><th>Inizio</th><th class="num">Durata</th><th class="num">Passi</th><th class="num">Nello studio</th><th>Finito con</th></tr></thead><tbody>` +
+      cut(fail).map(r => `<tr><td>${esc(dt(r[S]))}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
+        `<td class="num">${fmtN(r[WS])}</td><td class="dim mono">${esc(r[ANS] || (r[OUT] === 'INCOMPLETE' ? 'interrotto' : r[OUT]))}</td></tr>`).join('') + `</tbody></table>` + more(fail) : '';
+    if (!fail.length) html = `<div class="empty-chart">${icon('check', 22)}<div>Nessun ciclo interrotto in questo periodo</div></div>`;
+  } else {
+    html = skipped.length ? `<table><thead><tr><th>Studio</th><th>Motivo</th><th>Ultima volta</th><th class="num">Visto</th></tr></thead><tbody>` +
+      cut(skipped).map(s => `<tr><td>${esc(s.title || 'senza titolo')}</td><td class="dim">${esc(s.reason || '')}</td><td class="dim">${s.ts ? esc(dt(s.ts)) : ''}</td><td class="num">${fmtN(s.hits || 1)}×</td></tr>`).join('') +
+      `</tbody></table>` + more(skipped) : `<div class="empty-chart">${icon('skip', 22)}<div>Nessuno studio scartato in memoria</div></div>`;
+  }
+  host.innerHTML = html;
+}
+$('tblTabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (!b) return; tblTab = b.dataset.tab; tblAll = false; renderAll(); });
+$('tbl').addEventListener('click', e => {
+  const c = e.target.closest('.copy');
+  if (c) { navigator.clipboard?.writeText(c.dataset.copy).then(() => notify('Copiato: ' + c.dataset.copy)); return; }
+  if (e.target.closest('#moreBtn')) { tblAll = !tblAll; renderAll(); }
+});
+function notify(text) {
+  const el = document.createElement('div'); el.className = 'ntf'; el.innerHTML = icon('check', 16) + `<span>${esc(text)}</span>`;
+  $('ntfs').appendChild(el); setTimeout(() => el.remove(), 2200);
+}
+
+/* ============================================================ render all */
+function renderAll() {
+  if (!D) return;
+  const now = Date.now() / 1000;
+  const [a, b] = windowFor(period, now);
+  const runs = D.runs.filter(r => r[S] >= a && r[S] < b);
+  const A = aggregate(runs);
+  let P = null;
+  if (period !== 'all') { const pr = D.runs.filter(r => r[S] >= a - (b - a) && r[S] < a); P = aggregate(pr); }
+  document.querySelectorAll('#periodSeg button').forEach(x => { const on = x.dataset.p === period; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); });
+  $('rangeTxt').innerHTML = `<b>${esc(PERIOD_LABEL[period])}</b> · ${esc(dateShort(a))} → ${esc(dateShort(b))}` + (period !== 'all' ? ' · confronto col periodo precedente' : '');
+  renderKPIs(runs, P ? D.runs.filter(r => r[S] >= a - (b - a) && r[S] < a) : null, A, P, a, b);
+  renderActivity(runs, a, b);
+  renderSplit(A);
+  renderHeat(runs);
+  renderModel(runs);
+  renderSubs(a, b);
+  renderTables(runs);
+  document.querySelectorAll('.tbtn[data-view]').forEach(x => {
+    const tbl = views[x.dataset.view] === 'table';
+    x.classList.toggle('on', tbl);
+    x.innerHTML = icon(tbl ? 'chart' : 'table', 14) + (tbl ? 'Grafico' : 'Tabella');
+    x.title = tbl ? 'Torna al grafico' : 'Vedi i dati come tabella';
+  });
+  const first = D.runs.length ? D.runs[0][S] : null;
+  $('footTxt').textContent = D.runs.length ? `${fmtN(D.runs.length)} cicli registrati dal ${dt(first)}` : 'Nessun ciclo registrato';
+  $('updatedTxt').textContent = 'Aggiornato alle ' + new Date(D.generated * 1000).toLocaleTimeString('it-IT');
+  renderAgent(D.agent);
+}
+document.querySelectorAll('#periodSeg button').forEach(x => x.onclick = () => {
+  period = x.dataset.p; try { localStorage.setItem('fara_dash_period', period); } catch (e) {}
+  renderAll();
+});
+document.querySelectorAll('#actMode button').forEach(x => x.onclick = () => {
+  actMode = x.dataset.m; try { localStorage.setItem('fara_dash_act', actMode); } catch (e) {}
+  renderAll();
+});
+document.querySelectorAll('.tbtn[data-view]').forEach(x => x.onclick = () => {
+  views[x.dataset.view] = views[x.dataset.view] === 'table' ? 'chart' : 'table'; renderAll();
+});
+
+/* ============================================================ live agent state */
+let agent = null;
+function renderAgent(s) {
+  if (!s) return;
+  agent = s;
+  const pill = $('pill'), waiting = s.running && s.pending_question;
+  pill.className = 'pill ' + (s.stopping ? 'waiting' : waiting ? 'waiting' : s.running ? 'running' : '');
+  $('pillText').textContent = s.stopping ? 'sto fermando…' : waiting ? 'in attesa di te' : s.running ? 'in esecuzione' : 'fermo';
+  const st = s.stats || {};
+  $('pillMeta').textContent = s.running ? `· ciclo ${st.cycle || 1} · passo ${st.steps || 0}` : '';
+  const sb = $('stopBtn');
+  sb.hidden = !s.running;
+  if (!sb.classList.contains('armed')) sb.innerHTML = icon('stop', 13) + '<span>Ferma</span>';
+}
+let stopArm = null;
+$('stopBtn').onclick = async () => {
+  const b = $('stopBtn');
+  if (!stopArm) { b.classList.add('armed'); b.innerHTML = icon('stop', 13) + '<span>Conferma</span>'; stopArm = setTimeout(() => { stopArm = null; b.classList.remove('armed'); renderAgent(agent); }, 3500); return; }
+  clearTimeout(stopArm); stopArm = null; b.classList.remove('armed');
+  b.innerHTML = '<span>Fermando…</span>';
+  try { await fetch('/agent/stop', {method: 'POST'}); } catch (e) {}
+};
+let es = null;
+function connect() {
+  if (es) es.close();
+  const a = D && D.agent || {};
+  es = new EventSource(`/agent/events?since=${a.last_seq || 0}&run=${a.run_id ?? -1}`);
+  es.addEventListener('state', e => { const s = JSON.parse(e.data); if (agent && s.run_id !== agent.run_id) refreshSoon(800); renderAgent(Object.assign({}, agent, s)); });
+  es.addEventListener('ev', e => { const ev = JSON.parse(e.data); if (ev.type === 'done' || ev.type === 'cycle') refreshSoon(1500); });
+  es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+}
+
+/* ============================================================ refresh */
+let refreshTimer = null, busy = false;
+function refreshSoon(ms) { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, ms); }
+async function refresh() {
+  if (busy) return; busy = true;
+  $('page').classList.add('refreshing');
+  try { const r = await fetch('/dashboard.json', {cache: 'no-store'}); if (r.ok) { D = await r.json(); renderAll(); if (D.agent) renderAgent(Object.assign({}, agent, D.agent)); } }
+  catch (e) { /* keep the previous render */ }
+  finally { $('page').classList.remove('refreshing'); busy = false; }
+}
+$('refreshBtn').innerHTML = icon('refresh', 16);
+$('refreshBtn').onclick = refresh;
+setInterval(() => { if (!document.hidden) refresh(); }, 60000);
+
+/* ============================================================ theme, resize, boot */
+function setTheme(t, save) {
+  document.documentElement.dataset.theme = t;
+  if (save) { try { localStorage.setItem('fara_theme', t); } catch (e) {} }
+  $('themeBtn').innerHTML = icon(t === 'dark' ? 'sun' : 'moon', 17);
+  $('themeBtn').title = t === 'dark' ? 'Tema chiaro' : 'Tema scuro';
+  if (D) renderAll();       // chart colours are read from the theme
+}
+$('themeBtn').onclick = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+$('backBtn').innerHTML = icon('back', 15) + '<span>Pannello</span>';
+let rsz = null;
+new ResizeObserver(() => { clearTimeout(rsz); rsz = setTimeout(() => D && renderAll(), 120); }).observe($('page'));
+window.addEventListener('scroll', hideTip, {passive: true});
+setTheme(document.documentElement.dataset.theme || 'dark', false);
+if (D) { renderAll(); connect(); } else refresh().then(connect);
+</script>
+</body>
+</html>

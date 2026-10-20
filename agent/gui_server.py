@@ -36,6 +36,7 @@ import pw_bridge
 import agent_core
 import study_cache
 import pusher_listener
+import local_agent
 from agent_core import run_agent, docker_exec, get_current_url, KEY_MAP, DATA_DIR, CONTAINER
 
 HERE = Path(__file__).parent
@@ -47,7 +48,93 @@ MAX_EVENTS = 500
 # messages, and the browser, where the submissions updater opens a tab.
 TEST_INSTANCE = os.environ.get("FARA_TEST_INSTANCE", "") not in ("", "0")
 PRESETS_FILE = Path(os.environ.get("FARA_PRESETS", HERE / "presets.json"))
+
+# ── Model registry (swap-on-demand) ──────────────────────────────
+MODELS = {
+    "fara": {
+        "container": "fara-test",
+        "label": "Web Agent",
+        "multimodal": True,
+    },
+    "qwen": {
+        "container": "qwen-model",
+        "label": "Local Agent",
+        "multimodal": False,
+    },
+}
+_active_model: str = ""
+_model_lock = threading.Lock()
+
+
+def _detect_active_model() -> str:
+    """Check which model container is running right now."""
+    for key, cfg in MODELS.items():
+        try:
+            out = subprocess.check_output(
+                ["docker", "inspect", "-f", "{{.State.Running}}", cfg["container"]],
+                stderr=subprocess.DEVNULL, text=True).strip()
+            if out == "true":
+                return key
+        except Exception:
+            continue
+    return ""
+
+
+def _model_healthy(key: str) -> bool:
+    """Check if the model's llama-server /health endpoint responds OK."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8090/health", timeout=3) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def switch_model(target: str) -> dict:
+    """Stop the current model container and start the target one."""
+    global _active_model
+    if target not in MODELS:
+        return {"error": f"unknown model: {target}", "available": list(MODELS.keys())}
+
+    with _model_lock:
+        current = _active_model or _detect_active_model()
+        if current == target:
+            healthy = _model_healthy(target)
+            return {"ok": True, "model": target, "already": True, "healthy": healthy}
+
+        # Stop current
+        if current and current in MODELS:
+            subprocess.run(["docker", "stop", MODELS[current]["container"]],
+                           capture_output=True, timeout=30)
+
+        # Start target
+        try:
+            subprocess.run(["docker", "start", MODELS[target]["container"]],
+                           capture_output=True, timeout=30, check=True)
+        except subprocess.CalledProcessError as e:
+            return {"error": f"failed to start {target}: {e.stderr or str(e)}"}
+
+        _active_model = target
+
+        # Wait for health (model loading takes time)
+        import urllib.request
+        for i in range(120):
+            time.sleep(1)
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8090/health", timeout=2) as r:
+                    if r.status == 200:
+                        return {"ok": True, "model": target, "healthy": True,
+                                "load_time_s": i + 1}
+            except Exception:
+                pass
+        return {"ok": True, "model": target, "healthy": False,
+                "warning": "model started but not healthy after 120s"}
 presets_lock = threading.Lock()
+
+# ── Local Agent state ────────────────────────────────────────────────
+_local_history: list = []
+_local_busy = False
+_local_lock = threading.Lock()
 
 _submissions_cache: dict = {"data": [], "ts": 0.0}
 _submissions_lock = threading.Lock()
@@ -905,509 +992,86 @@ def _run_record(tf) -> dict | None:
             "gen_tps": s.get("gen_tps_median")}
 
 
+_record_cache: dict = {}
+
+
+def _run_record_cached(tf) -> dict | None:
+    """_run_record, remembered per run until its files change.
+
+    A finished run never changes, so the statistics page reads each
+    summary.json once per server life instead of on every refresh -- with
+    a few hundred runs a week that is the difference between a constant
+    and a growing cost per request.
+    """
+    run_dir = tf.parent
+    try:
+        summ = run_dir / "summary.json"
+        key = (summ.stat().st_mtime if summ.exists() else None, tf.stat().st_mtime)
+    except OSError:
+        key = None
+    hit = _record_cache.get(run_dir.name)
+    if key is not None and hit and hit[0] == key:
+        return hit[1]
+    rec = _run_record(tf)
+    _record_cache[run_dir.name] = (key, rec)
+    return rec
+
+
+def _dashboard_data() -> dict:
+    """Everything the statistics page shows, as plain JSON.
+
+    The page does the aggregation itself, so switching period is instant and
+    the server only has to list runs. One row per run:
+    [start, end, seconds, steps, outcome, answer, code_source,
+     steps_on_list, steps_in_study, steps_elsewhere, model_tokens_per_s]
+    """
+    from datetime import datetime as _dt
+    runs = []
+    for tf in _transcript_files():
+        r = _run_record_cached(tf)
+        if not r:
+            continue
+        w = r.get("where") or {}
+        runs.append([int(r["started"].timestamp()), int(r["ended"].timestamp()),
+                     int(r.get("duration_s") or 0), int(r.get("steps") or 0), r.get("outcome"),
+                     (r.get("answer") or "")[:80], r.get("code_source"),
+                     int(w.get("list", 0)), int(w.get("study", 0)), int(w.get("elsewhere", 0)),
+                     r.get("gen_tps")])
+    subs = []
+    for s in list(_submissions_cache.get("data") or []):
+        ts = None
+        for fmt in ("%d %b %Y, %H:%M", "%d %b %Y"):
+            try:
+                ts = int(_dt.strptime(s.get("date_full", ""), fmt).timestamp())
+                break
+            except ValueError:
+                pass
+        try:
+            reward = float(s.get("reward") or 0)
+        except ValueError:
+            reward = 0.0
+        subs.append({"title": s.get("title", ""), "status": s.get("status", ""), "ts": ts,
+                     "reward": reward, "currency": s.get("currency", "£")})
+    try:
+        skipped = [{"title": v.get("title", ""), "reason": v.get("reason", ""),
+                    "ts": v.get("ts"), "hits": v.get("hits", 1)}
+                   for v in study_cache.entries().values()]
+    except Exception:
+        skipped = []
+    return {"generated": time.time(), "runs": runs, "submissions": subs,
+            "submissions_ts": _submissions_cache.get("ts") or None, "skipped": skipped,
+            "agent": _status_payload(with_events=False, fresh_url=False),
+            "slow_tps": agent_core.SLOW_TPS}
+
+
 def _build_dashboard() -> str:
-    """Read all run transcripts and return a self-contained HTML dashboard."""
-    from collections import defaultdict
-    from datetime import datetime
-
-    records = [r for r in (_run_record(tf) for tf in _transcript_files()) if r]
-
-    total = len(records)
-    completed = [r for r in records if r["outcome"] in ("CODE", "NOCODE")]
-    none_runs = sum(1 for r in records if r["outcome"] == "NONE")
-    incomplete_runs = sum(1 for r in records if r["outcome"] not in ("CODE", "NOCODE", "NONE"))
-    avg_dur = round(sum(r["duration_s"] for r in completed) / max(1, len(completed)))
-
-    # CPH: use actual elapsed time from first run start to last run end
-    first_dt = records[0]["started"] if records else None
-    last_dt  = records[-1]["ended"]  if records else None
-    if first_dt and last_dt:
-        elapsed_h = max(0.01, (last_dt - first_dt).total_seconds() / 3600)
-        cph = f"{total / elapsed_h:.1f}"
-        session_str = first_dt.strftime("%-d %b %H:%M") + " → " + last_dt.strftime("%H:%M")
-    else:
-        cph = "—"
-        session_str = "—"
-
-    # Hourly buckets keyed by "YYYY-MM-DDTHH"
-    hourly: dict = defaultdict(lambda: {"runs": 0, "none": 0, "completed": 0, "incomplete": 0,
-                                         "first_start": None})
-    for r in records:
-        h = r["started"].strftime("%Y-%m-%dT%H")
-        hourly[h]["runs"] += 1
-        if hourly[h]["first_start"] is None:
-            hourly[h]["first_start"] = r["started"]
-        if r["outcome"] == "NONE":
-            hourly[h]["none"] += 1
-        elif r["outcome"] in ("CODE", "NOCODE"):
-            hourly[h]["completed"] += 1
-        else:
-            hourly[h]["incomplete"] += 1
-
-    hours_sorted = sorted(hourly.keys())
-    max_runs = max((hourly[h]["runs"] for h in hours_sorted), default=1)
-    CHART_H = 160  # px for tallest bar
-
-    def fmt_time(dt):
-        return dt.strftime("%H:%M") if dt else "—"
-
-    def fmt_dt(dt):
-        return dt.strftime("%-d %b %H:%M") if dt else "—"
-
-    def fmt_dur(s):
-        if s < 60: return f"{s}s"
-        return f"{s // 60}m {s % 60:02d}s"
-
-    def pct(n, d):
-        return f"{n/max(1,d)*100:.1f}%"
-
-    rate = pct(len(completed), total)
-    none_pct = pct(none_runs, total)
-    now_str = datetime.now().strftime("%H:%M:%S")
-    with state_lock:
-        agent_running = state["running"]
-    agent_badge = '<span class="badge live">● in esecuzione</span>' if agent_running \
-                  else '<span class="badge idle">○ fermo</span>'
-    stop_btn_html = '<button class="stop-btn" onclick="stopAgent()">⏹ Ferma</button>' \
-                    if agent_running else ""
-
-    # --- bar chart HTML (flex column, bottom-aligned, with count labels) ---
-    bar_html = ""
-    for h in hours_sorted:
-        d = hourly[h]
-        bar_h = max(4, round((d["runs"] / max_runs) * CHART_H))
-        # within bar: NONE bottom, completed middle, incomplete top
-        # use flex proportions for the fill
-        n_none = d["none"] or 0
-        n_comp = d["completed"] or 0
-        n_inc  = d["incomplete"] or 0
-        # label: show actual first run time for clarity
-        first_start = d["first_start"]
-        if first_start:
-            label = first_start.strftime("%H:%M")
-        else:
-            label = h[11:13] + ":00"
-        segs = ""
-        if n_inc:
-            segs += f'<div style="flex:{n_inc};background:#f5a623;min-height:3px"></div>'
-        if n_comp:
-            segs += f'<div style="flex:{n_comp};background:#34c77b;min-height:4px"></div>'
-        if n_none:
-            segs += f'<div style="flex:{n_none};background:#252a38"></div>'
-        bar_html += f"""<div class="bw">
-  <div class="bcount">{d['runs']}</div>
-  <div class="bstack" style="height:{bar_h}px">{segs}</div>
-  <div class="blabel">{label}</div>
-</div>"""
-
-    # --- completed studies table ---
-    rows_html = ""
-    for r in reversed(completed):
-        chip_cls = "chip-CODE" if r["outcome"] == "CODE" else "chip-NOCODE"
-        src = {"url": "URL", "model": "schermo"}.get(r.get("code_source") or "", "—")
-        rows_html += f"""<tr>
-  <td class="mono">{fmt_dt(r['started'])}</td>
-  <td><span class="chip {chip_cls}">{r['outcome']}</span></td>
-  <td>{fmt_dur(r['duration_s'])}</td>
-  <td class="mono muted">{r['steps']} step</td>
-  <td class="mono muted">{src}</td>
-  <td class="mono ans">{r['answer']}</td></tr>"""
-    if not rows_html:
-        rows_html = '<tr><td colspan="6" class="muted center pad20">Nessuno studio completato ancora</td></tr>'
-
-    # --- where the time goes ---
-    def _bucket(r):
-        if r["outcome"] in ("CODE", "NOCODE"):
-            return "done"
-        if r["outcome"] == "NONE":
-            return "empty"
-        return "failed"
-    tsum = {"done": 0, "empty": 0, "failed": 0}
-    for r in records:
-        tsum[_bucket(r)] += r["duration_s"]
-    t_all = max(1, sum(tsum.values()))
-    where = {"list": 0, "study": 0, "elsewhere": 0}
-    for r in records:
-        for k in where:
-            where[k] += (r.get("where") or {}).get(k, 0)
-    s_all = max(1, sum(where.values()))
-    speeds = [r["gen_tps"] for r in records[-50:] if r.get("gen_tps")]
-    speed_html = (f'{sorted(speeds)[len(speeds)//2]:.1f} token/s' if speeds
-                  else 'non ancora misurata')
-    time_rows = "".join(
-        f'<tr><td>{label}</td><td class="mono">{fmt_dur(tsum[k])}</td>'
-        f'<td class="mono muted">{tsum[k]/t_all*100:.0f}%</td></tr>'
-        for k, label in (("empty", "Elenco vuoto (cicli NONE)"),
-                         ("done", "Studi completati"),
-                         ("failed", "Cicli interrotti o falliti")))
-    step_rows = "".join(
-        f'<tr><td>{label}</td><td class="mono">{where[k]}</td>'
-        f'<td class="mono muted">{where[k]/s_all*100:.0f}%</td></tr>'
-        for k, label in (("list", "Sull'elenco studi"), ("study", "Dentro uno studio"),
-                         ("elsewhere", "Altrove su Prolific")))
-    time_html = f"""<div class="section">
-  <div class="section-title">Dove va il tempo</div>
-  <table><thead><tr><th>Cicli</th><th>Tempo</th><th>Quota</th></tr></thead>
-  <tbody>{time_rows}</tbody></table>
-  <table style="margin-top:14px"><thead><tr><th>Passi</th><th>Numero</th><th>Quota</th></tr></thead>
-  <tbody>{step_rows}</tbody></table>
-  <div class="muted" style="margin-top:10px">Velocità del modello (ultime run): {speed_html}</div>
-</div>"""
-
-    # --- outcome bar: split into meaningful segments ---
-    # use sqrt scale to prevent NONE from eating 99% of the bar
-    import math
-    def sqrt_flex(n):
-        return round(math.sqrt(max(0, n)) * 10)
-
-    sf_none = sqrt_flex(none_runs)
-    sf_comp = sqrt_flex(len(completed))
-    sf_inc  = sqrt_flex(incomplete_runs)
-
-    avg_dur_completed = fmt_dur(avg_dur) if completed else "—"
-
-    return f"""<!doctype html><html lang="it"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="60">
-<title>Fara Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap">
-<style>
-:root {{
-  --bg: #0d0f16;
-  --surface: #13161f;
-  --surface2: #1a1e2b;
-  --border: #222636;
-  --border2: #2d3248;
-  --fg: #dde3f4;
-  --muted: #6b7491;
-  --accent: #5b8df8;
-  --green: #2ecc71;
-  --green-dim: #1a3d2b;
-  --yellow: #f0a500;
-  --yellow-dim: #2e2310;
-  --red: #e05454;
-  --mono: "IBM Plex Mono", monospace;
-  --sans: "Inter", system-ui, sans-serif;
-  color-scheme: dark;
-}}
-*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.55;
-  padding: 24px 28px;
-  max-width: 1200px;
-  margin: 0 auto;
-}}
-
-/* ── header ── */
-.hdr {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 28px;
-  gap: 12px;
-  flex-wrap: wrap;
-}}
-.hdr-left {{ display: flex; flex-direction: column; gap: 2px; }}
-.hdr h1 {{
-  font-size: 20px; font-weight: 700; letter-spacing: -.03em;
-  color: var(--fg);
-}}
-.hdr h1 em {{ color: var(--accent); font-style: normal; }}
-.session-str {{ font-family: var(--mono); font-size: 11px; color: var(--muted); }}
-.hdr-right {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-.badge {{
-  font-family: var(--mono); font-size: 11px;
-  background: var(--surface2); border: 1px solid var(--border2);
-  border-radius: 6px; padding: 4px 10px; color: var(--muted);
-}}
-.badge.live {{ border-color: var(--green); color: var(--green); }}
-.badge.idle {{ border-color: var(--border2); color: var(--muted); }}
-.refresh-btn {{
-  font-family: var(--mono); font-size: 11px; padding: 4px 10px;
-  background: var(--surface2); border: 1px solid var(--border2);
-  border-radius: 6px; color: var(--muted); cursor: pointer;
-  text-decoration: none;
-}}
-.refresh-btn:hover {{ border-color: var(--accent); color: var(--accent); }}
-.stop-btn {{
-  font-family: var(--mono); font-size: 11px; padding: 4px 12px;
-  background: #2a1515; border: 1px solid #6b2020;
-  border-radius: 6px; color: #e05454; cursor: pointer;
-  transition: background .15s, border-color .15s;
-}}
-.stop-btn:hover {{ background: #3d1a1a; border-color: var(--red); }}
-
-/* ── tiles ── */
-.tiles {{
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 20px;
-}}
-.tile {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}}
-.tile-label {{
-  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
-  color: var(--muted); font-weight: 600;
-}}
-.tile-value {{
-  font-family: var(--mono); font-size: 30px; font-weight: 600;
-  line-height: 1; font-variant-numeric: tabular-nums;
-}}
-.tile-sub {{ font-size: 11px; color: var(--muted); margin-top: 2px; }}
-.tile.accent .tile-value {{ color: var(--accent); }}
-.tile.green  .tile-value {{ color: var(--green); }}
-.tile.yellow .tile-value {{ color: var(--yellow); }}
-.tile.green  {{ border-color: var(--green-dim); }}
-.tile.yellow {{ border-color: var(--yellow-dim); }}
-
-/* ── section ── */
-.section {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 20px 22px;
-  margin-bottom: 16px;
-}}
-.section-title {{
-  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
-  color: var(--muted); font-weight: 600; margin-bottom: 18px;
-  display: flex; align-items: center; gap: 8px;
-}}
-
-/* ── outcome split bar ── */
-.outcome-wrap {{ display: flex; flex-direction: column; gap: 12px; }}
-.outcome-bar {{
-  display: flex; height: 10px; border-radius: 5px; overflow: hidden;
-  background: var(--border); gap: 2px;
-}}
-.ob-seg {{ border-radius: 3px; transition: flex .3s; }}
-.ob-none     {{ background: #2d3248; }}
-.ob-done     {{ background: var(--green); }}
-.ob-inc      {{ background: var(--yellow); }}
-.outcome-legend {{
-  display: flex; gap: 20px; flex-wrap: wrap;
-}}
-.ol-item {{
-  display: flex; align-items: center; gap: 6px;
-  font-size: 12px; color: var(--muted);
-}}
-.ol-dot {{
-  width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0;
-}}
-.ol-item strong {{ color: var(--fg); font-weight: 600; }}
-
-/* ── bar chart ── */
-.chart-wrap {{
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  height: {CHART_H + 48}px;
-  padding-bottom: 30px;
-  position: relative;
-}}
-.bw {{
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  height: 100%;
-  gap: 0;
-  position: relative;
-}}
-.bcount {{
-  font-family: var(--mono); font-size: 9px; color: var(--muted);
-  margin-bottom: 3px; text-align: center;
-  white-space: nowrap;
-}}
-.bstack {{
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  border-radius: 4px 4px 0 0;
-  overflow: hidden;
-  min-height: 4px;
-}}
-.blabel {{
-  position: absolute; bottom: -22px;
-  font-family: var(--mono); font-size: 9px; color: var(--muted);
-  white-space: nowrap; text-align: center;
-}}
-.chart-legend {{
-  display: flex; gap: 18px; margin-top: 14px; flex-wrap: wrap;
-}}
-.cl-item {{
-  display: flex; align-items: center; gap: 5px;
-  font-size: 11px; color: var(--muted);
-}}
-.cl-dot {{ width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }}
-
-/* ── table ── */
-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-thead th {{
-  text-align: left; font-size: 10px; text-transform: uppercase;
-  letter-spacing: .08em; color: var(--muted); padding: 0 10px 12px;
-  font-weight: 600; border-bottom: 1px solid var(--border);
-}}
-tbody td {{
-  padding: 11px 10px;
-  border-bottom: 1px solid var(--border);
-  font-variant-numeric: tabular-nums;
-  vertical-align: middle;
-}}
-tbody tr:last-child td {{ border-bottom: none; }}
-tbody tr:hover td {{ background: var(--surface2); }}
-.chip {{
-  display: inline-block; padding: 3px 8px; border-radius: 5px;
-  font-size: 11px; font-weight: 700; font-family: var(--mono);
-  letter-spacing: .03em;
-}}
-.chip-CODE   {{ background: var(--green-dim); color: var(--green); }}
-.chip-NOCODE {{ background: #1c2a42; color: var(--accent); }}
-.mono {{ font-family: var(--mono); font-size: 12px; }}
-.muted {{ color: var(--muted); }}
-.ans {{ color: var(--muted); max-width: 260px; overflow: hidden;
-        text-overflow: ellipsis; white-space: nowrap; }}
-.center {{ text-align: center; }}
-.pad20 {{ padding: 20px !important; }}
-
-/* ── footer ── */
-.footer {{
-  font-size: 11px; color: var(--muted); text-align: right;
-  margin-top: 16px; display: flex; justify-content: space-between;
-  flex-wrap: wrap; gap: 8px;
-}}
-.footer a {{ color: var(--accent); text-decoration: none; }}
-.footer a:hover {{ text-decoration: underline; }}
-</style>
-</head><body>
-
-<div class="hdr">
-  <div class="hdr-left">
-    <h1>Fara <em>Agent</em> Dashboard</h1>
-    <span class="session-str">{session_str}</span>
-  </div>
-  <div class="hdr-right">
-    {agent_badge}
-    <span class="badge">aggiornato {now_str}</span>
-    <a class="refresh-btn" href="/dashboard">↺ aggiorna</a>
-    {stop_btn_html}
-  </div>
-</div>
-
-<div class="tiles">
-  <div class="tile accent">
-    <div class="tile-label">Cicli totali</div>
-    <div class="tile-value">{total}</div>
-    <div class="tile-sub">{f"{elapsed_h:.1f}h attive" if records else "—"}</div>
-  </div>
-  <div class="tile green">
-    <div class="tile-label">Completati</div>
-    <div class="tile-value">{len(completed)}</div>
-    <div class="tile-sub">{rate} dei cicli</div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">NONE</div>
-    <div class="tile-value">{none_runs}</div>
-    <div class="tile-sub">{none_pct} — nessuno studio</div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Durata media</div>
-    <div class="tile-value" style="font-size:22px;padding-top:4px">{avg_dur_completed}</div>
-    <div class="tile-sub">per studio completato</div>
-  </div>
-  <div class="tile yellow">
-    <div class="tile-label">Cicli / ora</div>
-    <div class="tile-value">{cph}</div>
-    <div class="tile-sub">sul tempo effettivo</div>
-  </div>
-  <div class="tile">
-    <div class="tile-label">Incompleti</div>
-    <div class="tile-value">{incomplete_runs}</div>
-    <div class="tile-sub">cicli senza esito</div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Distribuzione esiti</div>
-  <div class="outcome-wrap">
-    <div class="outcome-bar">
-      <div class="ob-seg ob-none" style="flex:{sf_none}"></div>
-      <div class="ob-seg ob-done" style="flex:{sf_comp}"></div>
-      <div class="ob-seg ob-inc"  style="flex:{sf_inc}"></div>
-    </div>
-    <div class="outcome-legend">
-      <div class="ol-item">
-        <div class="ol-dot" style="background:#2d3248"></div>
-        NONE &nbsp;<strong>{none_runs}</strong>&nbsp;<span>({none_pct})</span>
-      </div>
-      <div class="ol-item">
-        <div class="ol-dot" style="background:var(--green)"></div>
-        Completati &nbsp;<strong>{len(completed)}</strong>&nbsp;<span>({rate})</span>
-      </div>
-      <div class="ol-item">
-        <div class="ol-dot" style="background:var(--yellow)"></div>
-        Incompleti &nbsp;<strong>{incomplete_runs}</strong>&nbsp;<span>({pct(incomplete_runs,total)})</span>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Attività per ora</div>
-  <div class="chart-wrap">{bar_html}</div>
-  <div class="chart-legend">
-    <div class="cl-item"><div class="cl-dot" style="background:#2d3248"></div>NONE</div>
-    <div class="cl-item"><div class="cl-dot" style="background:#2ecc71"></div>Completato</div>
-    <div class="cl-item"><div class="cl-dot" style="background:#f0a500"></div>Incompleto</div>
-  </div>
-</div>
-
-{time_html}
-
-<div class="section">
-  <div class="section-title">Studi completati ({len(completed)})</div>
-  <table>
-    <thead><tr>
-      <th>Inizio</th><th>Esito</th><th>Durata</th><th>Steps</th><th>Codice da</th><th>Codice / risposta</th>
-    </tr></thead>
-    <tbody>{rows_html}</tbody>
-  </table>
-</div>
-
-<div class="footer">
-  <span>Aggiornamento automatico ogni 60s</span>
-  <a href="/">← torna al pannello</a>
-</div>
-
-<script>
-function stopAgent() {{
-  if (!confirm('Fermare l\\'agente?')) return;
-  var btn = document.querySelector('.stop-btn');
-  if (btn) {{ btn.disabled = true; btn.textContent = '⏳ fermando…'; }}
-  fetch('/agent/stop', {{method:'POST'}})
-    .then(function(r) {{ return r.json(); }})
-    .then(function() {{ setTimeout(function(){{ location.reload(); }}, 1500); }})
-    .catch(function(e) {{ alert('Errore: ' + e); }});
-}}
-</script>
-</body></html>"""
+    """The statistics page: a static template read on every request (like
+    gui_index.html, so its design can change without restarting the server)
+    with the data inlined, so the first paint needs no second round trip.
+    The page then keeps itself fresh from /dashboard.json and the SSE feed."""
+    tpl = (HERE / "dashboard.html").read_text()
+    data = json.dumps(_dashboard_data(), separators=(",", ":")).replace("</", "<\\/")
+    return tpl.replace("/*__DATA__*/null", data, 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1461,9 +1125,31 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(load_presets())
         elif self.path == "/dashboard":
             self._send_bytes(_build_dashboard().encode(), "text/html; charset=utf-8")
+        elif self.path == "/dashboard.json":
+            self._send_json(_dashboard_data())
         elif self.path == "/study_cache":
             self._send_json({"entries": study_cache.entries(),
                              "titles": study_cache.titles()})
+        elif self.path == "/model/status":
+            global _active_model
+            current = _active_model or _detect_active_model()
+            _active_model = current
+            cfg = MODELS.get(current, {})
+            self._send_json({
+                "active": current,
+                "label": cfg.get("label", "unknown"),
+                "multimodal": cfg.get("multimodal", False),
+                "healthy": _model_healthy(current) if current else False,
+                "models": {k: {"label": v["label"], "multimodal": v["multimodal"]}
+                           for k, v in MODELS.items()},
+            })
+        elif self.path == "/local":
+            html = (HERE / "local_index.html").read_bytes()
+            self._send_bytes(html, "text/html; charset=utf-8")
+        elif self.path == "/local/history":
+            with _local_lock:
+                visible = [m for m in _local_history if m["role"] != "system"]
+            self._send_json({"messages": visible})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1701,9 +1387,50 @@ class Handler(BaseHTTPRequestHandler):
                 save_preset(preset)
                 return self._send_json({"ok": True})
 
+            if self.path == "/model/switch":
+                if self._agent_running():
+                    return self._send_json({"error": "agent is running — stop it first"}, status=409)
+                body = self._read_json()
+                target = str(body.get("model", "")).strip()
+                result = switch_model(target)
+                status = 200 if "ok" in result else 400
+                return self._send_json(result, status=status)
+
             if self.path == "/presets/delete":
                 body = self._read_json()
                 delete_preset(str(body.get("name", "")))
+                return self._send_json({"ok": True})
+
+            if self.path == "/local/chat":
+                global _local_busy
+                with _local_lock:
+                    if _local_busy:
+                        return self._send_json({"error": "busy"}, status=409)
+                    _local_busy = True
+                body = self._read_json()
+                msg = str(body.get("message", "")).strip()
+                if not msg:
+                    with _local_lock:
+                        _local_busy = False
+                    return self._send_json({"error": "empty message"}, status=400)
+                try:
+                    events = []
+                    response = ""
+                    for ev in local_agent.run_chat(msg, _local_history):
+                        events.append(ev)
+                        if ev.get("type") == "response":
+                            response = ev.get("content", "")
+                    self._send_json({"ok": True, "response": response, "events": events})
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+                finally:
+                    with _local_lock:
+                        _local_busy = False
+                return
+
+            if self.path == "/local/clear":
+                with _local_lock:
+                    _local_history.clear()
                 return self._send_json({"ok": True})
 
             self.send_response(404)
