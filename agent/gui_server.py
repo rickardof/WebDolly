@@ -640,7 +640,7 @@ def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue
         # Stop pressed while the agent was blocked on a model call or a
         # wait: cancel.cancel_all() cut the request, the generator is gone.
         _push_event({"type": "done", "answer": "STOPPED"})
-        return False, messages
+        return False, messages, "STOPPED"
 
 
 def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill,
@@ -650,7 +650,7 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
     try:
         event = next(gen)
     except StopIteration:
-        return True, messages
+        return True, messages, ""
 
     while True:
         latest_messages = event.get("messages", messages)
@@ -659,7 +659,7 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
         # GUI's event feed, so it's stripped before pushing.
         _push_event({k: v for k, v in event.items() if k != "messages"})
         if event["type"] == "done":
-            return True, latest_messages
+            return True, latest_messages, event.get("answer", "")
         if event["type"] == "question":
             with state_lock:
                 state["pending_question"] = event["question"]
@@ -671,7 +671,7 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
             if answer is None:
                 gen.close()
                 _push_event({"type": "done", "answer": "STOPPED"})
-                return False, latest_messages
+                return False, latest_messages, "STOPPED"
             event = gen.send(answer)
         else:
             injected = _pop_injected()
@@ -680,7 +680,7 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
             try:
                 event = gen.send(injected) if injected else next(gen)
             except StopIteration:
-                return True, latest_messages
+                return True, latest_messages, ""
 
 
 _url_cache = {"t": 0.0, "v": None}
@@ -750,6 +750,12 @@ ERROR_BACKOFF = (30, 60, 120, 300)
 # in case the DOM reading is wrong.
 LIST_CHECK_MIN_SECONDS = 2
 FULL_CYCLE_EVERY = 15 * 60
+# Max consecutive INCOMPLETE cycles before giving up on a stuck survey and
+# resetting back to the studies list. Each INCOMPLETE cycle burns max_rounds
+# steps on the same survey -- with max_rounds=30 that's 30 steps per cycle,
+# so 3 attempts = ~90 steps on one survey, enough for a difficult form but
+# not enough to loop forever.
+MAX_INCOMPLETE_STREAK = 3
 
 
 def _backoff(consecutive_errors: int) -> int:
@@ -881,6 +887,7 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
     try:
         cycle = 0
         errors_in_a_row = 0
+        incomplete_streak = 0
         while True:
             cycle += 1
             if loop:
@@ -894,10 +901,10 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
             # cycles continue from wherever the page is (refreshed below),
             # instead of re-navigating to the start URL every time.
             try:
-                ok, _ = run_one_cycle(task, url if cycle == 1 else "", max_rounds,
-                                      stop_event, answer_queue,
-                                      messages=None, batch_fill=batch_fill,
-                                      wander_seconds=wander_seconds, skip_av=skip_av)
+                ok, _, cycle_answer = run_one_cycle(task, url if cycle == 1 else "", max_rounds,
+                                                     stop_event, answer_queue,
+                                                     messages=None, batch_fill=batch_fill,
+                                                     wander_seconds=wander_seconds, skip_av=skip_av)
                 errors_in_a_row = 0
             except Exception as e:
                 # One bad cycle must not end a 24/7 run. A model timeout, a CDP
@@ -934,6 +941,27 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
                 home_url = start_page_url
             if not ok or not loop or stop_event.is_set():
                 break
+            # INCOMPLETE (max_rounds reached) means the model was still mid-work:
+            # likely on an external survey tab. Calling _wait_for_studies here
+            # would reset_to(home_url) and destroy the survey tab (closes every
+            # other tab, navigates the active one). Skip the inter-cycle check
+            # and jump straight to the next cycle so the model keeps working on
+            # the survey. Cap consecutive INCOMPLETE cycles so a truly stuck
+            # survey doesn't block the loop forever.
+            if "max_rounds=" in cycle_answer:
+                incomplete_streak += 1
+                if incomplete_streak >= MAX_INCOMPLETE_STREAK:
+                    _push_event({"type": "notice",
+                                 "text": f"⚠️ Studio bloccato dopo {incomplete_streak} "
+                                         f"cicli INCOMPLETE: torno alla lista."})
+                    incomplete_streak = 0
+                else:
+                    _push_event({"type": "notice",
+                                 "text": f"Ciclo INCOMPLETE ({incomplete_streak}): "
+                                         f"continuo dallo stesso punto senza resettare il tab."})
+                    continue
+            else:
+                incomplete_streak = 0
             if _wait_for_studies(home_url, poll_interval, stop_event):
                 return
     except Exception as e:

@@ -1232,11 +1232,19 @@ def dispatch_action(action_type: str, args: dict) -> str:
         if not code.strip():
             return "run_js: no code provided"
         stripped = code.strip()
-        # Don't double-wrap if the model already sent an IIFE
+        # humanDelay helper, injected so batch loops look human-paced.
+        _JS_HELPERS = (
+            "const humanDelay = (min=800,max=2000) => "
+            "new Promise(r => setTimeout(r, min + Math.random()*(max-min)));\n"
+        )
+        # Always make helpers available. The model often wraps its code in its
+        # own IIFE despite being told not to; wrapping that IIFE in an outer
+        # scope that defines the helpers lets the inner code close over them
+        # (otherwise humanDelay is undefined and the whole script throws).
         if stripped.startswith('(') and stripped.rstrip(';').endswith(')'):
-            wrapped = stripped
+            wrapped = f"(async () => {{ {_JS_HELPERS}return await ({stripped}); }})()"
         else:
-            wrapped = f"(async () => {{ {stripped} }})()"
+            wrapped = f"(async () => {{ {_JS_HELPERS}{stripped} }})()"
         try:
             result = pw_bridge.run(
                 lambda b: b.active_page().evaluate(wrapped),
@@ -1408,6 +1416,8 @@ _STANDING_RULES_FULL = (
     "repeated Likert scales), use `run_js` to batch-complete them in one step instead of "
     "clicking through each one manually. Write JS that clicks the selection button, submits, "
     "waits for the next trial to load, and repeats in a loop for the remaining trials. "
+    "CRITICAL: call `await humanDelay()` between each iteration (it is pre-defined and "
+    "waits 0.8–2s randomly) — never run a tight loop without it. "
     "IMPORTANT: use standard DOM APIs only — ':contains()' is NOT valid CSS. To find a "
     "button by text, use: Array.from(document.querySelectorAll('button'))"
     ".find(b => b.textContent.includes('Submit')). Do NOT wrap your code in (async () => "
@@ -1425,7 +1435,8 @@ _STANDING_RULES_COMPACT = (
     "5. Respect minimum time — wait if timer says time remains. "
     "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
     "7. For repetitive trials (many A/B comparisons, repeated scales), use run_js to batch them "
-    "in one step. Use standard DOM APIs — ':contains()' is NOT CSS. Do NOT wrap in (async () => {})()."
+    "in one step. Call `await humanDelay()` between iterations (pre-defined, 0.8-2s). "
+    "Use standard DOM APIs — ':contains()' is NOT CSS. Do NOT wrap in (async () => {})()."
 )
 
 
@@ -1565,6 +1576,31 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _used_run_js: bool = False  # whether run_js was used during this cycle
         _survey_url: str = ""  # URL of the external survey (for study_memory)
 
+        def _record_user_correction(text: str) -> None:
+            """A user instruction (question answer or injected steer) arrived.
+
+            Log it to the transcript -- these were previously invisible, which
+            made it impossible to see afterwards what the user had to step in
+            and tell the agent -- and remember it against the current domain so
+            study_memory.user_hints_for() can surface it on later steps and
+            future runs, sparing the user from repeating the same correction.
+            """
+            text = (text or "").strip()
+            if not text:
+                return
+            url = get_current_url()
+            try:
+                transcript.write(json.dumps(
+                    {"step": step, "type": "user_correction", "text": text,
+                     "url": url}) + "\n")
+                transcript.flush()
+            except Exception:
+                pass
+            try:
+                study_memory.record_user_hint(url, text)
+            except Exception:
+                pass
+
         for step in range(1, max_rounds + 1):
             if stop_event is not None and stop_event.is_set():
                 yield {"type": "done", "answer": "STOPPED", "messages": messages}
@@ -1648,6 +1684,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     injected = yield batch_step_event
                     if injected:
                         pending_user_response = injected
+                        _record_user_correction(injected)
                     continue
 
             # Stateful transition check: if previous step was on Prolific and now we're
@@ -1764,17 +1801,19 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             mem_hint = ""
             if not on_list:
                 nav_hint = _dom_nav_hint()
+                # User corrections apply on any study page (survey or the
+                # Prolific study detail), so they surface whenever we are off
+                # the list. The run_js batch hint is survey-specific, so it
+                # stays gated on an active study timer.
+                mem_hint = study_memory.user_hints_for(here)
                 if not here_guarded and study_timer.is_active():
-                    mem_hint = study_memory.hint_for(here)
+                    mem_hint += study_memory.hint_for(here)
 
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
             data_url = encode_for_model(img)
 
-            if pending_user_response:
-                text = pending_user_response
-                pending_user_response = ""
-            elif step == 1:
+            if step == 1:
                 resume_hint = ""
                 if not on_list:
                     resume_hint = f"\n\nCurrent URL: {here}\n"
@@ -1791,6 +1830,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             "current question and proceed. Do NOT navigate back to Prolific "
                             "until the survey is complete.")
                 text = task + _standing_rules() + (f"\n\n{skip_hint}" if skip_hint else "") + resume_hint
+                if pending_user_response:
+                    text += f"\n\n[User (mid-run instruction)]: {pending_user_response}"
+                    pending_user_response = ""
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
@@ -1807,7 +1849,18 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             _auto_escalate("super_fast")
                         elif over > 0:
                             _auto_escalate("hurry")
-                text = f"{prefix}{fp.USER_MESSAGE}"
+                # Pending user instructions used to replace the whole prompt,
+                # which stripped mem_hint/nav_hint/URL and let the model treat
+                # the correction as a passing comment instead of a steer. Now
+                # they ride along with the normal context so the model still
+                # sees past user hints and the standing per-step cue.
+                if pending_user_response:
+                    inj = pending_user_response
+                    pending_user_response = ""
+                    text = (f"{prefix}[User (mid-run instruction)]: {inj}\n\n"
+                            f"{fp.USER_MESSAGE}")
+                else:
+                    text = f"{prefix}{fp.USER_MESSAGE}"
 
             messages.append({
                 "role": "user",
@@ -1849,6 +1902,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     yield {"type": "done", "answer": "STOPPED", "messages": messages}
                     return
                 pending_user_response = answer
+                _record_user_correction(answer)
                 continue
 
             target = {"type": "target", "step": step, "action": action_type}
@@ -1889,6 +1943,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
 
             if action_type == "run_js" and not result_desc.startswith("run_js error"):
                 _used_run_js = True
+            elif action_type == "run_js" and result_desc.startswith("run_js error"):
+                # Surface the actual JS error so the model can fix its code
+                # instead of guessing from the screenshot (which it does badly).
+                pending_user_response = (
+                    f"Your run_js code threw an error and did NOT run: {result_desc}\n"
+                    "Read the error above, fix your JavaScript, and try again. "
+                    "Helpers like humanDelay() are already defined — do not redefine them.")
 
             if action_type == "left_click" and not pending_user_response:
                 coord = args.get("coordinate")
@@ -1974,6 +2035,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             injected = yield step_event
             if injected:
                 pending_user_response = injected
+                _record_user_correction(injected)
             # No fixed settle delay here: measured at 0.5s against a ~9.3s
             # step it was ~5% of wall-clock for no benefit -- the next
             # thing the loop does is take a screenshot, and actions that

@@ -102,6 +102,7 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
             raise RuntimeError(f"HTTP {resp.status} from {u.path}: "
                                f"{resp.read()[:300].decode(errors='replace')}")
         parts, usage, finish, timings = [], {}, None, {}
+        tool_calls_accum = {}  # id -> {id, type, function: {name, arguments}}
         for raw in resp:
             line = raw.strip()
             if not line.startswith(b"data:"):
@@ -123,9 +124,29 @@ def post_chat(url: str, payload: dict, timeout: float = 120, on_delta=None,
                             on_delta(delta["content"])
                         except Exception:
                             pass
+                for tc_delta in delta.get("tool_calls", []):
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_accum:
+                        tool_calls_accum[idx] = {
+                            "id": tc_delta.get("id", ""),
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    tc = tool_calls_accum[idx]
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):
+                        tc["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        tc["function"]["arguments"] += fn["arguments"]
+                    if tc_delta.get("id"):
+                        tc["id"] = tc_delta["id"]
                 if ch.get("finish_reason"):
                     finish = ch["finish_reason"]
-        return {"choices": [{"message": {"role": "assistant", "content": "".join(parts)},
+        msg = {"role": "assistant", "content": "".join(parts)}
+        if tool_calls_accum:
+            msg["tool_calls"] = [tool_calls_accum[k]
+                                 for k in sorted(tool_calls_accum)]
+        return {"choices": [{"message": msg,
                              "finish_reason": finish}], "usage": usage, "timings": timings}
     except BaseException:
         if _cancel.is_set():

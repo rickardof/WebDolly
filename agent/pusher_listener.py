@@ -90,10 +90,19 @@ class PusherSniffer:
 
     def _loop(self):
         import pw_bridge
+        # Short settle so the first cycle's page.goto gets its queue slot
+        # before our attach does: otherwise attach waits behind a 10-30s
+        # navigation and the 30s call timeout can still fire.
+        self._stop.wait(5)
         backoff = 2
         while not self._stop.is_set():
             try:
-                pw_bridge.run(self._attach, timeout=10)
+                # 30s (not 10s) because the pw_bridge is a single-worker
+                # queue: when attach lands behind a long page.goto or
+                # screenshot burst, 10s was too tight and the sniffer never
+                # connected for the entire run (seen: 13 consecutive timeouts
+                # over ~5 minutes).
+                pw_bridge.run(self._attach, timeout=30)
                 self._connected = True
                 backoff = 2
                 log.info("Pusher WS listener attached")
