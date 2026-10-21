@@ -229,6 +229,32 @@ body {
   background: var(--bg3);
   border-bottom-left-radius: 3px;
 }
+.msg.assistant p { margin: 0 0 8px 0; }
+.msg.assistant p:last-child { margin-bottom: 0; }
+.msg.assistant h1, .msg.assistant h2, .msg.assistant h3,
+.msg.assistant h4 { margin: 10px 0 6px; line-height: 1.3; }
+.msg.assistant h1 { font-size: 1.3em; }
+.msg.assistant h2 { font-size: 1.18em; }
+.msg.assistant h3 { font-size: 1.08em; }
+.msg.assistant h4 { font-size: 1.0em; font-weight: 600; }
+.msg.assistant ul, .msg.assistant ol { margin: 4px 0 8px 0; padding-left: 24px; }
+.msg.assistant li { margin: 2px 0; }
+.msg.assistant code { background: var(--bg); padding: 1px 5px;
+  border-radius: 3px; font-size: 0.9em; font-family: monospace; }
+.msg.assistant pre {
+  background: var(--bg); padding: 10px 12px; border-radius: 6px;
+  overflow-x: auto; margin: 8px 0; font-size: 0.9em;
+}
+.msg.assistant pre code { background: transparent; padding: 0; }
+.msg.assistant a { color: var(--accent); text-decoration: none; }
+.msg.assistant a:hover { text-decoration: underline; }
+.msg.assistant blockquote {
+  border-left: 3px solid var(--border);
+  margin: 6px 0; padding: 2px 10px; color: var(--fg2);
+}
+.msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.msg.assistant strong { font-weight: 600; }
+.msg.assistant em { font-style: italic; }
 .msg.tool {
   align-self: flex-start;
   background: transparent;
@@ -479,10 +505,72 @@ async function refreshBrowser() {
 }
 
 // ── Chat ──
+// Minimal, safe markdown renderer for assistant replies: escapes HTML first,
+// then rewrites fenced code blocks, headings, lists, inline code, bold,
+// italic, links. Keeps dependencies to zero; good enough for chat output.
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+function renderMarkdown(src) {
+  if (!src) return '';
+  const codeBlocks = [];
+  // 1. Pull fenced code blocks out first so inline rules don't touch them
+  src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+    return `\x00CODE${codeBlocks.length - 1}\x00`;
+  });
+  // 2. Escape remaining HTML
+  src = escapeHtml(src);
+  // 3. Headings (must be at line start)
+  src = src.replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+           .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+           .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+           .replace(/^# (.+)$/gm, '<h1>$1</h1>');
+  // 4. Horizontal rule
+  src = src.replace(/^---+$/gm, '<hr>');
+  // 5. Blockquote (single-line simple form)
+  src = src.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+  // 6. Lists: group consecutive bullet / numbered lines
+  src = src.replace(/((?:^[-*] .+(?:\n|$))+)/gm, m => {
+    const items = m.trim().split('\n').map(l =>
+      `<li>${l.replace(/^[-*] /, '')}</li>`).join('');
+    return `<ul>${items}</ul>`;
+  });
+  src = src.replace(/((?:^\d+\. .+(?:\n|$))+)/gm, m => {
+    const items = m.trim().split('\n').map(l =>
+      `<li>${l.replace(/^\d+\. /, '')}</li>`).join('');
+    return `<ol>${items}</ol>`;
+  });
+  // 7. Inline code
+  src = src.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // 8. Bold then italic (bold first so **x** doesn't half-match *x*)
+  src = src.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+           .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  // 9. Links
+  src = src.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // 10. Paragraphs: wrap any remaining line groups not already in a block tag
+  src = src.split(/\n{2,}/).map(block => {
+    const stripped = block.trim();
+    if (!stripped) return '';
+    if (/^<(h\d|ul|ol|pre|blockquote|hr)/.test(stripped)) return stripped;
+    return `<p>${stripped.replace(/\n/g, '<br>')}</p>`;
+  }).join('\n');
+  // 11. Restore code blocks
+  src = src.replace(/\x00CODE(\d+)\x00/g, (_, i) => codeBlocks[+i]);
+  return src;
+}
+
 function addMsg(role, content) {
   const d = document.createElement('div');
   d.className = 'msg ' + role;
-  d.textContent = content;
+  if (role === 'assistant') {
+    d.innerHTML = renderMarkdown(content);
+  } else {
+    d.textContent = content;
+  }
   $msgs.appendChild(d);
   $msgs.scrollTop = $msgs.scrollHeight;
   return d;
