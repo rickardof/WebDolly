@@ -152,8 +152,17 @@ MAX_FILE_CHARS = 20000
 MAX_OUTPUT_CHARS = 8000
 EXEC_TIMEOUT = 60
 MAX_TOOL_ROUNDS = 8
+MAX_HISTORY_TOKENS = 22000
+MAX_TOOL_HISTORY_CHARS = 6000
+MAX_RESPONSE_TOKENS = 8192
+MAX_RETRY_RESPONSE_TOKENS = 4096
 ENABLE_THINKING = os.environ.get("FARA_LOCAL_ENABLE_THINKING", "1") == "1"
-REASONING_EFFORT = os.environ.get("FARA_LOCAL_REASONING_EFFORT", "medium")
+# This Qwen variant's chat template only accepts {low, medium, xhigh}; map the
+# conventional "high" label to xhigh so the UI can stay generic.
+_EFFORT_ALIASES = {"high": "xhigh"}
+REASONING_EFFORT = _EFFORT_ALIASES.get(
+    os.environ.get("FARA_LOCAL_REASONING_EFFORT", "medium"),
+    os.environ.get("FARA_LOCAL_REASONING_EFFORT", "medium"))
 
 
 # ── Tools ────────────────────────────────────────────────────────────
@@ -339,19 +348,205 @@ def _clean_response(text: str) -> str:
     return text
 
 
+def _split_think(text: str) -> tuple[str, str]:
+    """Return (thinking, visible). Keeps the reasoning so the UI can show it
+    collapsed, instead of discarding it like _strip_think used to."""
+    parts = []
+    def _grab(m):
+        parts.append(m.group(1))
+        return ''
+    visible = re.sub(r'<think>(.*?)</think>', _grab, text, flags=re.DOTALL)
+    m = re.search(r'<think>(.*)$', visible, flags=re.DOTALL)
+    if m:
+        parts.append(m.group(1))
+        visible = visible[:m.start()]
+    visible = visible.strip()
+    thinking = "\n".join(p.strip() for p in parts if p.strip()).strip()
+    # Fallback: if everything was inside <think>, show the raw content minus
+    # tags rather than return nothing (matches the old _strip_think behaviour).
+    if not visible and thinking:
+        visible = re.sub(r'</?think>', '', text).strip()
+    return thinking, visible
+
+
 def _strip_think(text: str) -> str:
-    """Remove <think> tags from model output, keeping content if nothing else remains."""
-    stripped = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    stripped = re.sub(r'<think>.*', '', stripped, flags=re.DOTALL)
-    stripped = stripped.strip()
-    if stripped:
-        return stripped
-    return text.replace('<think>', '').replace('</think>', '').strip()
+    return _split_think(text)[1]
 
 
 def _is_empty_or_garbage(text: str) -> bool:
     """Detect an unfinished reasoning stream instead of showing it as an answer."""
     return not text or not re.search(r"[A-Za-z0-9À-ÿ]", text)
+
+
+def _message_tokens(message: dict) -> int:
+    """Conservatively estimate serialized message tokens before sending."""
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    return max(1, (len(body) + 3) // 4)
+
+
+# Reserve this fraction of the budget for the recent-turn window; the rest
+# can be used by the system prompt + rolling compact summary.
+COMPACT_KEEP_FRACTION = float(os.environ.get("FARA_LOCAL_COMPACT_KEEP", "0.5"))
+COMPACT_SUMMARY_MARKER = "[Earlier conversation summary]"
+
+
+def _units(messages: list) -> list:
+    """Group messages into turn-units (assistant+tool_calls stay together)."""
+    units = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            unit = [m]; i += 1
+            while i < len(messages) and messages[i].get("role") == "tool":
+                unit.append(messages[i]); i += 1
+        else:
+            unit = [m]; i += 1
+        units.append(unit)
+    return units
+
+
+def _summarize_units(units: list, prior_summary: str = "") -> str:
+    """Ask the model itself to compress these turns into a short recap.
+
+    Called synchronously inside _trim_history when history would overflow.
+    Falls back to a mechanical bullet list if the model call fails, so a
+    transient summary error never breaks the chat path.
+    """
+    transcript_lines = []
+    for u in units:
+        for m in u:
+            role = m.get("role", "?")
+            if role == "tool":
+                name = m.get("name", "tool")
+                body = (m.get("content") or "")[:400]
+                transcript_lines.append(f"[{name} result] {body}")
+            elif role == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    fn = (tc.get("function") or {})
+                    args = (fn.get("arguments") or "")[:200]
+                    transcript_lines.append(f"[assistant→{fn.get('name','tool')}] {args}")
+                extra = _strip_think(m.get("content") or "")
+                if extra: transcript_lines.append(f"assistant: {extra[:400]}")
+            else:
+                content = m.get("content") or ""
+                if role == "assistant": content = _strip_think(content)
+                if content:
+                    transcript_lines.append(f"{role}: {content[:600]}")
+    transcript = "\n".join(transcript_lines)[:12000]
+    prior = f"\n\nPrior summary so far:\n{prior_summary}\n" if prior_summary else ""
+    prompt = (
+        "Summarize the following conversation turns into a compact recap for "
+        "future reference. Preserve: facts the user shared, decisions, "
+        "ongoing tasks, and anything the assistant must remember. Omit "
+        "small talk. 10 bullet points maximum, each ≤30 words. Output "
+        "only the bullet list, no preamble.\n\n"
+        f"Turns to summarize:\n{transcript}{prior}"
+    )
+    payload = {
+        "model": "local",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 1024,
+    }
+    if MODEL_URL.startswith(("http://127.0.0.1:", "http://localhost:")):
+        payload["chat_template_kwargs"] = {"enable_thinking": False,
+                                           "reasoning_effort": "low"}
+    try:
+        result = cancel.post_chat(MODEL_URL, payload, timeout=120)
+        text = _strip_think((result["choices"][0]["message"].get("content") or "")).strip()
+        if text:
+            return text
+    except Exception as e:
+        log.warning("Compact summarization failed: %s", e)
+    # Mechanical fallback
+    bullets = []
+    for line in transcript_lines[-20:]:
+        bullets.append(f"- {line[:140]}")
+    return "\n".join(bullets) or "- (no summary available)"
+
+
+def _split_system_summary(content: str) -> tuple[str, str]:
+    """Separate the base system prompt from any embedded compact summary.
+
+    The summary is folded into the single system message so Qwen's template,
+    which forbids a second system message after the first, still accepts it."""
+    if not content:
+        return "", ""
+    marker = f"\n\n{COMPACT_SUMMARY_MARKER}\n"
+    idx = content.find(marker)
+    if idx < 0:
+        return content, ""
+    base = content[:idx]
+    summary = content[idx + len(marker):].strip()
+    return base, summary
+
+
+def _trim_history(history: list) -> None:
+    """Keep recent complete turns, summarizing older ones into a compact note
+    merged into the system message so the model retains the gist of prior
+    conversation without needing a second system turn."""
+    if not history:
+        return
+
+    if history[0].get("role") == "system":
+        system_base, prior_summary = _split_system_summary(history[0].get("content") or "")
+        system = [{"role": "system", "content": system_base}]
+        rest = history[1:]
+    else:
+        system = []
+        system_base = ""
+        prior_summary = ""
+        rest = history[:]
+
+    units = _units(rest)
+
+    sys_tokens = sum(_message_tokens(m) for m in system)
+    prior_tokens = (len(prior_summary) + 3) // 4 if prior_summary else 0
+
+    kept = []
+    kept_tokens = 0
+    budget_keep = int(MAX_HISTORY_TOKENS * COMPACT_KEEP_FRACTION)
+    have_user = False
+    for unit in reversed(units):
+        ut = sum(_message_tokens(m) for m in unit)
+        unit_has_user = any(m.get("role") == "user" for m in unit)
+        over_budget = kept and kept_tokens + ut > budget_keep
+        # Qwen's chat template requires at least one real user query in the
+        # messages passed to it. Keep walking back past the budget until we
+        # have one in `kept`, otherwise the next model call raises
+        # "No user query found in messages."
+        if over_budget and have_user:
+            break
+        kept[0:0] = [unit]; kept_tokens += ut
+        if unit_has_user: have_user = True
+
+    dropped_units = units[: len(units) - len(kept)] if kept else units
+    total = sys_tokens + prior_tokens + kept_tokens
+
+    if not dropped_units and total <= MAX_HISTORY_TOKENS:
+        # Rewrite with the existing summary folded back into the system msg.
+        if system and prior_summary:
+            system[0] = {"role": "system",
+                         "content": f"{system_base}\n\n{COMPACT_SUMMARY_MARKER}\n{prior_summary}"}
+        history[:] = system + [m for u in units for m in u]
+        return
+
+    if dropped_units:
+        new_summary = _summarize_units(dropped_units, prior_summary=prior_summary)
+    else:
+        new_summary = prior_summary
+
+    if system and new_summary:
+        system[0] = {"role": "system",
+                     "content": f"{system_base}\n\n{COMPACT_SUMMARY_MARKER}\n{new_summary}"}
+    rebuilt = system + [m for u in kept for m in u]
+
+    log.info(
+        "Compacted local chat: %d msgs -> %d (summary %d chars, kept %d turns)",
+        len(history), len(rebuilt), len(new_summary), len(kept),
+    )
+    history[:] = rebuilt
 
 
 # ── Agent loop ───────────────────────────────────────────────────────
@@ -370,18 +565,23 @@ def run_chat(user_message: str, history: list, on_event=None):
         history.append({"role": "system", "content": SYSTEM_PROMPT})
 
     history.append({"role": "user", "content": user_message})
+    _trim_history(history)
     seen_calls = set()
+    # Track where the user turn started so we can roll it back on failure —
+    # a dangling user message with no assistant reply poisons the next turn.
+    _user_turn_start = len(history) - 1
 
     for round_n in range(MAX_TOOL_ROUNDS):
         yield {"type": "thinking"}
 
         try:
+            _trim_history(history)
             payload = {
                 "model": "local",
                 "messages": history,
                 "tools": TOOLS_SCHEMA,
                 "temperature": 0.6,
-                "max_tokens": 2048,
+                "max_tokens": MAX_RESPONSE_TOKENS,
             }
             if MODEL_URL.startswith(("http://127.0.0.1:", "http://localhost:")):
                 payload["chat_template_kwargs"] = {
@@ -392,30 +592,41 @@ def run_chat(user_message: str, history: list, on_event=None):
                                       on_delta=lambda t: (on_event or (lambda e: None))(
                                           {"type": "token", "text": t}))
             msg = result["choices"][0]["message"]
-            content = _strip_think(msg.get("content") or "")
+            thinking, content = _split_think(msg.get("content") or "")
             tool_calls = msg.get("tool_calls") or []
             finish = result["choices"][0].get("finish_reason", "")
 
-            # Keep thinking enabled normally, but do not leave the user with
-            # an empty answer when the model spends its entire budget thinking.
-            if (_is_empty_or_garbage(content) and not tool_calls and finish == "length"
-                    and ENABLE_THINKING
-                    and "chat_template_kwargs" in payload):
+            # Retry when the model ran out of budget. Two cases:
+            # - all budget spent inside <think>, nothing visible left
+            # - visible answer got cut mid-sentence (finish=="length" with content)
+            # In both, disable thinking and give it room for a plain answer.
+            needs_retry = (
+                finish == "length" and not tool_calls and ENABLE_THINKING
+                and "chat_template_kwargs" in payload
+                and (_is_empty_or_garbage(content) or thinking))
+            if needs_retry:
                 retry_payload = dict(payload)
-                retry_payload["max_tokens"] = 1024
+                retry_payload["max_tokens"] = MAX_RETRY_RESPONSE_TOKENS
                 retry_payload["chat_template_kwargs"] = {
                     "enable_thinking": False,
                     "reasoning_effort": "low",
                 }
                 result = cancel.post_chat(MODEL_URL, retry_payload, timeout=120)
                 msg = result["choices"][0]["message"]
-                content = _strip_think(msg.get("content") or "")
+                thinking2, content = _split_think(msg.get("content") or "")
+                thinking = thinking or thinking2
                 tool_calls = msg.get("tool_calls") or []
                 finish = result["choices"][0].get("finish_reason", "")
+
+            if thinking:
+                yield {"type": "think", "text": thinking}
         except cancel.Cancelled:
+            # Drop the dangling user turn so the next message starts clean.
+            del history[_user_turn_start:]
             yield {"type": "error", "message": "Stopped"}
             return
         except Exception as e:
+            del history[_user_turn_start:]
             yield {"type": "error", "message": str(e)}
             return
 
@@ -427,6 +638,7 @@ def run_chat(user_message: str, history: list, on_event=None):
                 history.append({"role": "assistant", "content": content})
                 yield {"type": "response", "content": content}
             else:
+                del history[_user_turn_start:]
                 log.warning(
                     "Local model returned no answer: finish_reason=%r, "
                     "message_keys=%s",
@@ -481,26 +693,82 @@ def run_chat(user_message: str, history: list, on_event=None):
                    "result": tool_result[:500] + ("..." if len(tool_result) > 500 else "")}
 
             history.append({"role": "tool", "tool_call_id": tc_id,
-                            "content": tool_result})
+                            "content": tool_result[:MAX_TOOL_HISTORY_CHARS]})
 
-    # Force answer after exhausting rounds (no tools → model can only produce text)
-    history.append({"role": "user",
-                    "content": "Answer the question now with the information you have. "
-                               "Do not search again."})
+    # Force answer after exhausting rounds. Build a compact, text-only context:
+    # some servers reject a new user message after a long tool-call chain, and
+    # retaining every tool-call envelope wastes the context needed for the answer.
+    final_history = []
+    if history and history[0].get("role") == "system":
+        final_history.append(history[0])
+    for message in history[1:]:
+        if message.get("role") == "user":
+            final_history.append(message)
+        elif message.get("role") == "tool":
+            final_history.append({
+                "role": "user",
+                "content": f"[Tool result]\n{message.get('content', '')}",
+            })
+        elif message.get("role") == "assistant" and not message.get("tool_calls"):
+            final_history.append({
+                "role": "assistant",
+                "content": message.get("content", ""),
+            })
+    final_history.append({
+        "role": "user",
+        "content": "Answer the user's question now using the information above. "
+                   "Do not call tools or describe tool use.",
+    })
+    _trim_history(final_history)
     try:
         payload = {
             "model": "local",
-            "messages": history,
+            "messages": final_history,
             "temperature": 0.4,
-            "max_tokens": 1024,
+            "max_tokens": MAX_RESPONSE_TOKENS,
         }
-        result = cancel.post_chat(MODEL_URL, payload, timeout=60)
-        content = _strip_think(result["choices"][0]["message"].get("content") or "")
-        content = _clean_response(content)
-        if content:
+        if MODEL_URL.startswith(("http://127.0.0.1:", "http://localhost:")):
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": ENABLE_THINKING,
+                "reasoning_effort": REASONING_EFFORT,
+            }
+        result = cancel.post_chat(MODEL_URL, payload, timeout=120)
+        msg = result["choices"][0]["message"]
+        thinking, raw = _split_think(msg.get("content") or "")
+        content = _clean_response(raw)
+        finish = result["choices"][0].get("finish_reason", "")
+
+        if ((_is_empty_or_garbage(content) or (finish == "length" and thinking))
+                and ENABLE_THINKING
+                and "chat_template_kwargs" in payload):
+            retry_payload = dict(payload)
+            retry_payload["max_tokens"] = MAX_RETRY_RESPONSE_TOKENS
+            retry_payload["chat_template_kwargs"] = {
+                "enable_thinking": False,
+                "reasoning_effort": "low",
+            }
+            result = cancel.post_chat(MODEL_URL, retry_payload, timeout=120)
+            msg = result["choices"][0]["message"]
+            thinking2, raw = _split_think(msg.get("content") or "")
+            thinking = thinking or thinking2
+            content = _clean_response(raw)
+            finish = result["choices"][0].get("finish_reason", "")
+
+        if thinking:
+            yield {"type": "think", "text": thinking}
+        if not _is_empty_or_garbage(content):
             history.append({"role": "assistant", "content": content})
             yield {"type": "response", "content": content}
             return
-    except Exception:
-        pass
-    yield {"type": "error", "message": "Could not produce an answer."}
+        del history[_user_turn_start:]
+        log.warning("Forced final answer was empty: finish_reason=%r message_keys=%s",
+                    finish, sorted(msg))
+        yield {"type": "error",
+               "message": f"Could not produce an answer (finish_reason={finish or 'unknown'})."}
+    except cancel.Cancelled:
+        del history[_user_turn_start:]
+        yield {"type": "error", "message": "Stopped"}
+    except Exception as e:
+        del history[_user_turn_start:]
+        log.exception("Forced final answer failed")
+        yield {"type": "error", "message": f"Could not produce an answer: {e}"}

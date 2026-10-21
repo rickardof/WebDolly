@@ -132,9 +132,64 @@ def switch_model(target: str) -> dict:
 presets_lock = threading.Lock()
 
 # ── Local Agent state ────────────────────────────────────────────────
-_local_history: list = []
+# Multiple named chats persisted on disk. _local_sessions maps a chat id to
+# its message list; _local_active names the one currently receiving messages.
+LOCAL_CHATS_FILE = Path(os.environ.get("FARA_LOCAL_CHATS",
+                                       HERE / "local_chats.json"))
+_local_sessions: dict = {}
+_local_active: str = ""
 _local_busy = False
 _local_lock = threading.Lock()
+
+
+def _local_load():
+    """Load persisted chats + active id into module state. Caller holds lock."""
+    global _local_sessions, _local_active
+    try:
+        data = json.loads(LOCAL_CHATS_FILE.read_text())
+        _local_sessions = {k: list(v) for k, v in (data.get("sessions") or {}).items()}
+        _local_active = str(data.get("active") or "")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        _local_sessions = {}
+        _local_active = ""
+    if not _local_sessions:
+        cid = f"chat-{int(time.time())}"
+        _local_sessions[cid] = []
+        _local_active = cid
+    elif _local_active not in _local_sessions:
+        _local_active = next(iter(_local_sessions))
+
+
+def _local_save():
+    """Persist chats. Caller holds lock."""
+    try:
+        LOCAL_CHATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LOCAL_CHATS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"sessions": _local_sessions,
+                                   "active": _local_active},
+                                  ensure_ascii=False, indent=2))
+        os.replace(tmp, LOCAL_CHATS_FILE)
+    except Exception:
+        pass
+
+
+def _local_title(messages: list) -> str:
+    """Derive a short title from the first user message, or empty."""
+    for m in messages:
+        if m.get("role") == "user":
+            t = (m.get("content") or "").strip().splitlines()[0]
+            return (t[:40] + "…") if len(t) > 40 else t
+    return ""
+
+
+def _local_current() -> list:
+    """Return the active chat's message list. Caller holds lock."""
+    if _local_active not in _local_sessions:
+        _local_load()
+    return _local_sessions[_local_active]
+
+
+_local_load()
 
 _submissions_cache: dict = {"data": [], "ts": 0.0}
 _submissions_lock = threading.Lock()
@@ -1176,8 +1231,23 @@ class Handler(BaseHTTPRequestHandler):
             self._send_bytes(html, "text/html; charset=utf-8")
         elif self.path == "/local/history":
             with _local_lock:
-                visible = [m for m in _local_history if m["role"] != "system"]
-            self._send_json({"messages": visible})
+                hist = _local_current()
+                visible = [m for m in hist if m["role"] != "system"]
+            self._send_json({"messages": visible, "chat_id": _local_active})
+        elif self.path == "/local/chats":
+            with _local_lock:
+                items = []
+                for cid, msgs in _local_sessions.items():
+                    items.append({"id": cid,
+                                  "title": _local_title(msgs) or "(empty)",
+                                  "turns": sum(1 for m in msgs if m.get("role") == "user")})
+                items.sort(key=lambda x: x["id"], reverse=True)
+                self._send_json({"chats": items, "active": _local_active})
+        elif self.path == "/local/thinking":
+            self._send_json({
+                "enabled": local_agent.ENABLE_THINKING,
+                "effort": local_agent.REASONING_EFFORT,
+            })
         else:
             self.send_response(404)
             self.end_headers()
@@ -1435,6 +1505,11 @@ class Handler(BaseHTTPRequestHandler):
                     if _local_busy:
                         return self._send_json({"error": "busy"}, status=409)
                     _local_busy = True
+                # Clear any sticky cancel flag left over from a prior survey-agent
+                # stop. Without this the first /local/chat after Stop fires
+                # Cancelled on the very first cancel.check() and the user sees
+                # an immediate "Stopped".
+                cancel.reset()
                 body = self._read_json()
                 msg = str(body.get("message", "")).strip()
                 if not msg:
@@ -1444,10 +1519,13 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     events = []
                     response = ""
-                    for ev in local_agent.run_chat(msg, _local_history):
+                    hist = _local_current()
+                    for ev in local_agent.run_chat(msg, hist):
                         events.append(ev)
                         if ev.get("type") == "response":
                             response = ev.get("content", "")
+                    with _local_lock:
+                        _local_save()
                     self._send_json({"ok": True, "response": response, "events": events})
                 except Exception as e:
                     self._send_json({"error": str(e)}, status=500)
@@ -1458,8 +1536,62 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/local/clear":
                 with _local_lock:
-                    _local_history.clear()
+                    _local_current().clear()
+                    _local_save()
                 return self._send_json({"ok": True})
+
+            if self.path == "/local/chats/new":
+                global _local_active
+                with _local_lock:
+                    cid = f"chat-{int(time.time()*1000)}"
+                    _local_sessions[cid] = []
+                    _local_active = cid
+                    _local_save()
+                return self._send_json({"ok": True, "chat_id": cid})
+
+            if self.path == "/local/chats/switch":
+                body = self._read_json()
+                cid = str(body.get("chat_id", ""))
+                with _local_lock:
+                    if cid not in _local_sessions:
+                        return self._send_json({"error": "no such chat"}, status=404)
+                    _local_active = cid
+                    _local_save()
+                return self._send_json({"ok": True, "chat_id": cid})
+
+            if self.path == "/local/chats/delete":
+                body = self._read_json()
+                cid = str(body.get("chat_id", ""))
+                with _local_lock:
+                    if cid not in _local_sessions:
+                        return self._send_json({"error": "no such chat"}, status=404)
+                    del _local_sessions[cid]
+                    if _local_active == cid:
+                        if _local_sessions:
+                            _local_active = next(iter(_local_sessions))
+                        else:
+                            new_id = f"chat-{int(time.time()*1000)}"
+                            _local_sessions[new_id] = []
+                            _local_active = new_id
+                    _local_save()
+                return self._send_json({"ok": True, "active": _local_active})
+
+            if self.path == "/local/thinking":
+                body = self._read_json()
+                if "enabled" in body:
+                    local_agent.ENABLE_THINKING = bool(body["enabled"])
+                if "effort" in body:
+                    eff = str(body["effort"]).lower()
+                    # This Qwen build rejects "high"; keep the UI label but
+                    # send what the model's chat template accepts.
+                    eff = {"high": "xhigh"}.get(eff, eff)
+                    if eff in ("low", "medium", "xhigh"):
+                        local_agent.REASONING_EFFORT = eff
+                return self._send_json({
+                    "ok": True,
+                    "enabled": local_agent.ENABLE_THINKING,
+                    "effort": local_agent.REASONING_EFFORT,
+                })
 
             self.send_response(404)
             self.end_headers()

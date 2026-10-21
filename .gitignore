@@ -24,3 +24,5 @@ fixtures/*/_*.png
 STOP
 *.out
 !bench/*.out
+
+agent/local_chats.json

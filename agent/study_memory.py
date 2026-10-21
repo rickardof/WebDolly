@@ -173,22 +173,19 @@ def user_hints_for(url: str) -> str:
     bullets = "\n".join(f"  - {h.get('text', '')}" for h in hints[-MAX_USER_HINTS_PER_DOMAIN:])
     block = (f'[Things the user told you before on {domain} (apply when relevant, '
              f'do not repeat past mistakes):\n{bullets}]\n')
-    # Imperative escalation: Fara tends to call run_js once and then revert
-    # to visual clicking. If the user has had to repeat the JS request, the
-    # passive bullet list isn't enough — prepend a direct order.
-    js_kw = ("js", "javascript", "script", "run_js", "veloce", "velocement",
-             "fast", "faster", "batch", "loop")
-    js_hits = sum(1 for h in hints
-                  if any(k in h.get("text", "").lower() for k in js_kw))
-    if js_hits >= 2:
-        block = (f'[DIRECTIVE on {domain}: user has asked {js_hits} times to '
-                 f'use run_js batch loops here. On any repetitive '
-                 f'select+submit survey, write ONE run_js that iterates '
-                 f'(while/for) over trials: find next select button → click '
-                 f'→ await humanDelay() → click submit → await humanDelay() '
-                 f'→ wait for next trial to load → repeat until no more '
-                 f'trials. Do NOT revert to visual clicking after a single '
-                 f'successful run_js call.]\n' + block)
+    # Imperative escalation: if the user has repeatedly asked for speed/efficiency
+    # on this domain, prepend a stronger directive so the model actually follows.
+    speed_kw = ("veloce", "velocement", "fast", "faster", "quickly",
+                "speed", "efficien", "ritmo", "rhythm")
+    speed_hits = sum(1 for h in hints
+                     if any(k in h.get("text", "").lower() for k in speed_kw))
+    if speed_hits >= 2:
+        block = (f'[DIRECTIVE on {domain}: user has asked {speed_hits} times '
+                 f'to work faster/more efficiently here. On repetitive '
+                 f'select+submit surveys, develop a fast clicking rhythm: '
+                 f'select → scroll to submit → click submit → wait for next '
+                 f'trial → repeat. Do NOT hesitate between trials. Vary '
+                 f'your selections naturally — never straight-line.]\n' + block)
     return block
 
 

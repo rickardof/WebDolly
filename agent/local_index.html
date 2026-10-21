@@ -136,6 +136,69 @@ body {
   cursor: pointer;
 }
 .toggle-browser:hover { border-color: var(--accent); }
+.think-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--fg2);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.think-ctrl select, .think-ctrl input {
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chats-panel {
+  width: 200px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chats-panel.hidden { display: none; }
+.chats-panel .header {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--fg2);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.chats-panel .header button {
+  font-size: 14px;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 8px;
+  cursor: pointer;
+  line-height: 20px;
+}
+.chats-panel .list { flex: 1; overflow-y: auto; }
+.chat-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-item:hover { background: var(--bg); }
+.chat-item.active { background: var(--bg); border-left: 2px solid var(--accent); }
+.chat-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-item .del { color: var(--fg2); font-size: 11px; opacity: 0; }
+.chat-item:hover .del { opacity: 0.6; }
+.chat-item .del:hover { opacity: 1; color: #e55; }
 
 /* ── Messages ── */
 .messages {
@@ -194,6 +257,32 @@ body {
   background: transparent;
   color: var(--red);
   font-size: 12px;
+}
+.msg.think {
+  align-self: flex-start;
+  background: #0f172a;
+  color: #94a3b8;
+  padding: 6px 12px;
+  font-size: 12px;
+  max-width: 85%;
+  cursor: pointer;
+}
+.msg.think summary {
+  color: #64748b;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 10px;
+  user-select: none;
+}
+.msg.think .think-body {
+  margin: 8px 0 0 0;
+  max-height: 320px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: #cbd5e1;
 }
 .thinking {
   align-self: flex-start;
@@ -264,12 +353,29 @@ body {
   <span class="dot" id="healthDot"></span>
   <span class="model-label active" id="modelLabel">—</span>
   <span class="spacer"></span>
+  <span class="think-ctrl" title="Qwen reasoning mode">
+    <input type="checkbox" id="thinkOn" onchange="setThinking()">
+    <label for="thinkOn">think</label>
+    <select id="thinkEffort" onchange="setThinking()">
+      <option value="low">low</option>
+      <option value="medium" selected>medium</option>
+      <option value="xhigh">high</option>
+    </select>
+  </span>
+  <button class="toggle-browser" onclick="toggleChats()">Chats</button>
   <button class="toggle-browser" onclick="toggleBrowser()">Browser</button>
   <button id="switchBtn" onclick="switchModel()">Switch to Web Agent</button>
   <a href="/">Web Agent</a>
 </div>
 
 <div class="main">
+  <div class="chats-panel" id="chatsPanel">
+    <div class="header">
+      <span>Chats</span>
+      <button onclick="newChat()" title="New chat">+</button>
+    </div>
+    <div class="list" id="chatsList"></div>
+  </div>
   <div class="chat-panel">
     <div class="messages" id="messages"></div>
     <div class="input-bar">
@@ -394,6 +500,21 @@ function addToolMsg(name, content, isResult) {
   return d;
 }
 
+function addThinkMsg(text) {
+  const d = document.createElement('details');
+  d.className = 'msg think';
+  const summary = document.createElement('summary');
+  summary.textContent = 'thinking · ' + text.length + ' chars';
+  const body = document.createElement('pre');
+  body.className = 'think-body';
+  body.textContent = text;
+  d.appendChild(summary);
+  d.appendChild(body);
+  $msgs.appendChild(d);
+  $msgs.scrollTop = $msgs.scrollHeight;
+  return d;
+}
+
 function addThinking() {
   const d = document.createElement('div');
   d.className = 'thinking';
@@ -446,6 +567,8 @@ async function send() {
           addToolMsg(ev.name, JSON.stringify(ev.args, null, 2), false);
         } else if (ev.type === 'tool_result') {
           addToolMsg(ev.name, ev.result, true);
+        } else if (ev.type === 'think') {
+          addThinkMsg(ev.text);
         } else if (ev.type === 'browsing') {
           $browserUrl.textContent = ev.url;
           refreshBrowser();
@@ -465,6 +588,7 @@ async function send() {
   $sendBtn.disabled = false;
   $input.focus();
   refreshBrowser();
+  loadChats();
 }
 
 // Auto-resize textarea
@@ -472,6 +596,130 @@ $input.addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 150) + 'px';
 });
+
+// Load existing chat history so a page refresh (or opening /local in a new
+// tab) does not look like the memory was wiped. Server keeps history in
+// _local_history and exposes it via /local/history.
+// Split "<think>...</think> visible" into {thinking, visible} so a reloaded
+// page shows past thinking as its own collapsible block, like a live reply.
+function splitThink(text) {
+  const parts = [];
+  let visible = (text || '').replace(/<think>([\s\S]*?)<\/think>/g, (_, g) => {
+    parts.push(g); return '';
+  });
+  const m = visible.match(/<think>([\s\S]*)$/);
+  if (m) { parts.push(m[1]); visible = visible.slice(0, m.index); }
+  visible = visible.trim();
+  const thinking = parts.map(p => p.trim()).filter(Boolean).join('\n').trim();
+  if (!visible && thinking) visible = (text || '').replace(/<\/?think>/g, '').trim();
+  return {thinking, visible};
+}
+
+// ── Chats sidebar ──
+const $chatsPanel = document.getElementById('chatsPanel');
+const $chatsList = document.getElementById('chatsList');
+
+function toggleChats() { $chatsPanel.classList.toggle('hidden'); }
+
+async function loadChats() {
+  try {
+    const r = await fetch('/local/chats');
+    const d = await r.json();
+    $chatsList.innerHTML = '';
+    for (const c of (d.chats || [])) {
+      const row = document.createElement('div');
+      row.className = 'chat-item' + (c.id === d.active ? ' active' : '');
+      row.innerHTML = '<span class="title"></span><span class="del">×</span>';
+      row.querySelector('.title').textContent = c.title + ' (' + c.turns + ')';
+      row.onclick = (e) => {
+        if (e.target.classList.contains('del')) return;
+        switchChat(c.id);
+      };
+      row.querySelector('.del').onclick = (e) => {
+        e.stopPropagation();
+        deleteChat(c.id);
+      };
+      $chatsList.appendChild(row);
+    }
+  } catch(e) {}
+}
+
+async function newChat() {
+  if (busy) return;
+  await fetch('/local/chats/new', {method: 'POST'});
+  $msgs.innerHTML = '';
+  await loadChats();
+}
+
+async function switchChat(cid) {
+  if (busy) return;
+  await fetch('/local/chats/switch', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({chat_id: cid})
+  });
+  $msgs.innerHTML = '';
+  await loadHistory();
+  await loadChats();
+}
+
+async function deleteChat(cid) {
+  if (busy) return;
+  if (!confirm('Delete this chat?')) return;
+  await fetch('/local/chats/delete', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({chat_id: cid})
+  });
+  $msgs.innerHTML = '';
+  await loadHistory();
+  await loadChats();
+}
+
+// ── Thinking controls ──
+const $thinkOn = document.getElementById('thinkOn');
+const $thinkEffort = document.getElementById('thinkEffort');
+
+async function loadThinking() {
+  try {
+    const r = await fetch('/local/thinking');
+    const d = await r.json();
+    $thinkOn.checked = !!d.enabled;
+    if (d.effort) $thinkEffort.value = d.effort;
+  } catch(e) {}
+}
+
+async function setThinking() {
+  try {
+    await fetch('/local/thinking', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: $thinkOn.checked, effort: $thinkEffort.value})
+    });
+  } catch(e) {}
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch('/local/history');
+    const d = await r.json();
+    for (const m of (d.messages || [])) {
+      if (m.role === 'user') addMsg('user', m.content || '');
+      else if (m.role === 'tool') addToolMsg(m.name || 'tool', m.content || '', true);
+      else if (m.role === 'assistant') {
+        if (m.tool_calls) {
+          for (const tc of m.tool_calls) {
+            const fn = tc.function || {};
+            addToolMsg(fn.name || 'tool', fn.arguments || '', false);
+          }
+        }
+        const {thinking, visible} = splitThink(m.content || '');
+        if (thinking) addThinkMsg(thinking);
+        if (visible) addMsg('assistant', visible);
+      }
+    }
+  } catch(e) {}
+}
+loadHistory();
+loadChats();
+loadThinking();
 
 $input.focus();
 </script>

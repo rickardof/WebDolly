@@ -11,7 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     python3 \
     python3-pip \
+    locales \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# Generate it_IT locale so xdotool and Chromium report coherent locale data
+# matching the user's actual geolocation (Italy).
+RUN sed -i '/it_IT.UTF-8/s/^# //' /etc/locale.gen && locale-gen
 
 RUN pip install --break-system-packages --no-cache-dir websocket-client
 
@@ -35,12 +41,9 @@ COPY policy.json /etc/chromium/policies/managed/fara-policy.json
 USER browser
 ENV HOME=/home/browser
 ENV DISPLAY=:99
-# Debian's default locale is POSIX/C, under which xdotool can't interpret
-# multi-byte UTF-8 (any accented/non-ASCII character) and aborts entirely
-# instead of typing it. C.utf8 is a built-in glibc locale, no locale-gen
-# needed.
-ENV LANG=C.utf8
-ENV LC_ALL=C.utf8
+ENV LANG=it_IT.UTF-8
+ENV LC_ALL=it_IT.UTF-8
+ENV TZ=Europe/Rome
 
 EXPOSE 9222 5900
 

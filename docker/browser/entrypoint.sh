@@ -43,5 +43,7 @@ exec chromium \
   --disable-session-crashed-bubble \
   --disable-translate \
   --disable-features=Translate,Autofill \
+  --disable-blink-features=AutomationControlled \
+  --lang=it-IT \
   --user-data-dir=/home/browser/chromium-profile \
   "file:///data/test.html"

@@ -26,6 +26,8 @@ import base64
 import gzip
 import io
 import json
+import math
+import random
 import shutil
 import subprocess
 import time
@@ -137,16 +139,91 @@ MODIFIER_KEYSYMS = {"ctrl", "alt", "shift", "super", "meta"}
 
 
 def docker_exec(*args):
-    # The container's default locale is POSIX/C, under which xdotool can't
-    # interpret multi-byte UTF-8 (e.g. any accented character) and aborts
-    # entirely with "Invalid multi-byte sequence encountered" -- seen in
-    # production typing an Italian answer containing e.g. "perché". Force
-    # a UTF-8 locale on every exec; harmless for commands that don't care
-    # (scrot, cdp.py).
     return subprocess.run(
-        ["docker", "exec", "-e", "LANG=C.utf8", "-e", "LC_ALL=C.utf8", CONTAINER, *args],
+        ["docker", "exec", "-e", "LANG=it_IT.UTF-8", "-e", "LC_ALL=it_IT.UTF-8", CONTAINER, *args],
         capture_output=True, text=True, check=True,
     )
+
+
+# ── Human-like mouse movement ──────────────────────────────────────
+def _get_cursor_pos() -> tuple[int, int]:
+    """Current cursor position via xdotool."""
+    try:
+        out = docker_exec("xdotool", "getmouselocation", "--shell")
+        vals = {}
+        for line in out.stdout.strip().split("\n"):
+            k, _, v = line.partition("=")
+            vals[k] = int(v)
+        return vals.get("X", 0), vals.get("Y", 0)
+    except Exception:
+        return 0, 0
+
+
+def _bezier_path(x0, y0, x1, y1):
+    """Generate a list of (x, y) waypoints along a quadratic Bézier curve
+    with a random control point (simulates natural hand arc)."""
+    dist = math.hypot(x1 - x0, y1 - y0)
+    n_points = max(8, min(45, int(dist / 15) + random.randint(3, 10)))
+
+    # Control point: offset perpendicular to the line, random side & magnitude
+    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    if dist > 1:
+        nx, ny = -(y1 - y0) / dist, (x1 - x0) / dist
+    else:
+        nx, ny = 0, 1
+    bulge = random.gauss(0, dist * 0.15)
+    cx, cy = mx + nx * bulge, my + ny * bulge
+
+    points = []
+    for i in range(n_points + 1):
+        t = i / n_points
+        bx = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t ** 2 * x1
+        by = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t ** 2 * y1
+        # Gaussian jitter, smaller near endpoints for natural easing
+        ease = 4 * t * (1 - t)  # peaks at 0.5
+        jx = random.gauss(0, 0.8 * ease + 0.2)
+        jy = random.gauss(0, 0.8 * ease + 0.2)
+        points.append((int(round(bx + jx)), int(round(by + jy))))
+    # Ensure we end exactly on target
+    points[-1] = (int(round(x1)), int(round(y1)))
+    return points
+
+
+def _human_move(x: int, y: int):
+    """Move cursor to (x, y) along a natural-looking Bézier curve."""
+    cx, cy = _get_cursor_pos()
+    path = _bezier_path(cx, cy, x, y)
+    # Single xdotool invocation with chained mousemove+sleep commands.
+    args = []
+    for i, (px, py) in enumerate(path):
+        args += ["mousemove", str(px), str(py)]
+        if i < len(path) - 1:
+            t = i / max(1, len(path) - 1)
+            ease = 1.0 + 2.0 * (1 - 4 * (t - 0.5) ** 2)
+            delay = random.uniform(0.003, 0.012) * ease
+            args += ["sleep", f"{delay:.4f}"]
+    docker_exec("xdotool", *args)
+
+
+def _human_type(text: str):
+    """Type text character by character with human-like timing."""
+    if len(text) <= 6:
+        docker_exec("xdotool", "type", "--clearmodifiers", text)
+        return
+    # Single xdotool invocation: chain type + sleep per character.
+    args = []
+    for i, ch in enumerate(text):
+        args += ["type", "--clearmodifiers", ch]
+        if i < len(text) - 1:
+            delay = random.uniform(0.03, 0.12)
+            if ch in " \t":
+                delay += random.uniform(0.05, 0.25)
+            elif ch in ".,;:!?\n":
+                delay += random.uniform(0.08, 0.35)
+            if random.random() < 0.04:
+                delay += random.uniform(0.2, 0.6)
+            args += ["sleep", f"{delay:.4f}"]
+    docker_exec("xdotool", *args)
 
 
 def take_screenshot(run_dir: Path, step: int) -> Image.Image:
@@ -1074,22 +1151,6 @@ def _near_checkbox_state(x: float, y: float):
         return None
 
 
-def _js_click_near_checkbox(x: float, y: float):
-    """JS-click the nearest checkbox within 80px (fallback for missed clicks)."""
-    _JS = """([x, y]) => {
-        const cbs = [...document.querySelectorAll('input[type=checkbox]')];
-        let best = null, minD = Infinity;
-        for (const cb of cbs) {
-            const r = cb.getBoundingClientRect();
-            const d = Math.hypot(r.left + r.width/2 - x, r.top + r.height/2 - y);
-            if (d < 80 && d < minD) { minD = d; best = cb; }
-        }
-        if (best) best.click();
-    }"""
-    try:
-        pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
-    except Exception:
-        pass
 
 
 def _check_disabled_near(x: float, y: float) -> bool:
@@ -1120,43 +1181,51 @@ def dispatch_action(action_type: str, args: dict) -> str:
     if action_type == "left_click":
         x, y = args["coordinate"]
         cb_before = _near_checkbox_state(x, y)
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)), "click", "1")
+        _human_move(round(x), round(y))
+        docker_exec("xdotool", "click", "1")
         if cb_before is not None:
             cb_after = _near_checkbox_state(x, y)
             if cb_after == cb_before:
-                _js_click_near_checkbox(x, y)
+                # Retry with slightly offset coords instead of JS click
+                ox = round(x) + random.choice([-3, -2, 2, 3])
+                oy = round(y) + random.choice([-3, -2, 2, 3])
+                _human_move(ox, oy)
+                docker_exec("xdotool", "click", "1")
         return f"left_click at ({x:.0f},{y:.0f})"
 
     if action_type == "double_click":
         x, y = args["coordinate"]
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)), "click", "--repeat", "2", "1")
+        _human_move(round(x), round(y))
+        docker_exec("xdotool", "click", "--repeat", "2", "1")
         return f"double_click at ({x:.0f},{y:.0f})"
 
     if action_type == "right_click":
         x, y = args["coordinate"]
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)), "click", "3")
+        _human_move(round(x), round(y))
+        docker_exec("xdotool", "click", "3")
         return f"right_click at ({x:.0f},{y:.0f})"
 
     if action_type == "triple_click":
         x, y = args["coordinate"]
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)), "click", "--repeat", "3", "1")
+        _human_move(round(x), round(y))
+        docker_exec("xdotool", "click", "--repeat", "3", "1")
         return f"triple_click at ({x:.0f},{y:.0f})"
 
     if action_type == "mouse_move":
         x, y = args["coordinate"]
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)))
+        _human_move(round(x), round(y))
         return f"mouse_move to ({x:.0f},{y:.0f})"
 
     if action_type == "left_click_drag":
         x, y = args["coordinate"]
         docker_exec("xdotool", "mousedown", "1")
-        docker_exec("xdotool", "mousemove", str(round(x)), str(round(y)))
+        _human_move(round(x), round(y))
         docker_exec("xdotool", "mouseup", "1")
         return f"left_click_drag to ({x:.0f},{y:.0f})"
 
     if action_type == "type":
         text = str(args.get("text", ""))
-        docker_exec("xdotool", "type", "--clearmodifiers", text)
+        _human_type(text)
         return f"type ({len(text)} chars)"
 
     if action_type == "key":
@@ -1228,33 +1297,8 @@ def dispatch_action(action_type: str, args: dict) -> str:
         return f"wait {duration}s"
 
     if action_type == "run_js":
-        code = args.get("code", "")
-        if not code.strip():
-            return "run_js: no code provided"
-        stripped = code.strip()
-        # humanDelay helper, injected so batch loops look human-paced.
-        _JS_HELPERS = (
-            "const humanDelay = (min=800,max=2000) => "
-            "new Promise(r => setTimeout(r, min + Math.random()*(max-min)));\n"
-        )
-        # Always make helpers available. The model often wraps its code in its
-        # own IIFE despite being told not to; wrapping that IIFE in an outer
-        # scope that defines the helpers lets the inner code close over them
-        # (otherwise humanDelay is undefined and the whole script throws).
-        if stripped.startswith('(') and stripped.rstrip(';').endswith(')'):
-            wrapped = f"(async () => {{ {_JS_HELPERS}return await ({stripped}); }})()"
-        else:
-            wrapped = f"(async () => {{ {_JS_HELPERS}{stripped} }})()"
-        try:
-            result = pw_bridge.run(
-                lambda b: b.active_page().evaluate(wrapped),
-                timeout=120)
-            if result is None:
-                return ("run_js: completed (no return value). The code ran but "
-                        "returned nothing — check the next screenshot for effects.")
-            return f"run_js: {str(result)[:500]}"
-        except Exception as e:
-            return f"run_js error: {type(e).__name__}: {str(e)[:200]}"
+        return ("run_js is disabled — it triggers bot detection. "
+                "Use normal clicks and keyboard actions instead.")
 
     if action_type in ("pause_and_memorize_fact", "read_page_answer_question"):
         return f"{action_type} (not implemented, no-op)"
@@ -1412,16 +1456,13 @@ _STANDING_RULES_FULL = (
     "(e.g. 'I use AI tools every day' if the persona does). You must NEVER invent facts that "
     "directly contradict the given persona (age, nationality, profession, stated experience), "
     "and never claim qualifications the persona does not have.\n"
-    "7. Speed: when a survey has many identical repeated trials (e.g. 60 A/B comparisons, "
-    "repeated Likert scales), use `run_js` to batch-complete them in one step instead of "
-    "clicking through each one manually. Write JS that clicks the selection button, submits, "
-    "waits for the next trial to load, and repeats in a loop for the remaining trials. "
-    "CRITICAL: call `await humanDelay()` between each iteration (it is pre-defined and "
-    "waits 0.8–2s randomly) — never run a tight loop without it. "
-    "IMPORTANT: use standard DOM APIs only — ':contains()' is NOT valid CSS. To find a "
-    "button by text, use: Array.from(document.querySelectorAll('button'))"
-    ".find(b => b.textContent.includes('Submit')). Do NOT wrap your code in (async () => "
-    "{ ... })() — the runner already does that."
+    "7. Repetitive trials: when a survey has many identical repeated trials (e.g. 60 A/B "
+    "comparisons, repeated Likert scales), work through them efficiently with normal clicks — "
+    "develop a fast rhythm: select option, scroll to submit, click submit, wait for next trial. "
+    "Do NOT use run_js (it is disabled). Vary your selections when uncertain — never pick "
+    "the same column/option for every single trial (straight-lining triggers rejection). "
+    "Follow any guidance from past user corrections shown in the [Things the user told you] "
+    "section — they carry across studies on the same domain."
 )
 
 _STANDING_RULES_COMPACT = (
@@ -1434,9 +1475,8 @@ _STANDING_RULES_COMPACT = (
     "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
     "5. Respect minimum time — wait if timer says time remains. "
     "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
-    "7. For repetitive trials (many A/B comparisons, repeated scales), use run_js to batch them "
-    "in one step. Call `await humanDelay()` between iterations (pre-defined, 0.8-2s). "
-    "Use standard DOM APIs — ':contains()' is NOT CSS. Do NOT wrap in (async () => {})()."
+    "7. Repetitive trials: work through them efficiently with normal clicks. "
+    "Do NOT use run_js. Vary selections — never straight-line."
 )
 
 
@@ -1570,10 +1610,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         study_timer = StudyTimer()
         _last_guarded_duration: float | None = None  # persists across clicks within a study entry
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
+        _prev_here: str = ""  # URL at the previous step, for detecting navigation landings
         _current_study_id: str | None = None  # id of the study being looked at / taken
         _current_study_title: str = ""  # its name, read on Prolific while we can still see it
         _seen_codes: list = []  # completion codes spotted on the study's own pages
-        _used_run_js: bool = False  # whether run_js was used during this cycle
+        # _used_run_js removed — run_js is disabled for anti-detection
         _survey_url: str = ""  # URL of the external survey (for study_memory)
 
         def _record_user_correction(text: str) -> None:
@@ -1707,6 +1748,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 dur_str = f" (~{effective_duration:.0f} min)" if effective_duration else ""
                 _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
             _prev_was_guarded = here_guarded
+            # Keep the previous URL available for the just_landed check in the
+            # dwell block below. _prev_here must be updated at the END of the
+            # step, not here, or the check never sees a different value.
 
             # Reset timer when back at the studies list (timer re-arms for next study).
             on_list = here_guarded and bool(_LIST_PATH.match(urlparse(here).path or ""))
@@ -1806,8 +1850,69 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 # the list. The run_js batch hint is survey-specific, so it
                 # stays gated on an active study timer.
                 mem_hint = study_memory.user_hints_for(here)
-                if not here_guarded and study_timer.is_active():
-                    mem_hint += study_memory.hint_for(here)
+
+            # Reading dwell: simulate the time a human spends scanning the
+            # page before acting. Only on survey pages (not the Prolific list
+            # where there is no question to "read") and only from step 2
+            # onward (step 1 has its own resume delay). Proportional to
+            # visible text length, capped at 8s.
+            if step > 1 and not on_list and not here_guarded:
+                # Landing behaviour: when the URL just changed (navigation
+                # landed, redirect finished, or a new survey page replaced
+                # the previous one), a human spends an extra ~1-2s orienting
+                # and often micro-scrolls before reading. Keyed on path or
+                # host change — a pure hash fragment change (SPA tab switch)
+                # does not re-trigger it, keeping repeated-trial surveys fast.
+                def _path_key(u: str) -> str:
+                    try:
+                        p = urlparse(u); return f"{p.netloc}{p.path}"
+                    except Exception:
+                        return u
+                just_landed = bool(_prev_here) and _path_key(here) != _path_key(_prev_here)
+                try:
+                    if just_landed:
+                        # Orient idle: short settle before even reading.
+                        cancel.sleep(random.uniform(0.6, 1.6))
+                        # Micro-scroll with a bell-curve of small deltas,
+                        # then a smaller reversal (humans often overshoot
+                        # and come back). Skipped on the Prolific list via
+                        # the outer guard.
+                        if random.random() < 0.75:
+                            total_down = random.randint(60, 150)
+                            steps_down = random.choice([3, 4, 5])
+                            # Bell-ish distribution: peak in the middle
+                            weights = [1, 3, 5, 3, 1][:steps_down]
+                            total_w = sum(weights)
+                            for w in weights:
+                                px = int(round(total_down * w / total_w))
+                                n = max(1, px // 40)
+                                # --repeat without --delay fires all wheel
+                                # events in <10ms, which looks mechanical;
+                                # a 25-60ms gap between notches matches a
+                                # real wheel's natural burst cadence.
+                                docker_exec("xdotool", "click",
+                                            "--repeat", str(n),
+                                            "--delay", str(random.randint(25, 60)),
+                                            "5")
+                                cancel.sleep(random.uniform(0.03, 0.08))
+                            cancel.sleep(random.uniform(0.3, 0.8))
+                            # Return a bit (not all the way) ~60% of the time.
+                            if random.random() < 0.6:
+                                up_px = int(total_down * random.uniform(0.3, 0.7))
+                                n_up = max(1, up_px // 40)
+                                docker_exec("xdotool", "click",
+                                            "--repeat", str(n_up),
+                                            "--delay", str(random.randint(30, 70)),
+                                            "4")
+                                cancel.sleep(random.uniform(0.15, 0.45))
+                    page_text = _end_page_text(limit=3000)
+                    dwell = min(5.0, max(1.5, len(page_text) * 0.035))
+                    dwell *= random.uniform(0.7, 1.3)
+                    cancel.sleep(dwell)
+                except cancel.Cancelled:
+                    raise
+                except Exception:
+                    pass
 
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
@@ -1941,16 +2046,6 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
 
-            if action_type == "run_js" and not result_desc.startswith("run_js error"):
-                _used_run_js = True
-            elif action_type == "run_js" and result_desc.startswith("run_js error"):
-                # Surface the actual JS error so the model can fix its code
-                # instead of guessing from the screenshot (which it does badly).
-                pending_user_response = (
-                    f"Your run_js code threw an error and did NOT run: {result_desc}\n"
-                    "Read the error above, fix your JavaScript, and try again. "
-                    "Helpers like humanDelay() are already defined — do not redefine them.")
-
             if action_type == "left_click" and not pending_user_response:
                 coord = args.get("coordinate")
                 if coord and _check_disabled_near(coord[0], coord[1]):
@@ -2023,7 +2118,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if answer.startswith("CODE:") or answer == "NOCODE":
                     _notify_telegram(f"Fara studio completato ✅\n{answer}\nCiclo: {run_dir.name if run_dir else '?'}")
                 if _survey_url:
-                    study_memory.record(_survey_url, run_js_used=_used_run_js,
+                    study_memory.record(_survey_url,
                                         steps=step, outcome=answer[:20])
                 yield {"type": "done", "answer": answer, "messages": messages}
                 return
@@ -2036,6 +2131,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if injected:
                 pending_user_response = injected
                 _record_user_correction(injected)
+            # Snapshot `here` for the next step's just_landed check. Done at
+            # the END of the step so the comparison at the top of the next
+            # step sees the previous URL, not the one we just set.
+            _prev_here = here
             # No fixed settle delay here: measured at 0.5s against a ~9.3s
             # step it was ~5% of wall-clock for no benefit -- the next
             # thing the loop does is take a screenshot, and actions that

@@ -20,8 +20,10 @@ reused, not copied); what changes is everything that touches the browser:
 """
 
 import json
+import random
 import time
 
+import cancel
 import form_fill as base
 import pw_bridge
 
@@ -265,9 +267,15 @@ def _raw_click(session, frame, tag) -> bool:
         return False
     dx, dy = _frame_offset(frame)
     x, y = aim["x"] + dx, aim["y"] + dy
-    for t in ("mousePressed", "mouseReleased"):
-        session.send("Input.dispatchMouseEvent",
-                     {"type": t, "x": x, "y": y, "button": "left", "clickCount": 1})
+    # Small jitter on click coordinates (humans never hit the exact pixel)
+    x += random.uniform(-2, 2)
+    y += random.uniform(-2, 2)
+    session.send("Input.dispatchMouseEvent",
+                 {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+    # Brief hold between press and release (50-120ms, like a real click)
+    time.sleep(random.uniform(0.05, 0.12))
+    session.send("Input.dispatchMouseEvent",
+                 {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
     return True
 
 
@@ -297,13 +305,35 @@ def _select_option_el(session, frame, tag):
 
 
 def _type_text(session, frame, tag, text: str):
-    """Replace a text box's content with trusted input (CDP insertText
-    fires real beforeinput/input events), falling back to fill()."""
-    if frame.evaluate(_FOCUS_SELECT_JS, tag):
+    """Replace a text box's content with human-like per-word insertion.
+    Breaks text into small chunks (1-3 words) with natural pauses between,
+    instead of inserting the entire string at once (which is a bot tell)."""
+    if not frame.evaluate(_FOCUS_SELECT_JS, tag):
+        STATS["fallback"] += 1
+        frame.locator(_q(tag)).fill(text, timeout=ACTION_TIMEOUT_MS)
+        return
+    # Short strings (codes, numbers): just insert directly
+    if len(text) <= 12:
         session.send("Input.insertText", {"text": text})
-        if frame.evaluate(_VALUE_JS, tag) == text:
-            STATS["fast"] += 1
-            return
+    else:
+        # Break into word-level chunks for natural cadence
+        words = text.split(" ")
+        i = 0
+        while i < len(words):
+            chunk_size = random.randint(1, 3)
+            chunk = " ".join(words[i:i + chunk_size])
+            if i > 0:
+                chunk = " " + chunk
+            session.send("Input.insertText", {"text": chunk})
+            i += chunk_size
+            if i < len(words):
+                try:
+                    cancel.sleep(random.uniform(0.05, 0.25))
+                except Exception:
+                    pass
+    if frame.evaluate(_VALUE_JS, tag) == text:
+        STATS["fast"] += 1
+        return
     STATS["fallback"] += 1
     frame.locator(_q(tag)).fill(text, timeout=ACTION_TIMEOUT_MS)
 
@@ -327,6 +357,36 @@ def _apply_with(session, frames, fields_by_id: dict, answers: dict):
     def frame_of(fid):
         return frames[fields_by_id[fid]["_frame"]]
 
+    # Reading-time distribution per field type. Current 0.3-1.2s was fast
+    # enough that a 10-field survey finished in ~8s where a human takes
+    # 60-180s. These ranges still beat human speed but close the gap to the
+    # point the overall cadence is plausible rather than machine-like.
+    def _read_delay(f: dict) -> float:
+        t = f.get("type")
+        label = (f.get("label") or "") + " " + " ".join(f.get("options") or [])
+        long_q = len(label) > 160
+        if t in ("radio", "select") or f.get("widget") == "listbox":
+            lo, hi = (0.9, 2.2) if long_q else (0.6, 1.5)
+        elif t == "checkbox":
+            lo, hi = (0.8, 1.9) if long_q else (0.5, 1.3)
+        elif t in ("text", "textarea"):
+            lo, hi = (1.6, 3.5) if long_q else (1.1, 2.4)
+        elif t == "date":
+            lo, hi = 0.6, 1.5
+        elif t == "range":
+            lo, hi = 0.6, 1.6
+        else:
+            lo, hi = 0.4, 1.1
+        return random.uniform(lo, hi)
+
+    def _reading_sleep(f: dict):
+        try:
+            cancel.sleep(_read_delay(f))
+        except cancel.Cancelled:
+            raise
+        except Exception:
+            pass
+
     for fid, answer in answers.items():
         f = fields_by_id.get(fid)
         if f is None:
@@ -335,6 +395,10 @@ def _apply_with(session, frames, fields_by_id: dict, answers: dict):
         if f["type"] in ("text", "textarea", "date", "range"):
             freeform.append((fid, answer))  # after choices: they may reveal fields
             continue
+        # Reading delay BEFORE each field — including the first — because a
+        # human reads the first question too, they just land on the page a
+        # fraction earlier (that part is covered by the agent's own dwell).
+        _reading_sleep(f)
         try:
             fr = frame_of(fid)
             if f["type"] in ("radio", "checkbox") or f.get("widget") == "listbox":
@@ -369,6 +433,9 @@ def _apply_with(session, frames, fields_by_id: dict, answers: dict):
 
     for fid, answer in freeform:
         f = fields_by_id[fid]
+        # Text fields deserve the longer reading delay too; they also need
+        # composition time, which _type_text's per-char cadence already covers.
+        _reading_sleep(f)
         try:
             loc = frame_of(fid).locator(_q(fid))
             if f["type"] == "range":
