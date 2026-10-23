@@ -1,0 +1,97 @@
+name: Humanization & Fingerprint E2E
+
+# Runs the end-to-end humanization suite in an isolated test container.
+# Catches: xdotool chained-type regressions (the "sleep0.1131type--clearmodifiers"
+# leak into form fields), accented-char drops when the Xvfb layout drifts,
+# fingerprint patches breaking (deviceMemory, permissions, WebGL, lang/TZ),
+# scroll not firing wheel events on Chromium/Ozone, Bézier mouse path going
+# straight, and typo+backspace cycle leaving garbage in text fields.
+
+on:
+  pull_request:
+    paths:
+      - "agent/agent_core.py"
+      - "agent/pw_bridge.py"
+      - "agent/gui_server.py"
+      - "agent/dashboard.html"
+      - "docker/browser/**"
+      - "docker/browser-pw/**"
+      - "tests/humanization_e2e.py"
+      - "tests/submissions_parse_test.py"
+      - "tests/context_trim_test.py"
+      - ".github/workflows/humanization-tests.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pure-python-tests:
+    # Pure-Python unit tests: parser, context-trim, page-change signal.
+    # No browser needed, runs in seconds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Submissions parser tests
+        run: python tests/submissions_parse_test.py
+      - name: Context trim + page-change signal tests
+        run: python tests/context_trim_test.py
+
+  humanization-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Playwright (sync API, no browsers needed on host)
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright==1.47.0
+
+      - name: Build browser-test image
+        run: |
+          docker build -t fara-browser docker/browser/
+          docker build -t fara-browser-pw docker/browser-pw/
+
+      - name: Prepare runtime dirs
+        run: |
+          mkdir -p var/profiles/test fixtures/test
+          # The entrypoint expects a file at /data/test.html; a stub is fine.
+          echo "<html><body>test</body></html>" > fixtures/test/test.html
+
+      - name: Start test container
+        run: |
+          docker run -d --name fara-browser-test \
+            -e TZ=Europe/Rome -e LANG=it_IT.UTF-8 -e LC_ALL=it_IT.UTF-8 \
+            -p 127.0.0.1:5902:5900 -p 127.0.0.1:9334:9333 \
+            -v "$PWD/var/profiles/test:/home/browser/chromium-profile" \
+            -v "$PWD/fixtures/test:/data" \
+            fara-browser-pw
+          # Wait for CDP
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:9334/json/version > /dev/null; then
+              echo "CDP up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "CDP never came up"; docker logs fara-browser-test; exit 1
+
+      - name: Run humanization + fingerprint suite
+        env:
+          FARA_CONTAINER: fara-browser-test
+          FARA_CDP_URL: http://127.0.0.1:9334
+        run: python tests/humanization_e2e.py
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs fara-browser-test

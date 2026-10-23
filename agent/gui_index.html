@@ -930,7 +930,7 @@ function refreshScreen() {
   img.onerror = () => { screenBusy = false; };
   img.src = '/screen.png?t=' + Date.now();
 }
-setInterval(refreshScreen, 900);
+setInterval(refreshScreen, 1500);
 function updateLiveBadge() {
   const on = (mode === 'stream' ? streamLoaded : Date.now() - lastShot < 3000) && !document.hidden;
   const b = $('liveBadge');
@@ -939,7 +939,7 @@ function updateLiveBadge() {
   b.title = on ? (mode === 'stream' ? 'Video in diretta dal browser dell\'agente' : 'Screenshot periodici: lo stream video non è disponibile')
                : 'Nessuna immagine dal browser';
 }
-setInterval(updateLiveBadge, 1000);
+setInterval(() => { if (!document.hidden) updateLiveBadge(); }, 1500);
 // A hidden tab closes the stream so the capture loop in the container stops too.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) screenImg.removeAttribute('src'); else useStream();
@@ -1111,7 +1111,7 @@ function renderTimer() {
     w.title = 'Studio in corso, nessun tempo minimo rilevato.';
   }
 }
-setInterval(() => { if (stimer.active) renderTimer(); }, 1000);
+setInterval(() => { if (stimer.active && !document.hidden) renderTimer(); }, 1000);
 
 /* ---------- model speed (from /agent/status) ---------- */
 const tpsHist = []; let lastModelKey = '';
@@ -1228,6 +1228,7 @@ function argSummary(ev) {
   return '';
 }
 const cleanThought = t => String(t || '').replace(/<\/?think>/g, '').trim();
+const MAX_FEED_ROWS = 500;
 function addRow(html) {
   const wrap = document.createElement('div'); wrap.innerHTML = html.trim();
   const el = wrap.firstElementChild;
@@ -1238,6 +1239,17 @@ function addRow(html) {
   };
   feed.insertBefore(el, $('liveCard'));   // liveCard + askCard are always last
   feedRO.observe(el);
+  // Cap how many history rows we keep: a 24/7 loop with 80 steps/cycle hit
+  // tens of thousands of rows and dragged the whole page down. Oldest rows
+  // leave the DOM first; liveCard/askCard are pinned at the end and never
+  // match .row, so they are safe.
+  let extra = feed.querySelectorAll('.row').length - MAX_FEED_ROWS;
+  while (extra-- > 0) {
+    const first = feed.querySelector('.row');
+    if (!first) break;
+    try { feedRO.unobserve(first); } catch (_) {}
+    first.remove();
+  }
   return el;
 }
 const timeMeta = (ev, extra = '') => `<span class="meta">${extra}<span class="t">${clock(ev.ts)}</span></span>`;
@@ -1465,7 +1477,7 @@ function renderLive() {
   chip.classList.add('show');
   if (follow) toBottom();
 }
-setInterval(() => { if (live.phase) renderLive(); }, 250);
+setInterval(() => { if (live.phase && !document.hidden) renderLive(); }, 500);
 
 function screenGeom() {
   const v = $('viewer').getBoundingClientRect(), r = screenImg.getBoundingClientRect();
@@ -1582,8 +1594,8 @@ document.addEventListener('keydown', e => {
 
 resetFeed(); showEmptyIfNeeded(); render();
 connectEvents();
-setInterval(() => { if (!sseOpen) poll(); }, 1000);
-setInterval(() => { if (running && startedAt) $('stTime').textContent = fmtTime(Date.now() / 1000 - startedAt); }, 1000);
+setInterval(() => { if (!sseOpen && !document.hidden) poll(); }, 2000);
+setInterval(() => { if (running && startedAt && !document.hidden) $('stTime').textContent = fmtTime(Date.now() / 1000 - startedAt); }, 1000);
 </script>
 </body>
 </html>

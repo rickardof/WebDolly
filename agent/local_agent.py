@@ -34,6 +34,13 @@ MODEL_URL = os.environ.get("FARA_URL", "http://127.0.0.1:8090/v1/chat/completion
 # Working directory for shell/python/relative file paths.
 WORK_DIR = os.environ.get("FARA_LOCAL_WORKDIR", str(Path.home()))
 
+# A per-session scratchpad that files from write_file land in when the model
+# forgets to pass a path. Served by gui_server at /local/scratch/<name> so the
+# user can actually click and view what the model produced (HTML, images, …).
+SCRATCH_DIR = Path(__file__).parent / "qwen_scratch"
+SCRATCH_DIR.mkdir(exist_ok=True)
+SCRATCH_URL_BASE = "http://127.0.0.1:8766/local/scratch/"
+
 SYSTEM_PROMPT = (
     "You are a capable assistant with internet access and full access to the "
     "local machine (files, shell, Python). Use the provided tools when needed:\n"
@@ -42,7 +49,10 @@ SYSTEM_PROMPT = (
     "- run_shell for terminal commands, run_python for Python code\n"
     f"The working directory is {WORK_DIR}. Relative paths resolve from there.\n"
     "Be efficient: after you have what you need, answer concisely. "
-    "For web facts, cite sources. Do not run destructive commands unless the user clearly asks."
+    "For web facts, cite sources. Do not run destructive commands unless the user clearly asks.\n"
+    "When writing files, always pass a non-empty `path`. For large content (>3000 chars), "
+    "split into multiple write_file calls that append sections, or use run_shell with a heredoc; "
+    "oversized single tool arguments get truncated and rejected."
 )
 
 TOOLS_SCHEMA = [
@@ -152,10 +162,19 @@ MAX_FILE_CHARS = 20000
 MAX_OUTPUT_CHARS = 8000
 EXEC_TIMEOUT = 60
 MAX_TOOL_ROUNDS = 8
-MAX_HISTORY_TOKENS = 22000
-MAX_TOOL_HISTORY_CHARS = 6000
-MAX_RESPONSE_TOKENS = 8192
+# The server's context is a hard ceiling shared by prompt + generation. If
+# history is allowed to grow until it nearly fills it, llama.cpp silently
+# clamps generation to whatever is left, which cuts long tool-call arguments
+# mid-string and makes the server reject its own output as unparsable JSON.
+# Budget backwards from the real n_ctx instead.
+MODEL_CTX = int(os.environ.get("FARA_LOCAL_CTX", "32768"))
+MAX_RESPONSE_TOKENS = 12288
 MAX_RETRY_RESPONSE_TOKENS = 4096
+# _message_tokens approximates with len//4, which underestimates markup- and
+# code-heavy turns, so keep a real margin rather than filling to the brim.
+_CTX_SAFETY_MARGIN = 3000
+MAX_HISTORY_TOKENS = max(4000, MODEL_CTX - MAX_RESPONSE_TOKENS - _CTX_SAFETY_MARGIN)
+MAX_TOOL_HISTORY_CHARS = 6000
 ENABLE_THINKING = os.environ.get("FARA_LOCAL_ENABLE_THINKING", "1") == "1"
 # This Qwen variant's chat template only accepts {low, medium, xhigh}; map the
 # conventional "high" label to xhigh so the UI can stay generic.
@@ -262,13 +281,40 @@ def _read_file(path: str) -> str:
 
 
 def _write_file(path: str, content: str) -> str:
+    # Empty / directory-only path: drop into the scratchpad with a guessed
+    # extension so the user still gets a working, viewable file instead of
+    # an [Errno 21] "Is a directory" dump.
+    import time as _t
+    def _guess_ext(c: str) -> str:
+        s = (c or "").lstrip()
+        head = s[:300].lower()
+        if "<!doctype html" in head or "<html" in head:
+            return ".html"
+        if s.startswith("<svg") or "<svg" in head:
+            return ".svg"
+        if s.startswith("{") or s.startswith("["):
+            return ".json"
+        return ".txt"
     try:
-        p = _resolve(path)
+        if not path or not path.strip():
+            p = SCRATCH_DIR / f"out-{int(_t.time())}{_guess_ext(content)}"
+        else:
+            p = _resolve(path)
+            if p.exists() and p.is_dir():
+                name = Path(path).name or f"out-{int(_t.time())}"
+                p = p / f"{name}{_guess_ext(content)}"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
-        return f"Wrote {len(content)} chars to {p}"
+        # If the file landed inside the scratchpad, surface a clickable URL
+        # so the user can view it from the chat UI.
+        try:
+            rel = p.resolve().relative_to(SCRATCH_DIR.resolve())
+            url = SCRATCH_URL_BASE + str(rel)
+            return f"Wrote {len(content)} chars to {p}\nView: {url}"
+        except Exception:
+            return f"Wrote {len(content)} chars to {p}"
     except Exception as e:
-        return f"Failed to write {path}: {e}"
+        return f"Failed to write {path or '(no path)'}: {e}"
 
 
 def _list_dir(path: str) -> str:
@@ -378,10 +424,68 @@ def _is_empty_or_garbage(text: str) -> bool:
     return not text or not re.search(r"[A-Za-z0-9À-ÿ]", text)
 
 
+def _tool_call_args(tc: dict):
+    """Parse a tool call's arguments, or None if the model truncated them."""
+    raw = (tc.get("function") or {}).get("arguments")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _sanitize_history(history: list) -> int:
+    """Drop assistant tool_calls whose arguments are unparsable JSON.
+
+    llama.cpp re-parses stored tool_calls when rendering the chat template, so
+    a single truncated call persisted into history makes every later request
+    fail with the same HTTP 500 -- the conversation is bricked until it is
+    removed. Orphaned tool results are dropped with it, since the API requires
+    each tool message to answer a call that still exists.
+    """
+    removed = 0
+    dropped_ids = set()
+    for m in history:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        good = []
+        for tc in m["tool_calls"]:
+            if _tool_call_args(tc) is None:
+                dropped_ids.add(tc.get("id", ""))
+                removed += 1
+            else:
+                good.append(tc)
+        if len(good) != len(m["tool_calls"]):
+            if good:
+                m["tool_calls"] = good
+            else:
+                m.pop("tool_calls", None)
+                if not (m.get("content") or "").strip():
+                    m["content"] = "(a tool call was dropped: arguments were truncated)"
+    if dropped_ids:
+        history[:] = [m for m in history
+                      if not (m.get("role") == "tool"
+                              and m.get("tool_call_id", "") in dropped_ids)]
+    return removed
+
+
 def _message_tokens(message: dict) -> int:
     """Conservatively estimate serialized message tokens before sending."""
     body = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-    return max(1, (len(body) + 3) // 4)
+    # ~3 chars/token, not 4: markup and code tokenize far denser than prose,
+    # and underestimating here is what lets the prompt crowd out generation.
+    return max(1, (len(body) + 2) // 3)
+
+
+def _response_budget(messages: list) -> int:
+    """Tokens we can still ask for without the server clamping generation."""
+    used = sum(_message_tokens(m) for m in messages)
+    room = MODEL_CTX - used - _CTX_SAFETY_MARGIN
+    return max(1024, min(MAX_RESPONSE_TOKENS, room))
 
 
 # Reserve this fraction of the budget for the recent-turn window; the rest
@@ -486,6 +590,10 @@ def _trim_history(history: list) -> None:
     """Keep recent complete turns, summarizing older ones into a compact note
     merged into the system message so the model retains the gist of prior
     conversation without needing a second system turn."""
+    # Runs before every outgoing request, so a chat already poisoned by a
+    # truncated tool call heals itself on the next message.
+    if _sanitize_history(history):
+        log.warning("Dropped truncated tool_call(s) from history")
     if not history:
         return
 
@@ -581,7 +689,7 @@ def run_chat(user_message: str, history: list, on_event=None):
                 "messages": history,
                 "tools": TOOLS_SCHEMA,
                 "temperature": 0.6,
-                "max_tokens": MAX_RESPONSE_TOKENS,
+                "max_tokens": _response_budget(history),
             }
             if MODEL_URL.startswith(("http://127.0.0.1:", "http://localhost:")):
                 payload["chat_template_kwargs"] = {
@@ -626,9 +734,42 @@ def run_chat(user_message: str, history: list, on_event=None):
             yield {"type": "error", "message": "Stopped"}
             return
         except Exception as e:
-            del history[_user_turn_start:]
-            yield {"type": "error", "message": str(e)}
-            return
+            emsg = str(e)
+            if "Failed to parse tool call arguments" in emsg:
+                # Tool-call JSON got truncated mid-string. This almost always
+                # means thinking burned the budget before the args finished.
+                # Retry once with thinking off and full max_tokens -- the
+                # whole budget now goes to producing a complete call.
+                try:
+                    retry_payload = dict(payload)
+                    retry_payload["chat_template_kwargs"] = {
+                        "enable_thinking": False,
+                        "reasoning_effort": "low",
+                    }
+                    retry_payload["max_tokens"] = _response_budget(history)
+                    result = cancel.post_chat(MODEL_URL, retry_payload, timeout=180)
+                    msg = result["choices"][0]["message"]
+                    thinking, content = _split_think(msg.get("content") or "")
+                    tool_calls = msg.get("tool_calls") or []
+                    finish = result["choices"][0].get("finish_reason", "")
+                    if thinking:
+                        yield {"type": "think", "text": thinking}
+                except cancel.Cancelled:
+                    del history[_user_turn_start:]
+                    yield {"type": "error", "message": "Stopped"}
+                    return
+                except Exception as e2:
+                    del history[_user_turn_start:]
+                    yield {"type": "error", "message": (
+                        "The model's tool call JSON was truncated even after retrying "
+                        "with thinking disabled. Ask it to split the write into smaller "
+                        "chunks or use run_shell with a heredoc."
+                    )}
+                    return
+            else:
+                del history[_user_turn_start:]
+                yield {"type": "error", "message": emsg}
+                return
 
         # Tool calls take precedence over finish_reason. Some llama-server
         # versions omit or vary the reason while still returning valid calls.
@@ -654,6 +795,23 @@ def run_chat(user_message: str, history: list, on_event=None):
                 }
             return
 
+        # A call whose arguments did not survive generation must never reach
+        # history: llama.cpp re-parses stored calls and would fail every later
+        # request. Tell the model instead, so it retries in smaller pieces.
+        broken = [tc for tc in tool_calls if _tool_call_args(tc) is None]
+        tool_calls = [tc for tc in tool_calls if _tool_call_args(tc) is not None]
+        if broken:
+            names = ", ".join(
+                (tc.get("function") or {}).get("name", "?") for tc in broken)
+            history.append({"role": "assistant", "content": (
+                f"(arguments for {names} were truncated and discarded)")})
+            history.append({"role": "user", "content": (
+                f"Your {names} call was cut off mid-argument, so nothing ran. "
+                "Retry by writing the file in several smaller write_file calls "
+                "(under 2000 characters each), or use run_shell with a heredoc.")})
+            if not tool_calls:
+                continue
+
         # Process tool calls
         history.append({"role": "assistant", "content": content,
                         "tool_calls": tool_calls})
@@ -661,10 +819,7 @@ def run_chat(user_message: str, history: list, on_event=None):
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "")
-            try:
-                tool_args = json.loads(fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                tool_args = {}
+            tool_args = _tool_call_args(tc) or {}
             tc_id = tc.get("id", "")
 
             # Loop detection

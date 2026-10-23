@@ -518,10 +518,17 @@ function renderKPIs(runs, prevRuns, A, P, a, b) {
     `<div class="v">${fmtN(A.total)}</div><div class="sub">${deltaHTML(A.total, P ? P.total : null, null)}<span>${isFinite(perHour) ? fmt1(perHour) + ' all\'ora' : ''}</span></div>` +
     sparkSVG(bucketSeries(runs, a, b, 12, () => 1), css('--c-blue')) + `</div>`);
   if (subs.has) {
+    // Delta is dropped when the period mixes currencies: subtracting £ from $
+    // would be meaningless. Shown when exactly one currency is involved in
+    // both the current and the previous period and they match.
     const prevSubs = P ? filteredSubs(a - (b - a), a) : null;
+    const curKeys = Object.keys(subs.earnedByCur).filter(c => subs.earnedByCur[c] > 0);
+    const prevKeys = prevSubs ? Object.keys(prevSubs.earnedByCur).filter(c => prevSubs.earnedByCur[c] > 0) : [];
+    const deltaOK = curKeys.length === 1 && prevKeys.length === 1 && curKeys[0] === prevKeys[0] && period !== 'all';
+    const sym = curKeys[0] || '£';
     tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div>` +
-      `<div class="v">${moneyFmt(subs.earned, subs.cur)}</div><div class="sub">${prevSubs && prevSubs.has && period !== 'all' ? deltaHTML(subs.earned, prevSubs.earned, true, v => moneyFmt(v, subs.cur)) : ''}` +
-      `<span>${subs.pending ? moneyFmt(subs.pending, subs.cur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span></div></div>`);
+      `<div class="v">${fmtMoneyByCur(subs.earnedByCur)}</div><div class="sub">${deltaOK ? deltaHTML(subs.earnedByCur[sym], prevSubs.earnedByCur[sym], true, v => moneyFmt(v, sym)) : ''}` +
+      `<span>${subs.anyPending ? fmtMoneyByCur(subs.pendingByCur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span></div></div>`);
   } else {
     tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div><div class="v">—</div>` +
       `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span></div></div>`);
@@ -825,16 +832,27 @@ const SUB_STATUS = {
   'timed out': {l: 'Scaduta', c: '--c-fail', ic: 'clock'},
   'rejected': {l: 'Rifiutata', c: '--c-bad', ic: 'x'},
 };
+function fmtMoneyByCur(byCur) {
+  // Keep £ and $ separate: Prolific pays some studies in GBP, others in USD,
+  // and summing them into one scalar would silently misrepresent earnings.
+  const parts = [];
+  for (const [sym, amt] of Object.entries(byCur)) {
+    if (amt > 0) parts.push(moneyFmt(amt, sym));
+  }
+  return parts.length ? parts.join(' + ') : moneyFmt(0, '£');
+}
 function filteredSubs(a, b) {
   const list = (D.submissions || []).filter(s => s.ts && s.ts >= a && s.ts < b);
-  let earned = 0, pending = 0, cur = '£';
+  const earnedByCur = {}, pendingByCur = {};
   for (const s of list) {
     const st = (s.status || '').toLowerCase();
-    if (st === 'approved') earned += s.reward || 0;
-    if (st === 'awaiting review') pending += s.reward || 0;
-    cur = s.currency || cur;
+    const c = s.currency || '£';
+    if (st === 'approved') earnedByCur[c] = (earnedByCur[c] || 0) + (s.reward || 0);
+    if (st === 'awaiting review') pendingByCur[c] = (pendingByCur[c] || 0) + (s.reward || 0);
   }
-  return {list, earned, pending, cur, count: list.length, has: list.length > 0};
+  const anyEarned = Object.values(earnedByCur).some(v => v > 0);
+  const anyPending = Object.values(pendingByCur).some(v => v > 0);
+  return {list, earnedByCur, pendingByCur, anyEarned, anyPending, count: list.length, has: list.length > 0};
 }
 function renderSubs(a, b) {
   const host = $('subs'), f = filteredSubs(a, b);
@@ -848,7 +866,7 @@ function renderSubs(a, b) {
   const max = Math.max(...Object.values(counts));
   const order = ['approved', 'awaiting review', 'active', 'returned', 'screened out', 'timed out', 'rejected'];
   const keys = [...order.filter(k => counts[k]), ...Object.keys(counts).filter(k => !order.includes(k))];
-  host.innerHTML = `<div class="money"><span class="big">${moneyFmt(f.earned, f.cur)}</span><span class="pending">approvati${f.pending ? ` · <b>${moneyFmt(f.pending, f.cur)}</b> in revisione` : ''}</span></div>` +
+  host.innerHTML = `<div class="money"><span class="big">${fmtMoneyByCur(f.earnedByCur)}</span><span class="pending">approvati${f.anyPending ? ` · <b>${fmtMoneyByCur(f.pendingByCur)}</b> in revisione` : ''}</span></div>` +
     `<div class="blist">` + keys.map(k => {
       const m = SUB_STATUS[k] || {l: k, c: '--c-empty', ic: 'filter'};
       return `<div class="bl"><span class="lab">${icon(m.ic, 14)}${esc(m.l)}</span><span class="val"><b>${fmtN(counts[k])}</b></span>` +

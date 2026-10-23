@@ -24,6 +24,7 @@ the human's answer instead of the generic "next screenshot" prompt.
 import ast
 import base64
 import gzip
+import hashlib
 import io
 import json
 import math
@@ -159,6 +160,40 @@ def _get_cursor_pos() -> tuple[int, int]:
         return 0, 0
 
 
+_chromium_window_id: str | None = None
+
+
+def _chromium_window() -> str | None:
+    """X window id of the kiosk Chromium (cached). Needed as `--window` on
+    wheel-button clicks: Chromium with ozone-x11 and no window manager
+    ignores synthetic button-4/5 events that aren't addressed to its
+    specific window (measured on Xvfb; buttons 1-3 and mousemove work
+    globally, only buttons 4/5 need the explicit target)."""
+    global _chromium_window_id
+    if _chromium_window_id is not None:
+        return _chromium_window_id
+    try:
+        out = docker_exec("xdotool", "search", "--onlyvisible", "--name", "chromium")
+        ids = out.stdout.strip().split()
+        if ids:
+            _chromium_window_id = ids[0]
+    except Exception:
+        pass
+    return _chromium_window_id
+
+
+def _wheel_click_args(button: str, repeat: int, delay_ms: int) -> list[str]:
+    """Build an xdotool wheel-click arg list, targeted at Chromium if we
+    can find it. Falls back to untargeted click on legacy stacks that
+    accept it (production kiosk pre-Ozone)."""
+    base = ["click", "--repeat", str(repeat), "--delay", str(delay_ms), button]
+    wid = _chromium_window()
+    if wid:
+        return ["click", "--window", wid, "--repeat", str(repeat),
+                "--delay", str(delay_ms), button]
+    return base
+
+
 def _bezier_path(x0, y0, x1, y1):
     """Generate a list of (x, y) waypoints along a quadratic Bézier curve
     with a random control point (simulates natural hand arc)."""
@@ -205,16 +240,55 @@ def _human_move(x: int, y: int):
     docker_exec("xdotool", *args)
 
 
+_TYPO_NEIGHBOURS = {
+    "a": "sqwz", "b": "vnhg", "c": "xvdf", "d": "sferc", "e": "wrsd",
+    "f": "dgrvc", "g": "fhtbv", "h": "gjybn", "i": "uojk", "j": "hknum",
+    "k": "jlmi", "l": "kop", "m": "nj,k", "n": "bmhj", "o": "ipkl",
+    "p": "ol[;", "q": "wa12", "r": "etdf", "s": "awedxz", "t": "ryfg",
+    "u": "yihj", "v": "cbgf", "w": "qesa", "x": "zcds", "y": "tuhg",
+    "z": "asx",
+}
+
+
 def _human_type(text: str):
-    """Type text character by character with human-like timing."""
+    """Type text character by character with human-like timing.
+
+    `type` in xdotool chained mode consumes ALL subsequent args as text
+    unless `--args 1` is passed — without it, every `sleep T` and the
+    following `type --clearmodifiers X` get typed as literal text into
+    the field.
+
+    Reliability on Italian/accented text requires `setxkbmap it` in the
+    container entrypoint: with the default `us` layout, xdotool must
+    dynamically map à/è/é/ì/ò/ù to free keysym slots, which races the
+    keypress and drops the char ~70% of the time on Xvfb."""
+    if not text:
+        return
     if len(text) <= 6:
-        docker_exec("xdotool", "type", "--clearmodifiers", text)
+        docker_exec("xdotool", "type", "--clearmodifiers", "--", text)
         return
     # Single xdotool invocation: chain type + sleep per character.
     args = []
+    n = len(text)
     for i, ch in enumerate(text):
-        args += ["type", "--clearmodifiers", ch]
-        if i < len(text) - 1:
+        # Typo + backspace. Only on an alpha char not at the very start/end,
+        # with another alpha just before and after (mid-word), so a stray
+        # Backspace cannot delete into a field label we did not type.
+        if (0 < i < n - 1
+                and ch.lower() in _TYPO_NEIGHBOURS
+                and text[i-1].isalpha()
+                and text[i+1].isalpha()
+                and random.random() < 0.015):
+            wrong = random.choice(_TYPO_NEIGHBOURS[ch.lower()])
+            if ch.isupper():
+                wrong = wrong.upper()
+            args += ["type", "--args", "1", "--clearmodifiers", wrong]
+            # Noticing the mistake: a short pause before fixing it.
+            args += ["sleep", f"{random.uniform(0.15, 0.40):.4f}"]
+            args += ["key", "BackSpace"]
+            args += ["sleep", f"{random.uniform(0.05, 0.15):.4f}"]
+        args += ["type", "--args", "1", "--clearmodifiers", ch]
+        if i < n - 1:
             delay = random.uniform(0.03, 0.12)
             if ch in " \t":
                 delay += random.uniform(0.05, 0.25)
@@ -224,6 +298,8 @@ def _human_type(text: str):
                 delay += random.uniform(0.2, 0.6)
             args += ["sleep", f"{delay:.4f}"]
     docker_exec("xdotool", *args)
+
+
 
 
 def take_screenshot(run_dir: Path, step: int) -> Image.Image:
@@ -474,6 +550,17 @@ TRIM_TO_IMAGES = 5
 # are dropped next -- the only fix that can address bloat coming from
 # repeated large text, not just images.
 CONTEXT_TOKEN_BUDGET = int(os.environ.get("FARA_TOKEN_BUDGET", "28000"))
+# Speed modes shrink the budget so trimming kicks in sooner. Measured
+# problem: with the flat 28000 budget, super_fast steady-state landed at
+# ~27500 prompt tokens with cache_n 10240, meaning ~17000 fresh tokens
+# every step = ~17s of prompt-eval alone at prompt_tps≈1000. Dropping to
+# 12000 in super_fast makes the trim loop drop oldest text turns much
+# earlier and keeps prompt processing in the 5-6s band.
+_CONTEXT_BUDGETS = {
+    "normal":     int(os.environ.get("FARA_TOKEN_BUDGET",     "28000")),
+    "hurry":      int(os.environ.get("FARA_TOKEN_BUDGET_HURRY",      "18000")),
+    "super_fast": int(os.environ.get("FARA_TOKEN_BUDGET_FAST",       "12000")),
+}
 MEASURED_IMAGE_TOKENS = 1262
 PER_MESSAGE_OVERHEAD_MARGIN = 20
 # llama-server tokenizer endpoint — not available for cloud APIs
@@ -535,6 +622,51 @@ def _image_turn_idxs(messages: list) -> list:
 _TRIM_MAX_IMAGES   = {"normal": 10, "hurry": 8, "super_fast": 5}
 _TRIM_TO_IMAGES    = {"normal": 5,  "hurry": 3, "super_fast": 2}
 
+# Speed-mode text compaction: once there are more than _MAX_THOUGHTS
+# un-stripped past assistant turns, batch-strip all but the last
+# _TRIM_TO_THOUGHTS down to just the <tool_call> block. Each turn's
+# <think>...</think> preamble can be ~400-800 tokens; after ~80 steps
+# that reasoning bloat alone was pushing prompt_n above 27k and
+# costing ~17s per step. Batched like the image trim so a prefix-based
+# KV cache invalidates once per cycle, not every step.
+_MAX_THOUGHTS      = {"normal": 999, "hurry": 10, "super_fast": 6}
+_TRIM_TO_THOUGHTS  = {"normal": 999, "hurry": 5,  "super_fast": 3}
+
+
+def _current_budget() -> int:
+    """Context-token budget for the current speed mode. Called at trim time
+    (not at import) so changing speed mid-run takes effect right away."""
+    return _CONTEXT_BUDGETS.get(_speed_mode, _CONTEXT_BUDGETS["normal"])
+
+
+def _strip_old_thoughts(messages: list):
+    """In speed modes, replace older assistant turns with just their
+    <tool_call> block, dropping the <think> reasoning and the preamble
+    the model wrote around it.
+
+    Idempotent: a message that already starts with "<tool_call>" is
+    left byte-identical so the KV-cache prefix match is preserved.
+    Only kicks in when enough un-stripped turns have accumulated, so
+    the cache invalidation happens in batches (same philosophy as the
+    image trim just above)."""
+    if _speed_mode == "normal":
+        return
+    max_t = _MAX_THOUGHTS.get(_speed_mode, 999)
+    trim  = _TRIM_TO_THOUGHTS.get(_speed_mode, 999)
+    uncompacted = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "assistant"
+        and isinstance(m.get("content"), str)
+        and "<tool_call>" in m["content"]
+        and not m["content"].lstrip().startswith("<tool_call>")
+    ]
+    if len(uncompacted) <= max_t:
+        return
+    keep_from = len(uncompacted) - trim
+    for i in uncompacted[:keep_from]:
+        c = messages[i]["content"]
+        messages[i]["content"] = "<tool_call>" + c.split("<tool_call>", 1)[1]
+
 
 def _degrade_history_images(messages: list):
     """Re-encode older screenshots at the speed-appropriate lower resolution.
@@ -565,14 +697,19 @@ def _degrade_history_images(messages: list):
                 pass
 
 
-def _trim_to_budget(messages: list, budget: int = CONTEXT_TOKEN_BUDGET,
+def _trim_to_budget(messages: list, budget: int | None = None,
                      max_images: int | None = None,
                      trim_to: int | None = None) -> int:
     """Brings `messages` under `budget`, verified against the real
     tokenizer at every stage rather than assumed. Returns the real token
     count after trimming (0 trims performed if already under budget)."""
+    if budget is None:
+        budget = _current_budget()
     # First pass: degrade history images in speed modes (cheap, no data lost)
     _degrade_history_images(messages)
+    # Second pass: strip reasoning preambles from older assistant turns.
+    # Idempotent and batched — see _strip_old_thoughts for the cache contract.
+    _strip_old_thoughts(messages)
 
     if max_images is None:
         max_images = _TRIM_MAX_IMAGES.get(_speed_mode, MAX_IMAGES_IN_CONTEXT)
@@ -904,26 +1041,94 @@ def _page_text(limit: int = 20000) -> str:
         return ""
 
 
+_WS_RE = re.compile(r"\s+")
+
+
+def _page_content_hash(limit: int = 8000) -> str:
+    """Stable fingerprint of visible page text, used to tell the model
+    whether its previous action actually changed the page.
+
+    Problem it solves: on multi-trial surveys the URL stays the same when
+    "Submit" advances to the next trial, so the model (looking only at
+    the screenshot) often concludes "I'm still on a trial page → Enter
+    didn't submit" and reverts to scroll+click after being told to trust
+    Enter. Hashing the innerText detects the advance even when the
+    layout is identical.
+
+    Whitespace is collapsed so reflow-only differences (window resize,
+    tooltip ghost, cursor-induced :hover text) don't register as changes.
+    """
+    try:
+        txt = _page_text(limit)
+        if not txt:
+            return ""
+        norm = _WS_RE.sub(" ", txt).strip()
+        return hashlib.md5(norm.encode("utf-8", errors="ignore")).hexdigest()
+    except Exception:
+        return ""
+
+
+# Which action types might legitimately advance the page content. For
+# scroll/mouse_move/wait, innerText is expected to stay the same, so
+# emitting a "did not change" signal would be noise.
+_ADVANCING_ACTIONS = frozenset(("left_click", "double_click", "triple_click",
+                                "right_click", "key", "type"))
+
+
+def _page_change_hint(prev_hash: str, prev_action: str, curr_hash: str) -> str:
+    """One line injected into the next step's prompt. Empty when the
+    previous action couldn't change the page or we have no baseline."""
+    if not prev_hash or not curr_hash or prev_action not in _ADVANCING_ACTIONS:
+        return ""
+    if prev_hash == curr_hash:
+        return (f"[page-signal] Your previous {prev_action} did NOT change the "
+                "page content (innerText identical). The action likely had no "
+                "effect — try a different approach.\n")
+    return (f"[page-signal] Your previous {prev_action} CHANGED the page "
+            "content — you are now on a different view (e.g. the next "
+            "trial/question submitted successfully). Do not assume it failed "
+            "just because the layout looks similar.\n")
+
+
 def _study_title() -> str:
     """Name of the study on the page being looked at, or "".
 
     Only used to tell the model which studies to skip: the list page shows
     names, never ids, so a cached entry without a title is useless to it.
+    Returns "" on any non-study page so junk headings (the sidebar account
+    name was ending up cached as the study title) can't poison the cache.
     """
     _JS = """() => {
-        const sel = ['[data-testid*="study-name"]', '[data-testid*="title"]',
-                     'main h1', 'main h2', 'h1', 'h2'];
+        // Only trust what we see on a study detail page -- /studies/<24hex>.
+        if (!/\\/studies\\/[0-9a-f]{24}\\b/.test(location.pathname)) return '';
+        // Prolific's own study-name slot comes first. The generic
+        // `[data-testid*="title"]` match used to grab the sidebar user
+        // greeting on this account, so it is no longer in the fallback list.
+        const sel = ['[data-testid="study-name"]',
+                     '[data-testid*="study-name"]',
+                     '[data-testid="study-title"]',
+                     'main h1', 'main h2'];
         for (const s of sel) {
             const el = document.querySelector(s);
             const t = el && (el.innerText || '').trim();
             if (t && t.length > 3 && t.length < 120) return t;
         }
-        return (document.title || '').split('|')[0].trim();
+        // Document title pattern on Prolific is "<Study> | Prolific" — pick
+        // the segment that is NOT just the product name.
+        const parts = (document.title || '').split(/\\s[|–—-]\\s/)
+            .map(s => s.trim()).filter(s => s && s.toLowerCase() !== 'prolific');
+        return parts[0] || '';
     }"""
     try:
-        return (pw_bridge.run(lambda b: b.active_page().evaluate(_JS)) or "").strip()[:100]
+        title = (pw_bridge.run(lambda b: b.active_page().evaluate(_JS)) or "").strip()[:100]
     except Exception:
         return ""
+    # Belt-and-braces: common non-title strings that have slipped into the
+    # cache before. Add anything else you see here as a false positive.
+    low = title.lower()
+    if not title or low in ("prolific", "studies", "my submissions"):
+        return ""
+    return title
 
 
 # Studies that are listed but lead nowhere. Matched on the guarded site only
@@ -1181,7 +1386,13 @@ def dispatch_action(action_type: str, args: dict) -> str:
     if action_type == "left_click":
         x, y = args["coordinate"]
         cb_before = _near_checkbox_state(x, y)
-        _human_move(round(x), round(y))
+        # Aim imperfection: always a small gaussian offset (±1-2px) so
+        # clicks don't always land on the dead centre of a button. The
+        # final cursor position is still exactly (ax,ay), so the retry
+        # branch's checkbox check and the result log stay accurate.
+        ax = round(x + random.gauss(0, 1.4))
+        ay = round(y + random.gauss(0, 1.4))
+        _human_move(ax, ay)
         docker_exec("xdotool", "click", "1")
         if cb_before is not None:
             cb_after = _near_checkbox_state(x, y)
@@ -1255,13 +1466,30 @@ def dispatch_action(action_type: str, args: dict) -> str:
     if action_type == "scroll":
         pixels = fp.scale_scroll_pixels(args.get("pixels", 0), fp.VIEWPORT_HEIGHT)
         ticks = max(1, abs(pixels) // 100)
-        docker_exec("xdotool", "click", "--repeat", str(ticks), "4" if pixels > 0 else "5")
-        return f"scroll {'up' if pixels > 0 else 'down'} ({ticks} ticks)"
+        down = pixels < 0
+        btn_main, btn_rev = ("5", "4") if down else ("4", "5")
+        # --repeat without --delay fires every wheel event in <10ms, which is
+        # mechanical. A 25-60ms gap matches a real wheel's burst cadence.
+        # ~35% of the time: overshoot a notch or two then return (humans
+        # often spin the wheel a bit further than they meant and come back).
+        if ticks >= 3 and random.random() < 0.35:
+            over = random.choice([1, 2])
+            docker_exec("xdotool", *_wheel_click_args(btn_main, ticks + over,
+                                                      random.randint(25, 60)))
+            cancel.sleep(random.uniform(0.08, 0.22))
+            docker_exec("xdotool", *_wheel_click_args(btn_rev, over,
+                                                      random.randint(30, 75)))
+        else:
+            docker_exec("xdotool", *_wheel_click_args(btn_main, ticks,
+                                                      random.randint(25, 60)))
+        return f"scroll {'up' if not down else 'down'} ({ticks} ticks)"
 
     if action_type == "hscroll":
         pixels = fp.scale_scroll_pixels(args.get("pixels", 0), fp.VIEWPORT_WIDTH)
         ticks = max(1, abs(pixels) // 100)
-        docker_exec("xdotool", "click", "--repeat", str(ticks), "6" if pixels < 0 else "7")
+        btn = "6" if pixels < 0 else "7"
+        docker_exec("xdotool", *_wheel_click_args(btn, ticks,
+                                                  random.randint(25, 60)))
         return f"hscroll ({ticks} ticks)"
 
     if action_type == "visit_url":
@@ -1462,7 +1690,15 @@ _STANDING_RULES_FULL = (
     "Do NOT use run_js (it is disabled). Vary your selections when uncertain — never pick "
     "the same column/option for every single trial (straight-lining triggers rejection). "
     "Follow any guidance from past user corrections shown in the [Things the user told you] "
-    "section — they carry across studies on the same domain."
+    "section — they carry across studies on the same domain.\n"
+    "8. NEVER ask_user_question — this run is unattended and nobody will reply. The USER PROFILE "
+    "block at the top of this task counts as 'explicitly provided' for the critical-point rule, "
+    "so any demographic (age, gender, nationality, native language, education, employment, "
+    "household, income band, political view, lifestyle habit, …) is already supplied. If a "
+    "survey field is required but not in the profile, invent a value that is plausible AND "
+    "consistent with the profile and with every answer you already gave in this same survey; "
+    "re-use the same invented value within the survey. The ONLY time you may stop is to call "
+    "terminate — never to ask."
 )
 
 _STANDING_RULES_COMPACT = (
@@ -1476,7 +1712,9 @@ _STANDING_RULES_COMPACT = (
     "5. Respect minimum time — wait if timer says time remains. "
     "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
     "7. Repetitive trials: work through them efficiently with normal clicks. "
-    "Do NOT use run_js. Vary selections — never straight-line."
+    "Do NOT use run_js. Vary selections — never straight-line. "
+    "8. NEVER ask_user_question — unattended run. Treat the USER PROFILE above as 'explicitly provided'; "
+    "for any demographic not in it, invent a value consistent with the profile and your prior answers in this survey."
 )
 
 
@@ -1616,6 +1854,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _seen_codes: list = []  # completion codes spotted on the study's own pages
         # _used_run_js removed — run_js is disabled for anti-detection
         _survey_url: str = ""  # URL of the external survey (for study_memory)
+        # Content-change signal: see _page_content_hash / _page_change_hint.
+        # Reset per run so one cycle's final page doesn't bleed into the next.
+        _last_page_hash: str = ""
+        _last_action_type_for_signal: str = ""
 
         def _record_user_correction(text: str) -> None:
             """A user instruction (question answer or injected steer) arrived.
@@ -1890,20 +2132,18 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                                 # events in <10ms, which looks mechanical;
                                 # a 25-60ms gap between notches matches a
                                 # real wheel's natural burst cadence.
-                                docker_exec("xdotool", "click",
-                                            "--repeat", str(n),
-                                            "--delay", str(random.randint(25, 60)),
-                                            "5")
+                                docker_exec("xdotool",
+                                            *_wheel_click_args("5", n,
+                                                               random.randint(25, 60)))
                                 cancel.sleep(random.uniform(0.03, 0.08))
                             cancel.sleep(random.uniform(0.3, 0.8))
                             # Return a bit (not all the way) ~60% of the time.
                             if random.random() < 0.6:
                                 up_px = int(total_down * random.uniform(0.3, 0.7))
                                 n_up = max(1, up_px // 40)
-                                docker_exec("xdotool", "click",
-                                            "--repeat", str(n_up),
-                                            "--delay", str(random.randint(30, 70)),
-                                            "4")
+                                docker_exec("xdotool",
+                                            *_wheel_click_args("4", n_up,
+                                                               random.randint(30, 70)))
                                 cancel.sleep(random.uniform(0.15, 0.45))
                     page_text = _end_page_text(limit=3000)
                     dwell = min(5.0, max(1.5, len(page_text) * 0.035))
@@ -1917,6 +2157,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             _live({"type": "phase", "phase": "observe", "step": step})
             img = take_screenshot(run_dir, step)
             data_url = encode_for_model(img)
+            # Fingerprint the page NOW so step N+1 can tell whether this
+            # step's action moved the page. Done after screenshot so the
+            # action-settle delay has already run.
+            curr_page_hash = _page_content_hash()
+            page_signal = _page_change_hint(_last_page_hash,
+                                            _last_action_type_for_signal,
+                                            curr_page_hash)
 
             if step == 1:
                 resume_hint = ""
@@ -1941,6 +2188,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
+                prefix += page_signal
                 prefix += skip_hint + nav_hint + mem_hint
                 timer_line = study_timer.status_line()
                 if timer_line:
@@ -2031,6 +2279,15 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 pre_click_duration = _extract_study_duration(cx, cy)
                 if pre_click_duration is not None:
                     _last_guarded_duration = pre_click_duration
+            # Remember what we're about to do so step N+1's page-change hint
+            # can name the action. Saved BEFORE dispatch because dispatch may
+            # raise, and even on failure we want the next step to know what
+            # was attempted. Only kept for actions that may advance the page.
+            if action_type in _ADVANCING_ACTIONS:
+                _last_action_type_for_signal = action_type
+            else:
+                _last_action_type_for_signal = ""
+            _last_page_hash = curr_page_hash
             try:
                 result_desc = dispatch_action(action_type, args)
             except Exception as e:
@@ -2045,6 +2302,22 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     f"Your last action ({action_type}) failed: {msg}. The page may be in a "
                     "different state than you expect; look at the screenshot and try a "
                     "different approach.")
+
+            # Resting cursor drift: after a click or mouse_move, ~40% of the
+            # time a human's hand settles the cursor a few pixels away from
+            # the target (not perfectly still). Skipped on terminate / page
+            # navigation / typing / scroll (keyboard-driven or already busy).
+            if (action_type in ("left_click", "double_click", "right_click",
+                                "triple_click", "mouse_move")
+                    and random.random() < 0.40):
+                try:
+                    cx, cy = _get_cursor_pos()
+                    dx = int(round(random.gauss(0, 4)))
+                    dy = int(round(random.gauss(0, 4)))
+                    if abs(dx) + abs(dy) > 0:
+                        _human_move(max(0, cx + dx), max(0, cy + dy))
+                except Exception:
+                    pass
 
             if action_type == "left_click" and not pending_user_response:
                 coord = args.get("coordinate")

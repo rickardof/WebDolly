@@ -21,6 +21,7 @@ import shlex
 import ctypes
 import gzip
 import os
+import random
 import signal
 import json
 import queue
@@ -230,6 +231,65 @@ def _dbg(msg: str):
     except Exception:
         pass
 
+import re as _re
+
+_STATUS_RE   = _re.compile(
+    r'^(AWAITING REVIEW|APPROVED|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)$',
+    _re.IGNORECASE)
+_MONEY_RE    = _re.compile(r'^(screened out )?reward', _re.IGNORECASE)
+# Chromium runs with --lang=it-IT, so Prolific renders rewards in Italian
+# locale: "Reward: £0,06" / "Reward: £1,20". The old regex only accepted
+# "." and silently truncated the fractional part, showing £1,20 as £1.00
+# and £0,06 as £0.00. Accept both separators and normalise below.
+_REWARD_AMT  = _re.compile(r'([£$€])\s*(\d+(?:[.,]\d+)?)')
+_BY_RE       = _re.compile(r'^by\s+.+', _re.IGNORECASE)
+_DATELINE_RE = _re.compile(r'^\d{1,2}\s+\w{3}\s+\d{4}', _re.IGNORECASE)
+_SKIP_LINE   = _re.compile(
+    r'^(approved by|read more|submissions?|summary|total|filters?|sort|search'
+    r'|balance|pending|about you|messages|studies|refer|projects?'
+    r'|date|status|reward|actions?|study name|\d+\s*submissions?'
+    r'|skip to main|time taken).*$', _re.IGNORECASE)
+
+
+def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
+    """Parse the Prolific /submissions page innerText (as a list of stripped
+    non-empty lines) into one dict per row.
+
+    Pulled out of _fetch_submissions so it can be unit-tested without a browser:
+    the regex layer has had subtle bugs twice (comma-decimal truncation, title
+    stealing the reward line), and locale/currency changes will keep coming.
+    """
+    parsed, i = [], 0
+    while i < len(raw_rows):
+        line = raw_rows[i]
+        if _STATUS_RE.match(line):
+            status = line.title()
+            title, date_full, reward_str, currency = "", "", "", "£"
+            for j in range(i - 1, max(i - 10, -1), -1):
+                prev = raw_rows[j]
+                if _DATELINE_RE.match(prev):
+                    date_full = prev.strip()
+                elif _MONEY_RE.match(prev):
+                    m = _REWARD_AMT.search(prev)
+                    if m:
+                        currency = m.group(1)
+                        reward_str = m.group(2).replace(",", ".")
+                elif _BY_RE.match(prev) or _SKIP_LINE.match(prev):
+                    continue
+                elif not title and len(prev) > 4:
+                    title = prev[:80]
+                    break
+            if title:
+                parsed.append({
+                    "title": title, "status": status,
+                    "date": date_full.split(",")[0].strip(),
+                    "date_full": date_full,
+                    "reward": reward_str, "currency": currency,
+                })
+        i += 1
+    return parsed
+
+
 def _fetch_submissions() -> list[dict]:
     """Open a temporary tab, read the Prolific submissions page, close the tab.
 
@@ -237,8 +297,6 @@ def _fetch_submissions() -> list[dict]:
     when state phase is None), so the agent never notices the ~5-second pause.
     Saves and restores the active tab atomically inside the bridge worker thread.
     """
-    import re
-
     SUBMISSIONS_URL = "https://app.prolific.com/submissions"
     JS = """() => (document.body.innerText || '').split('\\n')
                   .map(s => s.trim()).filter(s => s.length > 0)"""
@@ -267,48 +325,7 @@ def _fetch_submissions() -> list[dict]:
         return []
 
     _dbg(f"tab fetch: got {len(raw_rows)} rows")
-
-    STATUS_RE   = re.compile(
-        r'^(AWAITING REVIEW|APPROVED|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)$',
-        re.IGNORECASE)
-    MONEY_RE    = re.compile(r'^(screened out )?reward', re.IGNORECASE)
-    REWARD_AMT  = re.compile(r'([£$€])(\d+\.?\d*)')
-    BY_RE       = re.compile(r'^by\s+.+', re.IGNORECASE)
-    DATELINE_RE = re.compile(r'^\d{1,2}\s+\w{3}\s+\d{4}', re.IGNORECASE)
-    SKIP_LINE   = re.compile(
-        r'^(approved by|read more|submissions?|summary|total|filters?|sort|search'
-        r'|balance|pending|about you|messages|studies|refer|projects?'
-        r'|date|status|reward|actions?|study name|\d+\s*submissions?'
-        r'|skip to main|time taken).*$', re.IGNORECASE)
-
-    parsed, i = [], 0
-    while i < len(raw_rows):
-        line = raw_rows[i]
-        if STATUS_RE.match(line):
-            status = line.title()
-            title, date_full, reward_str, currency = "", "", "", "£"
-            for j in range(i - 1, max(i - 10, -1), -1):
-                prev = raw_rows[j]
-                if DATELINE_RE.match(prev):
-                    date_full = prev.strip()
-                elif MONEY_RE.match(prev):
-                    m = REWARD_AMT.search(prev)
-                    if m:
-                        currency, reward_str = m.group(1), m.group(2)
-                elif BY_RE.match(prev) or SKIP_LINE.match(prev):
-                    continue
-                elif not title and len(prev) > 4:
-                    title = prev[:80]
-                    break
-            if title:
-                parsed.append({
-                    "title": title, "status": status,
-                    "date": date_full.split(",")[0].strip(),
-                    "date_full": date_full,
-                    "reward": reward_str, "currency": currency,
-                })
-        i += 1
-    return parsed
+    return _parse_submission_rows(raw_rows)
 
 
 def _agent_submissions() -> list[dict]:
@@ -719,6 +736,15 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
             with state_lock:
                 state["pending_question"] = event["question"]
             _publish_state()
+            # Ping Telegram so the user doesn't have to open the GUI to
+            # realise the agent is blocked. Any plain-text reply (or
+            # /inject <answer>) from Telegram unblocks it via answer_queue.
+            try:
+                agent_core._notify_telegram(
+                    "❓ L'agente chiede:\n" + str(event["question"])[:500]
+                    + "\n\nRispondi qui con un messaggio (o /inject <testo>).")
+            except Exception:
+                pass
             answer = answer_queue.get()
             with state_lock:
                 state["pending_question"] = None
@@ -804,7 +830,12 @@ ERROR_BACKOFF = (30, 60, 120, 300)
 # arrive any sooner. A full cycle still runs every FULL_CYCLE_EVERY seconds
 # in case the DOM reading is wrong.
 LIST_CHECK_MIN_SECONDS = 2
-FULL_CYCLE_EVERY = 15 * 60
+# Safety-net cycle. Only runs when Pusher is NOT delivering events: with a
+# healthy sniffer connection every new study triggers us within ~1 s and a
+# periodic blind cycle is pure GPU waste. When the listener disconnects we
+# fall back to this interval so a silent push outage can't make the agent
+# miss studies all night. 0 = never fire a blind cycle.
+FULL_CYCLE_EVERY_PUSHER_DOWN = int(os.environ.get("FARA_SAFETY_CYCLE_S", "900"))
 # Max consecutive INCOMPLETE cycles before giving up on a stuck survey and
 # resetting back to the studies list. Each INCOMPLETE cycle burns max_rounds
 # steps on the same survey -- with max_rounds=30 that's 30 steps per cycle,
@@ -903,19 +934,27 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
         #   falling back to a model cycle; avoids wasting 5–7 model steps on
         #   a page that just hasn't rendered yet.
         # "empty" → keep waiting.
-        # FULL_CYCLE_EVERY → safety cycle regardless.
+        # Safety cycle: only fire when Pusher is NOT giving us events, and
+        #   even then only after FULL_CYCLE_EVERY_PUSHER_DOWN seconds. With a
+        #   connected sniffer we trust the push stream and don't burn the GPU
+        #   on blind polls.
+        safety_due = (
+            FULL_CYCLE_EVERY_PUSHER_DOWN > 0
+            and not pl.connected
+            and time.time() - since > FULL_CYCLE_EVERY_PUSHER_DOWN
+        )
         should_cycle = (
             seen == "studies"
             or (seen == "unknown" and unknowns >= 3)
-            or time.time() - since > FULL_CYCLE_EVERY
+            or safety_due
         )
         if should_cycle:
             if checks > 1:
+                reason = ("ora c'è qualcosa." if seen == "studies" else
+                          "pusher offline, ciclo di controllo." if safety_due else
+                          "pagina non riconosciuta, passo al modello.")
                 _push_event({"type": "notice",
-                             "text": f"Elenco controllato {checks} volte senza modello: "
-                                     + ("ora c'è qualcosa." if seen == "studies" else
-                                        "ciclo completo di controllo." if seen == "empty" else
-                                        "pagina non riconosciuta, passo al modello.")})
+                             "text": f"Elenco controllato {checks} volte senza modello: " + reason})
             return False
         hub.publish("live", {"type": "phase", "phase": "watch", "ts": time.time(),
                              "checks": checks,
@@ -994,6 +1033,35 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
                 continue
             if not home_url:
                 home_url = start_page_url
+            # Any outcome beyond "nothing on the list" deserves a Telegram
+            # ping -- previously only errors and successful CODE answers were
+            # reported, so a timed-out study ended silently and the user had
+            # no way to know from the phone.
+            _ca = (cycle_answer or "").strip()
+            if _ca and _ca not in ("NONE", "STOPPED") and "max_rounds=" not in _ca:
+                head = _ca.split("\n", 1)[0][:300]
+                if _ca.startswith("CODE:"):
+                    emoji = "✅"
+                elif _ca == "NOCODE":
+                    emoji = "⚠️"; head = "Completato senza codice"
+                else:
+                    emoji = "ℹ️"
+                agent_core._notify_telegram(f"{emoji} Ciclo {cycle}: {head}")
+            # Inter-cycle idle: a real user doesn't start the next study 2s
+            # after submitting the last. 8-25s normally; ~5% of the time a
+            # longer "coffee break" of 25-70s. Only after a real completion
+            # (CODE/NOCODE/other terminate), not after NONE (nothing on the
+            # list) or STOPPED (user interrupt) where the dashboard poll
+            # already handles pacing.
+            if (loop and not stop_event.is_set() and _ca
+                    and _ca not in ("NONE", "STOPPED")
+                    and "max_rounds=" not in _ca):
+                if random.random() < 0.05:
+                    idle = random.uniform(25, 70)
+                else:
+                    idle = random.uniform(8, 25)
+                if stop_event.wait(idle):
+                    return
             if not ok or not loop or stop_event.is_set():
                 break
             # INCOMPLETE (max_rounds reached) means the model was still mid-work:
@@ -1248,6 +1316,21 @@ class Handler(BaseHTTPRequestHandler):
                 "enabled": local_agent.ENABLE_THINKING,
                 "effort": local_agent.REASONING_EFFORT,
             })
+        elif self.path.startswith("/local/scratch/"):
+            # Serve files that write_file dropped into the Qwen scratchpad so
+            # the user can preview them (HTML renders, SVG/PNG inline, …).
+            rel = self.path[len("/local/scratch/"):].split("?", 1)[0]
+            try:
+                base = local_agent.SCRATCH_DIR.resolve()
+                target = (base / rel).resolve()
+                if not str(target).startswith(str(base)) or not target.is_file():
+                    self.send_response(404); self.end_headers(); return
+                import mimetypes
+                ctype, _ = mimetypes.guess_type(str(target))
+                self._send_bytes(target.read_bytes(),
+                                 ctype or "application/octet-stream")
+            except Exception:
+                self.send_response(404); self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -1499,16 +1582,13 @@ class Handler(BaseHTTPRequestHandler):
                 delete_preset(str(body.get("name", "")))
                 return self._send_json({"ok": True})
 
-            if self.path == "/local/chat":
+            if self.path in ("/local/chat", "/local/chat/stream"):
                 global _local_busy
+                stream = (self.path == "/local/chat/stream")
                 with _local_lock:
                     if _local_busy:
                         return self._send_json({"error": "busy"}, status=409)
                     _local_busy = True
-                # Clear any sticky cancel flag left over from a prior survey-agent
-                # stop. Without this the first /local/chat after Stop fires
-                # Cancelled on the very first cancel.check() and the user sees
-                # an immediate "Stopped".
                 cancel.reset()
                 body = self._read_json()
                 msg = str(body.get("message", "")).strip()
@@ -1516,23 +1596,75 @@ class Handler(BaseHTTPRequestHandler):
                     with _local_lock:
                         _local_busy = False
                     return self._send_json({"error": "empty message"}, status=400)
+
+                if not stream:
+                    try:
+                        events = []
+                        response = ""
+                        hist = _local_current()
+                        for ev in local_agent.run_chat(msg, hist):
+                            events.append(ev)
+                            if ev.get("type") == "response":
+                                response = ev.get("content", "")
+                        with _local_lock:
+                            _local_save()
+                        self._send_json({"ok": True, "response": response, "events": events})
+                    except Exception as e:
+                        self._send_json({"error": str(e)}, status=500)
+                    finally:
+                        with _local_lock:
+                            _local_busy = False
+                    return
+
+                # Streaming NDJSON: one JSON event per line, flushed as soon as
+                # local_agent yields it so the UI can show thinking → tokens →
+                # tools → final response in real time. A background thread
+                # drives run_chat so the on_delta token callback and the
+                # generator yields both feed the same queue the writer drains.
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                def _emit(ev: dict):
+                    try:
+                        self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode())
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                evq: queue.Queue = queue.Queue()
+                _SENTINEL = object()
+                hist = _local_current()
+                def _runner():
+                    try:
+                        for ev in local_agent.run_chat(
+                                msg, hist,
+                                on_event=lambda e: evq.put(e)):
+                            evq.put(ev)
+                    except Exception as e:
+                        evq.put({"type": "error", "message": str(e)})
+                    finally:
+                        evq.put(_SENTINEL)
+                threading.Thread(target=_runner, daemon=True).start()
                 try:
-                    events = []
-                    response = ""
-                    hist = _local_current()
-                    for ev in local_agent.run_chat(msg, hist):
-                        events.append(ev)
-                        if ev.get("type") == "response":
-                            response = ev.get("content", "")
+                    while True:
+                        ev = evq.get()
+                        if ev is _SENTINEL:
+                            break
+                        _emit(ev)
                     with _local_lock:
                         _local_save()
-                    self._send_json({"ok": True, "response": response, "events": events})
+                    _emit({"type": "end"})
                 except Exception as e:
-                    self._send_json({"error": str(e)}, status=500)
+                    _emit({"type": "error", "message": str(e)})
                 finally:
                     with _local_lock:
                         _local_busy = False
                 return
+
+            if self.path == "/local/chat/cancel":
+                cancel.cancel_all()
+                return self._send_json({"ok": True})
 
             if self.path == "/local/clear":
                 with _local_lock:
@@ -1665,31 +1797,46 @@ def _daily_summary_text(day=None) -> str:
     speed = agent_core.model_speed()
     if speed:
         lines.append(f"🧠 Modello: {speed['median_gen_tps']:.1f} token/s (mediana recente)")
-    earned, cur = 0.0, "£"
+    # Keep currencies separate: Prolific pays some studies in £ and others
+    # in $/€, so summing them into one scalar silently misrepresents the day.
+    by_cur: dict[str, float] = {}
     for s in list(_submissions_cache.get("data") or []):
         try:
             when = _dt.strptime(s.get("date_full", ""), "%d %b %Y, %H:%M").date()
         except ValueError:
             continue
         if when == day and s.get("reward") and s.get("status", "").lower() in ("approved", "awaiting review"):
-            earned += float(s["reward"]); cur = s.get("currency", "£")
-    if earned:
-        lines.append(f"💰 Approvati o in revisione oggi: {cur}{earned:.2f}")
+            try:
+                amt = float(s["reward"])
+            except (ValueError, TypeError):
+                continue
+            by_cur[s.get("currency", "£")] = by_cur.get(s.get("currency", "£"), 0.0) + amt
+    if by_cur:
+        lines.append("💰 Approvati o in revisione oggi: " + _fmt_money_by_cur(by_cur))
     return "\n".join(lines)
 
 
+def _fmt_money_by_cur(by_cur: dict[str, float]) -> str:
+    """Join non-zero currency buckets with " + " so £ and $ stay separate.
+    Keeps the display honest when Prolific mixes GBP/USD studies in one day.
+    """
+    parts = [f"{sym}{amt:.2f}" for sym, amt in by_cur.items() if amt > 0]
+    return " + ".join(parts) if parts else "£0.00"
+
+
 def _earnings_text() -> str:
-    """Earnings breakdown: today, this week, this month, all-time (approved only)."""
+    """Earnings breakdown: today, this week, this month, all-time (approved only).
+    Per-currency because Prolific pays some studies in £ and others in $."""
     from datetime import date, datetime as _dt, timedelta
     today = date.today()
     week_start = today - timedelta(days=today.weekday())  # Monday
     month_start = today.replace(day=1)
 
-    buckets = {"today": 0.0, "week": 0.0, "month": 0.0, "all": 0.0}
+    # buckets[period] = {currency_symbol: total}
+    buckets: dict[str, dict[str, float]] = {k: {} for k in ("today", "week", "month", "all")}
     counts = {"today": 0, "week": 0, "month": 0, "all": 0}
-    pending = 0.0
+    pending: dict[str, float] = {}
     pending_n = 0
-    cur = "£"
 
     with _submissions_lock:
         subs = list(_submissions_cache.get("data") or [])
@@ -1715,31 +1862,31 @@ def _earnings_text() -> str:
             d = None
 
         if status == "approved":
-            buckets["all"] += amt
+            buckets["all"][cur] = buckets["all"].get(cur, 0.0) + amt
             counts["all"] += 1
             if d:
                 if d >= month_start:
-                    buckets["month"] += amt
+                    buckets["month"][cur] = buckets["month"].get(cur, 0.0) + amt
                     counts["month"] += 1
                 if d >= week_start:
-                    buckets["week"] += amt
+                    buckets["week"][cur] = buckets["week"].get(cur, 0.0) + amt
                     counts["week"] += 1
                 if d == today:
-                    buckets["today"] += amt
+                    buckets["today"][cur] = buckets["today"].get(cur, 0.0) + amt
                     counts["today"] += 1
         elif status == "awaiting review":
-            pending += amt
+            pending[cur] = pending.get(cur, 0.0) + amt
             pending_n += 1
 
     lines = [
         "💰 Guadagni",
-        f"   Oggi:       {cur}{buckets['today']:.2f}  ({counts['today']} studi)",
-        f"   Settimana:  {cur}{buckets['week']:.2f}  ({counts['week']} studi)",
-        f"   Mese:       {cur}{buckets['month']:.2f}  ({counts['month']} studi)",
-        f"   Totale:     {cur}{buckets['all']:.2f}  ({counts['all']} studi)",
+        f"   Oggi:       {_fmt_money_by_cur(buckets['today'])}  ({counts['today']} studi)",
+        f"   Settimana:  {_fmt_money_by_cur(buckets['week'])}  ({counts['week']} studi)",
+        f"   Mese:       {_fmt_money_by_cur(buckets['month'])}  ({counts['month']} studi)",
+        f"   Totale:     {_fmt_money_by_cur(buckets['all'])}  ({counts['all']} studi)",
     ]
     if pending:
-        lines.append(f"\n⏳ In revisione: {cur}{pending:.2f} ({pending_n} studi)")
+        lines.append(f"\n⏳ In revisione: {_fmt_money_by_cur(pending)} ({pending_n} studi)")
     return "\n".join(lines)
 
 
@@ -1988,8 +2135,7 @@ def _telegram_bot_loop():
                 }
                 COUNTS_AS_EARNED = {"approved"}
 
-                total_24h = 0.0
-                currency_sym = "£"
+                total_24h_by_cur: dict[str, float] = {}
                 lines.append("")
                 lines.append("📋 Studi recenti:")
                 for s in subs[:8]:
@@ -2000,7 +2146,7 @@ def _telegram_bot_loop():
                     reward_disp = f" {cur}{rwd}" if rwd else ""
                     lines.append(f"{emoji} {s['title']}{date_disp}{reward_disp}")
 
-                    # Sum earnings for last 24h (approved/awaiting only)
+                    # Sum earnings for last 24h (approved/awaiting only), per currency.
                     if rwd and s["status"].lower() in COUNTS_AS_EARNED:
                         date_full = s.get("date_full", "")
                         try:
@@ -2009,12 +2155,11 @@ def _telegram_bot_loop():
                             except ValueError:
                                 d = datetime.strptime(date_full, "%d %b %Y")
                             if d >= cutoff_24h:
-                                total_24h += float(rwd)
-                                currency_sym = cur
+                                total_24h_by_cur[cur] = total_24h_by_cur.get(cur, 0.0) + float(rwd)
                         except Exception:
                             pass
 
-                lines.append(f"💰 Guadagni ultime 24h: {currency_sym}{total_24h:.2f}")
+                lines.append(f"💰 Guadagni ultime 24h: {_fmt_money_by_cur(total_24h_by_cur)}")
             else:
                 if _submissions_cache["ts"] == 0.0:
                     lines.append("📋 Studi: caricamento al termine del ciclo...")
@@ -2070,10 +2215,21 @@ def _telegram_bot_loop():
                 else:
                     with state_lock:
                         running = state["running"]
-                        if running:
+                        pending_q = state.get("pending_question")
+                        aq = state.get("answer_queue") if pending_q else None
+                        if running and not pending_q:
                             state["inject_message"] = arg
-                    tg_send(f"📨 Istruzione in coda, la riceve al prossimo passo:\n{arg}"
-                            if running else "ℹ️ L'agente non è in esecuzione.")
+                    if not running:
+                        tg_send("ℹ️ L'agente non è in esecuzione.")
+                    elif pending_q and aq is not None:
+                        # The driver is blocked on answer_queue.get() — any
+                        # inject_message would sit unread until the user also
+                        # answered from the GUI. Route the text to the queue
+                        # so Telegram can unstick a pending question too.
+                        aq.put(arg)
+                        tg_send(f"✉️ Risposta inviata all'agente:\n{arg}")
+                    else:
+                        tg_send(f"📨 Istruzione in coda, la riceve al prossimo passo:\n{arg}")
             elif text in ("/normal", "normal", "/normale", "normale"):
                 agent_core.set_speed("normal")
                 tg_send("🐢 Modalità normale attiva")
@@ -2084,6 +2240,18 @@ def _telegram_bot_loop():
                           "/velocissimo", "velocissimo"):
                 agent_core.set_speed("super_fast")
                 tg_send("🚀 Modalità SUPER-FAST attiva — qualità ridotta, massima velocità")
+            elif not text.startswith("/"):
+                # Plain text with no command. If the agent is waiting for an
+                # answer, treat the message as the answer -- otherwise the
+                # question could only be answered from the GUI.
+                with state_lock:
+                    pending_q = state.get("pending_question")
+                    aq = state.get("answer_queue") if pending_q else None
+                if pending_q and aq is not None:
+                    aq.put(raw)
+                    tg_send(f"✉️ Risposta inviata all'agente:\n{raw}")
+                else:
+                    tg_send("Non riconosco il comando. /help per la lista.")
             elif text in ("/help", "help", "/aiuto", "aiuto"):
                 tg_send(
                     "🤖 Comandi disponibili:\n"

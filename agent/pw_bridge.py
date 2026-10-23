@@ -21,6 +21,64 @@ from playwright.sync_api import sync_playwright
 CDP_URL = os.environ.get("FARA_CDP_URL", "http://127.0.0.1:9333")
 
 
+# Fingerprint-stealth script applied on every context after (re)connect.
+# Kept minimal to avoid multi-engine mismatches: fixes signals that are
+# clearly off (deviceMemory=null, notifications=denied, WebGL hidden) and
+# leaves everything else to the container flags (lang, accept-lang, TZ).
+# WebGL params use plausible Linux-Intel values so they match --use-gl.
+_STEALTH_JS = r"""
+(() => {
+  if (window.__fara_stealth_applied) return;
+  Object.defineProperty(window, '__fara_stealth_applied',
+      {value: true, writable: false, configurable: false, enumerable: false});
+
+  // deviceMemory: null in Linux Chrome without the hint, 8 is the usual
+  // bucket for a modern laptop/desktop.
+  try {
+    Object.defineProperty(Navigator.prototype, 'deviceMemory',
+        {get: () => 8, configurable: true});
+  } catch (e) {}
+
+  // notifications permission: Linux kiosk reports 'denied' which is a
+  // headless-smell. A real browser with no prior interaction returns
+  // 'default' (prompt). Patch only that one name; leave the rest alone.
+  try {
+    const origQuery = Permissions.prototype.query;
+    Permissions.prototype.query = function (p) {
+      if (p && p.name === 'notifications') {
+        return Promise.resolve({
+          state: 'default',
+          onchange: null,
+          addEventListener() {}, removeEventListener() {},
+          dispatchEvent() { return false; },
+        });
+      }
+      return origQuery.call(this, p);
+    };
+  } catch (e) {}
+
+  // WebGL vendor/renderer: with --use-gl=swiftshader Chromium reports the
+  // SwiftShader strings, which is itself a tell. Rewrite only the two
+  // UNMASKED_* parameters to plausible Linux-Intel values; everything
+  // else (precision, extensions, versions) remains the real value for
+  // consistency with Canvas 2D and the actual rasterizer.
+  const VENDOR = 'Google Inc. (Intel)';
+  const RENDERER = 'ANGLE (Intel, Mesa Intel(R) UHD Graphics (KBL GT2), OpenGL ES 2.0)';
+  for (const Ctor of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+    if (!Ctor) continue;
+    try {
+      const origGet = Ctor.prototype.getParameter;
+      Ctor.prototype.getParameter = function (p) {
+        if (p === 37445) return VENDOR;    // UNMASKED_VENDOR_WEBGL
+        if (p === 37446) return RENDERER;  // UNMASKED_RENDERER_WEBGL
+        return origGet.call(this, p);
+      };
+    } catch (e) {}
+  }
+})();
+"""
+
+
 class _Bridge:
     def __init__(self):
         self._q = queue.Queue()
@@ -30,6 +88,31 @@ class _Bridge:
     def _connect(self):
         self._pw = self._pw if getattr(self, "_pw", None) else sync_playwright().start()
         self._browser = self._pw.chromium.connect_over_cdp(CDP_URL)
+        # Fingerprint stealth: inject on every existing context (for all
+        # pages opened later in that context) AND evaluate on every open
+        # page right now, since init-scripts don't retro-apply. The script
+        # is idempotent (window.__fara_stealth_applied guard) but we still
+        # track what's been patched per connect() to avoid wasted CDP calls.
+        self._stealth_contexts = set()
+        self._stealth_pages = set()
+        self._apply_stealth()
+
+    def _apply_stealth(self):
+        for ctx in self._browser.contexts:
+            if id(ctx) not in self._stealth_contexts:
+                try:
+                    ctx.add_init_script(_STEALTH_JS)
+                    self._stealth_contexts.add(id(ctx))
+                except Exception:
+                    pass
+            for page in ctx.pages:
+                if id(page) in self._stealth_pages:
+                    continue
+                try:
+                    page.evaluate(_STEALTH_JS)
+                    self._stealth_pages.add(id(page))
+                except Exception:
+                    pass
 
     def _run(self):
         self._pw = None
@@ -99,6 +182,10 @@ class _Bridge:
         if new and self._known:
             self._active = new[-1]
         self._known = list(pages)
+        # Re-apply stealth whenever a new context appears (e.g. incognito
+        # window). Existing contexts stay in self._stealth_contexts and are
+        # skipped, so the per-page evaluate below only fires once per page.
+        self._apply_stealth()
 
     def active_page(self):
         """The tab Fara actually sees (see _sync_tabs). cdp.py always used

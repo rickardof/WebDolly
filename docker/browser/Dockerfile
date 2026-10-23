@@ -19,6 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # matching the user's actual geolocation (Italy).
 RUN sed -i '/it_IT.UTF-8/s/^# //' /etc/locale.gen && locale-gen
 
+# Timezone: ENV alone sets $TZ in child processes, but libc only honours it
+# if there is no /etc/localtime symlink. Intl.DateTimeFormat inside Chromium
+# reads the symlink first, so without this it falls back to "UTC" regardless
+# of the ENV value. Set both so JS, libc and HTTP Date headers agree.
+RUN ln -sf /usr/share/zoneinfo/Europe/Rome /etc/localtime \
+    && echo "Europe/Rome" > /etc/timezone
+
 RUN pip install --break-system-packages --no-cache-dir websocket-client
 
 RUN useradd -m -s /bin/bash browser && mkdir -p /data && chown browser:browser /data

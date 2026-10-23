@@ -408,6 +408,7 @@ body {
       <textarea id="input" placeholder="Send a message..." rows="1"
                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="send" id="sendBtn" onclick="send()">&#x2191;</button>
+      <button class="send" id="stopBtn" onclick="stopStream()" style="display:none;background:#c33" title="Stop">&#x25A0;</button>
     </div>
   </div>
   <div class="browser-panel hidden" id="browserPanel">
@@ -423,6 +424,12 @@ body {
 const $msgs = document.getElementById('messages');
 const $input = document.getElementById('input');
 const $sendBtn = document.getElementById('sendBtn');
+const $stopBtn = document.getElementById('stopBtn');
+let currentAbort = null;
+function stopStream() {
+  try { fetch('/local/chat/cancel', {method:'POST'}); } catch(_){}
+  if (currentAbort) { try { currentAbort.abort(); } catch(_){} }
+}
 const $dot = document.getElementById('healthDot');
 const $label = document.getElementById('modelLabel');
 const $switchBtn = document.getElementById('switchBtn');
@@ -454,12 +461,8 @@ async function switchModel() {
   const r = await fetch('/model/status');
   const d = await r.json();
   const target = d.active === 'qwen' ? 'fara' : 'qwen';
-  if (target === 'fara') {
-    window.location.href = '/';
-    return;
-  }
   $switchBtn.disabled = true;
-  $switchBtn.textContent = 'Loading model...';
+  $switchBtn.textContent = 'Loading ' + target + '...';
   try {
     const sr = await fetch('/model/switch', {
       method: 'POST',
@@ -467,11 +470,19 @@ async function switchModel() {
       body: JSON.stringify({model: target})
     });
     const sd = await sr.json();
-    if (sd.ok) {
-      checkModel();
-    } else {
+    if (!sd.ok) {
       alert(sd.error || 'Switch failed');
+      $switchBtn.disabled = false;
+      checkModel();
+      return;
     }
+    // Jump to the Fara UI only AFTER the model actually swapped —
+    // otherwise the user lands on /fara but Qwen is still loaded.
+    if (target === 'fara') {
+      window.location.href = '/';
+      return;
+    }
+    checkModel();
   } catch(e) {
     alert('Switch failed: ' + e.message);
   }
@@ -576,13 +587,37 @@ function addMsg(role, content) {
   return d;
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 function addToolMsg(name, content, isResult) {
   const d = document.createElement('div');
   d.className = 'msg tool';
   d.innerHTML = '<div class="tool-name">' + (isResult ? '↳ ' : '→ ') +
     name + (isResult ? ' result' : '') + '</div>' +
     '<div class="tool-content"></div>';
-  d.querySelector('.tool-content').textContent = content;
+  const body = d.querySelector('.tool-content');
+  const text = String(content || '');
+  // Make /local/scratch/<file> URLs clickable; for HTML/SVG/PNG, also embed
+  // an inline preview so the user actually sees what the model made.
+  const urlRe = /(https?:\/\/[^\s]+\/local\/scratch\/[^\s]+)/g;
+  const urls = [...text.matchAll(urlRe)].map(m => m[1]);
+  body.innerHTML = escapeHtml(text).replace(urlRe,
+    u => `<a href="${u}" target="_blank" style="color:#8ab4f8">${u}</a>`);
+  for (const u of urls) {
+    const low = u.toLowerCase().split('?')[0];
+    if (low.endsWith('.html') || low.endsWith('.svg')) {
+      const f = document.createElement('iframe');
+      f.src = u; f.style.width = '100%'; f.style.height = '420px';
+      f.style.border = '1px solid #333'; f.style.marginTop = '6px';
+      f.style.background = '#fff'; d.appendChild(f);
+    } else if (/\.(png|jpe?g|gif|webp)$/.test(low)) {
+      const img = document.createElement('img');
+      img.src = u; img.style.maxWidth = '100%'; img.style.marginTop = '6px';
+      img.style.borderRadius = '6px'; d.appendChild(img);
+    }
+  }
   $msgs.appendChild(d);
   $msgs.scrollTop = $msgs.scrollHeight;
   return d;
@@ -623,6 +658,8 @@ async function send() {
   if (!text || busy) return;
   busy = true;
   $sendBtn.disabled = true;
+  $sendBtn.style.display = 'none';
+  $stopBtn.style.display = '';
   $input.value = '';
   $input.style.height = 'auto';
 
@@ -636,44 +673,100 @@ async function send() {
     startBrowserPoll();
   }
 
+  // Streaming NDJSON: parse the body line by line and render events as
+  // they arrive so the user sees "thinking..." → tokens appearing → tool
+  // calls → final markdown render, instead of a 15s wait with a static dot.
+  let assistantEl = null;      // live-growing <div class="msg assistant">
+  let assistantBuf = "";       // raw text we re-render as markdown each tick
+  const handleEvent = (ev) => {
+    if (!ev || !ev.type) return;
+    if (ev.type === 'token') {
+      removeThinking();
+      if (!assistantEl) {
+        assistantEl = addMsg('assistant', '');
+      }
+      assistantBuf += (ev.text || '');
+      assistantEl.innerHTML = renderMarkdown(assistantBuf);
+      $msgs.scrollTop = $msgs.scrollHeight;
+    } else if (ev.type === 'response') {
+      // Final content: canonical, overrides whatever tokens built up (the
+      // server strips <think> tags and tool markup from this).
+      removeThinking();
+      if (!assistantEl) assistantEl = addMsg('assistant', '');
+      assistantBuf = ev.content || '';
+      assistantEl.innerHTML = renderMarkdown(assistantBuf);
+    } else if (ev.type === 'think') {
+      removeThinking();
+      addThinkMsg(ev.text);
+    } else if (ev.type === 'thinking') {
+      // Server starting a round — ensure the typing-dots indicator shows.
+      if (!document.getElementById('thinkingIndicator')) addThinking();
+    } else if (ev.type === 'tool_call') {
+      removeThinking();
+      addToolMsg(ev.name, JSON.stringify(ev.args, null, 2), false);
+      // Model may still think more after the tool returns; show dots again
+      // so a long tool round is not silent.
+      addThinking();
+      // New round means the next content is a fresh assistant bubble.
+      assistantEl = null; assistantBuf = "";
+    } else if (ev.type === 'tool_result') {
+      removeThinking();
+      addToolMsg(ev.name, ev.result, true);
+      addThinking();
+    } else if (ev.type === 'browsing') {
+      $browserUrl.textContent = ev.url;
+      refreshBrowser();
+    } else if (ev.type === 'error') {
+      removeThinking();
+      addMsg('error', ev.message || 'error');
+    }
+  };
+
+  currentAbort = new AbortController();
   try {
-    const r = await fetch('/local/chat', {
+    const r = await fetch('/local/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
+      body: JSON.stringify({message: text}),
+      signal: currentAbort.signal
     });
-    const d = await r.json();
-    removeThinking();
-
-    if (d.error) {
-      addMsg('error', d.error);
+    if (!r.ok) {
+      removeThinking();
+      let err = 'HTTP ' + r.status;
+      try { const j = await r.json(); if (j.error) err = j.error; } catch(_) {}
+      addMsg('error', err);
     } else {
-      // Render events
-      let streamEl = null;
-      for (const ev of (d.events || [])) {
-        if (ev.type === 'tool_call') {
-          addToolMsg(ev.name, JSON.stringify(ev.args, null, 2), false);
-        } else if (ev.type === 'tool_result') {
-          addToolMsg(ev.name, ev.result, true);
-        } else if (ev.type === 'think') {
-          addThinkMsg(ev.text);
-        } else if (ev.type === 'browsing') {
-          $browserUrl.textContent = ev.url;
-          refreshBrowser();
-        } else if (ev.type === 'error') {
-          addMsg('error', ev.message);
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, {stream: true});
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try { handleEvent(JSON.parse(line)); }
+          catch(_) { /* ignore malformed line */ }
         }
       }
-      if (d.response) {
-        addMsg('assistant', d.response);
-      }
+      removeThinking();
     }
   } catch(e) {
     removeThinking();
-    addMsg('error', 'Request failed: ' + e.message);
+    if (e.name === 'AbortError') {
+      addMsg('error', 'stopped');
+    } else {
+      addMsg('error', 'Request failed: ' + e.message);
+    }
   }
+  currentAbort = null;
   busy = false;
   $sendBtn.disabled = false;
+  $sendBtn.style.display = '';
+  $stopBtn.style.display = 'none';
   $input.focus();
   refreshBrowser();
   loadChats();
