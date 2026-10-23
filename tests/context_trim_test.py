@@ -167,16 +167,18 @@ def _():
             assert payload in m["content"], "tool_call payload lost on strip"
 
 
-@_t("hash:whitespace_normalised")
+@_t("sim:whitespace_normalised")
 def _():
-    # The helper hashes txt not the browser, so call it indirectly via the
-    # private pathway: build the normalised string ourselves and MD5 it.
-    import hashlib
-    def norm(s): return agent_core._WS_RE.sub(" ", s).strip()
-    assert hashlib.md5(norm("a   b\n\n c").encode()).hexdigest() \
-        == hashlib.md5(norm("a b c").encode()).hexdigest()
-    assert hashlib.md5(norm("a b c").encode()).hexdigest() \
-        != hashlib.md5(norm("a b d").encode()).hexdigest()
+    assert agent_core._WS_RE.sub(" ", "a   b\n\n c").strip() == "a b c"
+    assert agent_core._text_similarity("a b c", "a b c") == 1.0
+    assert agent_core._text_similarity("a b c", "x y z") == 0.0
+
+
+@_t("sim:jaccard_math_sanity")
+def _():
+    # 2 shared, 1 unique each side → 2/4 = 0.5
+    s = agent_core._text_similarity("a b c", "a b d")
+    assert abs(s - 2/4) < 1e-9, f"expected 0.5, got {s}"
 
 
 @_t("hint:silent_for_scroll")
@@ -197,28 +199,60 @@ def _():
     assert agent_core._page_change_hint("aaa", "left_click", "") == ""
 
 
-@_t("hint:change_signal_on_advance")
+@_t("hint:tier_identical_says_no_effect")
 def _():
-    out = agent_core._page_change_hint("aaa", "left_click", "bbb")
-    assert "CHANGED" in out, f"expected CHANGED signal, got {out!r}"
-    assert "left_click" in out
+    out = agent_core._page_change_hint("one two three", "key", "one two three")
+    assert "IDENTICAL" in out, out
+    assert "no visible effect" in out
 
 
-@_t("hint:no_change_signal_for_key_enter")
+@_t("hint:tier_minor_update_warns_about_navigation")
 def _():
-    # The exact case the user flagged: Enter pressed, page unchanged → model
-    # must learn it had no effect, not assume success.
-    out = agent_core._page_change_hint("aaa", "key", "aaa")
-    assert "NOT change" in out, f"expected NOT change signal, got {out!r}"
-    assert "key" in out
+    # Trial-12 unselected vs trial-12-with-choice-1-selected: ~99%+ identical
+    # (one new label added to a 100-word page). Hint MUST warn the model not
+    # to treat this as an advance — this is the exact bug the user flagged.
+    base = " ".join(f"word{i}" for i in range(100))
+    after = base + " ChoiceOne selected"
+    out = agent_core._page_change_hint(base, "left_click", after)
+    assert "MOSTLY unchanged" in out, out
+    assert "NOT a navigation" in out
+    assert "Verify" in out
+    # Sanity: similarity above the 0.92 cutoff.
+    assert agent_core._text_similarity(base, after) >= 0.92
 
 
-@_t("hint:change_signal_for_key_enter_when_advanced")
+@_t("hint:tier_partial_change_ambiguous")
 def _():
-    # And the opposite: Enter pressed, page content DID change → model
-    # must learn it submitted and advanced, not treat new trial as failure.
-    out = agent_core._page_change_hint("aaa", "key", "bbb")
-    assert "CHANGED" in out, f"expected CHANGED signal, got {out!r}"
+    # Jaccard = |a∩b| / |a∪b|. With 100 tokens each side and 10 unique on
+    # each (90 shared), Jaccard = 90/110 = 0.818 → middle tier (70-92).
+    a = " ".join(f"w{i}" for i in range(100))
+    b = " ".join([f"w{i}" for i in range(90)] + [f"q{i}" for i in range(10)])
+    out = agent_core._page_change_hint(a, "key", b)
+    assert "partially changed" in out, out
+    sim = agent_core._text_similarity(a, b)
+    assert 0.70 <= sim < 0.92, f"wanted middle tier, got sim={sim}"
+
+
+@_t("hint:tier_major_change_calls_it_navigation")
+def _():
+    # Trial-12 vs totally different trial-13 with 50 of 100 words different.
+    a = " ".join(f"w{i}" for i in range(100))
+    b = " ".join([f"w{i}" for i in range(50)] + [f"q{i}" for i in range(50)])
+    out = agent_core._page_change_hint(a, "key", b)
+    assert "CHANGED significantly" in out, out
+    assert "navigation" in out
+    sim = agent_core._text_similarity(a, b)
+    assert sim < 0.70, f"wanted major tier, got sim={sim}"
+
+
+@_t("hint:percent_included_in_message")
+def _():
+    # The percentage must appear so the model sees a quantitative signal
+    # it can reason about.
+    base = " ".join(f"w{i}" for i in range(100))
+    after = base + " extra"
+    out = agent_core._page_change_hint(base, "left_click", after)
+    assert "%" in out, out
 
 
 if __name__ == "__main__":

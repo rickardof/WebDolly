@@ -24,7 +24,6 @@ the human's answer instead of the generic "next screenshot" prompt.
 import ast
 import base64
 import gzip
-import hashlib
 import io
 import json
 import math
@@ -1044,16 +1043,18 @@ def _page_text(limit: int = 20000) -> str:
 _WS_RE = re.compile(r"\s+")
 
 
-def _page_content_hash(limit: int = 8000) -> str:
-    """Stable fingerprint of visible page text, used to tell the model
-    whether its previous action actually changed the page.
+def _page_fingerprint(limit: int = 8000) -> str:
+    """Normalized visible page text, used by _page_change_hint to tell
+    the model how much its previous action changed the page.
 
     Problem it solves: on multi-trial surveys the URL stays the same when
-    "Submit" advances to the next trial, so the model (looking only at
-    the screenshot) often concludes "I'm still on a trial page → Enter
-    didn't submit" and reverts to scroll+click after being told to trust
-    Enter. Hashing the innerText detects the advance even when the
-    layout is identical.
+    "Submit" advances to the next trial. A binary "same/different" hash
+    was not enough: left_click on an option also changes the text
+    (adds "Choice 1 selected"), which the binary signal flagged as
+    "page CHANGED → navigation" and the model happily accepted even when
+    it was still on the same trial. Returning the normalized text lets
+    the hint compute token-level similarity and distinguish minor UI
+    updates from real navigation.
 
     Whitespace is collapsed so reflow-only differences (window resize,
     tooltip ghost, cursor-induced :hover text) don't register as changes.
@@ -1062,10 +1063,22 @@ def _page_content_hash(limit: int = 8000) -> str:
         txt = _page_text(limit)
         if not txt:
             return ""
-        norm = _WS_RE.sub(" ", txt).strip()
-        return hashlib.md5(norm.encode("utf-8", errors="ignore")).hexdigest()
+        return _WS_RE.sub(" ", txt).strip()
     except Exception:
         return ""
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Jaccard over the token sets. Cheap (O(n+m)), robust to word order,
+    good enough to tell "same page with one new label" from "whole new
+    screen." Returns 1.0 when both sides are empty."""
+    sa = set(a.split())
+    sb = set(b.split())
+    if not sa and not sb:
+        return 1.0
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 # Which action types might legitimately advance the page content. For
@@ -1075,19 +1088,42 @@ _ADVANCING_ACTIONS = frozenset(("left_click", "double_click", "triple_click",
                                 "right_click", "key", "type"))
 
 
-def _page_change_hint(prev_hash: str, prev_action: str, curr_hash: str) -> str:
+def _page_change_hint(prev_fp: str, prev_action: str, curr_fp: str) -> str:
     """One line injected into the next step's prompt. Empty when the
-    previous action couldn't change the page or we have no baseline."""
-    if not prev_hash or not curr_hash or prev_action not in _ADVANCING_ACTIONS:
+    previous action couldn't change the page or we have no baseline.
+
+    Four tiers based on token-set Jaccard similarity:
+      ==1.00  : identical → the action had no visible effect
+      >=0.92  : near-identical → minor UI update (option highlighted,
+                inline label, modal); NOT a navigation
+      >=0.70  : partial change → ambiguous
+      < 0.70  : major change → likely new view/trial
+    The 0.92 cutoff is the one that distinguishes "clicked an option on
+    the same trial" from "submitted and moved to the next trial", which
+    is the concrete bug the hint has to fix.
+    """
+    if not prev_fp or not curr_fp or prev_action not in _ADVANCING_ACTIONS:
         return ""
-    if prev_hash == curr_hash:
-        return (f"[page-signal] Your previous {prev_action} did NOT change the "
-                "page content (innerText identical). The action likely had no "
-                "effect — try a different approach.\n")
-    return (f"[page-signal] Your previous {prev_action} CHANGED the page "
-            "content — you are now on a different view (e.g. the next "
-            "trial/question submitted successfully). Do not assume it failed "
-            "just because the layout looks similar.\n")
+    if prev_fp == curr_fp:
+        return (f"[page-signal] Your previous {prev_action}: page innerText is "
+                "IDENTICAL (0% change). The action had no visible effect — try "
+                "a different approach.\n")
+    sim = _text_similarity(prev_fp, curr_fp)
+    pct = int(round(sim * 100))
+    if sim >= 0.92:
+        return (f"[page-signal] Your previous {prev_action}: page is MOSTLY "
+                f"unchanged ({pct}% similar). Likely a MINOR update (option "
+                "highlighted, inline label, modal) — NOT a navigation. "
+                "Verify the trial/question number on screen before assuming "
+                "you advanced.\n")
+    if sim >= 0.70:
+        return (f"[page-signal] Your previous {prev_action}: page partially "
+                f"changed ({pct}% similar). Content may have shifted but you "
+                "may still be in the same view — verify from the screenshot.\n")
+    return (f"[page-signal] Your previous {prev_action}: page content CHANGED "
+            f"significantly ({pct}% similar) — likely a navigation to a new "
+            "trial/question. Do not assume it failed just because the layout "
+            "looks similar.\n")
 
 
 def _study_title() -> str:
@@ -1854,9 +1890,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _seen_codes: list = []  # completion codes spotted on the study's own pages
         # _used_run_js removed — run_js is disabled for anti-detection
         _survey_url: str = ""  # URL of the external survey (for study_memory)
-        # Content-change signal: see _page_content_hash / _page_change_hint.
+        # Content-change signal: see _page_fingerprint / _page_change_hint.
         # Reset per run so one cycle's final page doesn't bleed into the next.
-        _last_page_hash: str = ""
+        _last_page_fp: str = ""
         _last_action_type_for_signal: str = ""
 
         def _record_user_correction(text: str) -> None:
@@ -2160,10 +2196,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # Fingerprint the page NOW so step N+1 can tell whether this
             # step's action moved the page. Done after screenshot so the
             # action-settle delay has already run.
-            curr_page_hash = _page_content_hash()
-            page_signal = _page_change_hint(_last_page_hash,
+            curr_page_fp = _page_fingerprint()
+            page_signal = _page_change_hint(_last_page_fp,
                                             _last_action_type_for_signal,
-                                            curr_page_hash)
+                                            curr_page_fp)
 
             if step == 1:
                 resume_hint = ""
@@ -2287,7 +2323,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _last_action_type_for_signal = action_type
             else:
                 _last_action_type_for_signal = ""
-            _last_page_hash = curr_page_hash
+            _last_page_fp = curr_page_fp
             try:
                 result_desc = dispatch_action(action_type, args)
             except Exception as e:
