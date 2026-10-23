@@ -27,7 +27,10 @@ on:
 jobs:
   pure-python-tests:
     # Pure-Python unit tests: parser, context-trim, page-change signal.
-    # No browser needed, runs in seconds.
+    # No browser needed, runs in seconds. Pillow is pulled in because
+    # context_trim_test imports agent_core, which does `from PIL import
+    # Image` at module top (playwright/pw_bridge are stubbed in the test
+    # itself, PIL is not — needed to be installed).
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -36,6 +39,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+      - name: Install host-side dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - name: Submissions parser tests
         run: python tests/submissions_parse_test.py
       - name: Context trim + page-change signal tests
@@ -53,10 +61,16 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Playwright (sync API, no browsers needed on host)
+      - name: Install host-side dependencies
+        # Mirrors the repo's requirements.txt so this stays in sync with
+        # local dev (Playwright 1.63, Pillow — both needed to import
+        # agent_core, which the humanisation suite does). An old wrong pin
+        # here (playwright==1.47 + no Pillow) is what made the CI job fail
+        # with ImportError on `from PIL import Image` while 25/25 still
+        # passed locally.
         run: |
           python -m pip install --upgrade pip
-          pip install playwright==1.47.0
+          pip install -r requirements.txt
 
       - name: Build browser-test image
         run: |
