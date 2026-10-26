@@ -1484,6 +1484,23 @@ def safe_page_for(url: str) -> str:
     return f"{pr.scheme}://{pr.netloc}/studies"
 
 
+def loop_home_for(url: str) -> str:
+    """The page a loop cycle must return to between studies: always the
+    Prolific studies list.
+
+    A study detail page, a submission/completion page, or an external survey
+    host (a finished study's own "thank you / Return to Prolific" page) is
+    never a valid home. Returning there each cycle makes the loop re-open a
+    completed study and re-read its code instead of looking for a new one.
+    This also protects against the loop being (re)started while the browser
+    sits on such a page: the home resolves to the studies list wherever it was
+    started from, so only an actual guarded (Prolific) studies list is kept."""
+    pr = urlparse(url or "")
+    if _on_guarded_site(url) and _LIST_PATH.match(pr.path or ""):
+        return safe_page_for(url)
+    return studies_url()
+
+
 def _close_extra_tabs():
     """Close all tabs except the active one. Called after study completion."""
     try:
@@ -1632,20 +1649,35 @@ def completion_pushback(answer: str, url: str, seen_codes: list,
         "no code anywhere should you end the task again.")
 
 
-def _near_checkbox_state(x: float, y: float):
-    """Return checked state of nearest checkbox within 80px, or None."""
-    _JS = """([x, y]) => {
-        const cbs = [...document.querySelectorAll('input[type=checkbox]')];
+def _nearest_checkbox(x: float, y: float, radius: float = 140.0):
+    """Centre and checked-state of the nearest checkbox-like control within
+    `radius` px of (x, y), as {"cx", "cy", "checked"}, or None.
+
+    Returns the DOM centre, not just the state, so a click that lands just off
+    the control (e.g. a box indented inside a padded panel, where the label x
+    differs from the input x) can be retried aimed at the control itself.
+    Covers real checkboxes plus ARIA checkbox/switch widgets."""
+    _JS = """([x, y, radius]) => {
+        const els = document.querySelectorAll(
+            'input[type=checkbox], [role=checkbox], [role=switch]');
         let best = null, minD = Infinity;
-        for (const cb of cbs) {
-            const r = cb.getBoundingClientRect();
-            const d = Math.hypot(r.left + r.width/2 - x, r.top + r.height/2 - y);
-            if (d < 80 && d < minD) { minD = d; best = cb.checked; }
+        for (const el of els) {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) continue;            // hidden control
+            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            const d = Math.hypot(cx - x, cy - y);
+            if (d < radius && d < minD) {
+                minD = d;
+                const checked = (el.checked !== undefined && el.tagName === 'INPUT')
+                    ? el.checked
+                    : el.getAttribute('aria-checked') === 'true';
+                best = { cx: Math.round(cx), cy: Math.round(cy), checked: checked };
+            }
         }
         return best;
     }"""
     try:
-        return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+        return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y, radius]))
     except Exception:
         return None
 
@@ -1679,7 +1711,7 @@ def _check_disabled_near(x: float, y: float) -> bool:
 def dispatch_action(action_type: str, args: dict) -> str:
     if action_type == "left_click":
         x, y = args["coordinate"]
-        cb_before = _near_checkbox_state(x, y)
+        cb = _nearest_checkbox(x, y)
         # Aim imperfection: always a small gaussian offset (±1-2px) so
         # clicks don't always land on the dead centre of a button. The
         # final cursor position is still exactly (ax,ay), so the retry
@@ -1688,13 +1720,18 @@ def dispatch_action(action_type: str, args: dict) -> str:
         ay = round(y + random.gauss(0, 1.4))
         _human_move(ax, ay)
         docker_exec("xdotool", "click", "1")
-        if cb_before is not None:
-            cb_after = _near_checkbox_state(x, y)
-            if cb_after == cb_before:
-                # Retry with slightly offset coords instead of JS click
-                ox = round(x) + random.choice([-3, -2, 2, 3])
-                oy = round(y) + random.choice([-3, -2, 2, 3])
-                _human_move(ox, oy)
+        if cb is not None:
+            after = _nearest_checkbox(x, y)
+            if after is not None and after.get("checked") == cb.get("checked"):
+                # The click did not toggle the box. A blind ±3px nudge is
+                # useless when the aim was off by more (seen on Prolific's
+                # "confidential" confirm box, indented inside a padded panel:
+                # the model kept clicking the panel's left padding, ~27px off
+                # the control). Retry aimed at the checkbox's real DOM centre
+                # -- still a trusted xdotool click, just grounded correctly.
+                tx = cb["cx"] + round(random.gauss(0, 1.0))
+                ty = cb["cy"] + round(random.gauss(0, 1.0))
+                _human_move(tx, ty)
                 docker_exec("xdotool", "click", "1")
         return f"left_click at ({x:.0f},{y:.0f})"
 

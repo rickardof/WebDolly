@@ -815,22 +815,12 @@ def _cached_url():
 
 
 def _dashboard_for(url: str) -> str:
-    """Page each loop cycle should return to. If the run was started while
-    a single study's detail page was open (e.g. one with a reserved place),
-    returning to THAT every cycle is wrong -- it is not the list of
-    studies. Map such pages to the site's study list."""
-    import re
-    from urllib.parse import urlparse
-    pr = urlparse(url or "")
-    if agent_core.is_forbidden_url(url):
-        return agent_core.safe_page_for(url)
-    if re.fullmatch(r"/studies/[0-9a-fA-F]{24}/?", pr.path or ""):
-        return f"{pr.scheme}://{pr.netloc}/studies"
-    # Submission-complete and waiting-room pages: the agent's job there is
-    # done; returning to them on the next cycle would confuse the model.
-    if re.match(r"^/(submissions|waitingroom|participant)", pr.path or ""):
-        return f"{pr.scheme}://{pr.netloc}/studies"
-    return url
+    """The page each loop cycle returns to: always the Prolific studies list
+    (see agent_core.loop_home_for). A study detail, submission/completion or
+    external survey page is never a valid home -- returning there would make
+    the loop re-open a finished study -- so only an actual studies list is
+    kept as-is. Robust to the loop being started from any page."""
+    return agent_core.loop_home_for(url)
 
 
 def _inhibit_sleep():

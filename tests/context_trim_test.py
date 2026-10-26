@@ -938,6 +938,82 @@ def _():
         "already pushed back once: must not loop"
 
 
+@_t("click:checkbox_miss_retries_at_dom_centre")
+def _():
+    orig = (agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox)
+    moves, clicks = [], []
+    try:
+        agent_core._human_move = lambda x, y: moves.append((x, y))
+        agent_core.docker_exec = lambda *a, **k: clicks.append(a)
+        # a checkbox sits at (509,747); the click at (482,747) misses it, so its
+        # state is unchanged before/after -> a retry at the real centre is expected
+        agent_core._nearest_checkbox = lambda x, y, *a, **k: {"cx": 509, "cy": 747, "checked": False}
+        agent_core.dispatch_action("left_click", {"coordinate": [482, 747]})
+    finally:
+        agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox = orig
+    assert len(clicks) == 2, f"a missed checkbox click must retry once, got {len(clicks)}"
+    assert abs(moves[-1][0] - 509) <= 2 and abs(moves[-1][1] - 747) <= 2, \
+        f"retry must aim at the checkbox centre (509,747), not the missed point: {moves[-1]}"
+
+
+@_t("click:checkbox_toggled_no_retry")
+def _():
+    orig = (agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox)
+    clicks = []
+    states = iter([{"cx": 509, "cy": 747, "checked": False},    # before the click
+                   {"cx": 509, "cy": 747, "checked": True}])     # after: it toggled
+    try:
+        agent_core._human_move = lambda x, y: None
+        agent_core.docker_exec = lambda *a, **k: clicks.append(a)
+        agent_core._nearest_checkbox = lambda x, y, *a, **k: next(states)
+        agent_core.dispatch_action("left_click", {"coordinate": [482, 747]})
+    finally:
+        agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox = orig
+    assert len(clicks) == 1, f"a checkbox that toggled must not be re-clicked, got {len(clicks)}"
+
+
+@_t("click:no_checkbox_single_click")
+def _():
+    orig = (agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox)
+    clicks = []
+    try:
+        agent_core._human_move = lambda x, y: None
+        agent_core.docker_exec = lambda *a, **k: clicks.append(a)
+        agent_core._nearest_checkbox = lambda x, y, *a, **k: None
+        agent_core.dispatch_action("left_click", {"coordinate": [100, 100]})
+    finally:
+        agent_core._human_move, agent_core.docker_exec, agent_core._nearest_checkbox = orig
+    assert len(clicks) == 1, f"a normal click (no checkbox near) must not retry, got {len(clicks)}"
+
+
+@_t("loophome:keeps_prolific_studies_list")
+def _():
+    # already on the Prolific list: kept as-is
+    assert agent_core.loop_home_for("https://app.prolific.com/studies") == \
+        "https://app.prolific.com/studies"
+
+
+@_t("loophome:study_detail_maps_to_list")
+def _():
+    assert agent_core.loop_home_for(
+        "https://app.prolific.com/studies/6adf5f7c60e9893e06c36664") == agent_core.studies_url()
+
+
+@_t("loophome:external_survey_maps_to_prolific_list")
+def _():
+    # a finished eval.services completion page must NOT become the loop home,
+    # otherwise the loop re-opens it and re-reads the same code every cycle
+    out = agent_core.loop_home_for(
+        "https://eval.services/?evaluation_id=x&prolific_pid=y&study_id=z&session_id=w")
+    assert out == agent_core.studies_url(), out
+
+
+@_t("loophome:submission_complete_maps_to_list")
+def _():
+    assert agent_core.loop_home_for(
+        "https://app.prolific.com/submissions/complete?cc=C7737BD52") == agent_core.studies_url()
+
+
 if __name__ == "__main__":
     passed = sum(1 for _, s, _ in _RESULTS if s == "PASS")
     failed = sum(1 for _, s, _ in _RESULTS if s != "PASS")
