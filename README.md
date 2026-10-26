@@ -19,39 +19,40 @@ vedi sotto):
                                        └────────────────────────┘
 ```
 
-- **Modello**: `llama-server` (llama.cpp, immagine CUDA) serve Fara via API
-  OpenAI-compatibile su `127.0.0.1:8090`.
-- **Browser**: Chromium in modalità kiosk dentro un container, su un display
-  virtuale 1440x900. L'agente vede quello schermo e agisce con xdotool
-  (mouse/tastiera) + Playwright via CDP (navigazione, lettura DOM, compilazione).
-- **Controller**: gira sull'host (Python). Espone la GUI web su `127.0.0.1:8766`,
-  una dashboard delle performance su `/dashboard` e un bot Telegram per
-  comandare tutto dal telefono.
-- **Modello remoto (alternativa alla GPU)**: `FARA_URL` + `FARA_API_KEY` possono
-  puntare a qualunque API OpenAI-compatibile con visione (es. Gemini). In quel
-  caso il container `fara-test` e la GPU non servono e l'agente gira anche su una
-  VM piccola: vedi [Esecuzione su VM cloud](#esecuzione-su-vm-cloud).
+- **Modello** (`fara-test`): llama.cpp serve Fara via API OpenAI su `127.0.0.1:8090`.
+  In alternativa `FARA_URL`+`FARA_API_KEY` puntano a un'API remota con visione (es.
+  Gemini): niente GPU né container, gira anche su una VM piccola ([VM cloud](#esecuzione-su-vm-cloud)).
+- **Browser** (`fara-browser-pw`): Chromium kiosk in un container (display virtuale
+  1440x900); l'agente lo guida con xdotool e Playwright via CDP.
+- **Controller** (host, Python): la GUI su `127.0.0.1:8766`, la
+  [dashboard](#dashboard-delle-performance) su `/dashboard` e il bot Telegram.
 
-## Indice
+## Avvio rapido
 
-- [Requisiti e hardware](#requisiti-e-hardware) · [Software da installare](#software-da-installare)
-- [Modelli](#modelli)
-- [Setup (una tantum)](#setup-una-tantum) — [Python](#1-ambiente-python) · [Docker](#2-immagini-e-rete-docker) · [modello](#3-container-del-modello-llamacpp) · [browser](#4-container-del-browser) · [identità](#5-identità-opzionale) · [**Telegram**](#6-telegram-opzionale)
-- [Avvio](#avvio) e [spegnimento](#verifica-e-spegnimento)
-- [Come si usa la GUI](#come-si-usa-la-gui) · [Guardrail](#guardrail)
-- [Modalità di velocità](#modalità-di-velocità)
-- [Dashboard delle performance](#dashboard-delle-performance)
-- [**Controllo da Telegram**](#controllo-da-telegram)
-- [API HTTP](#api-http-tutto-su-loopback) · [riga di comando](#uso-da-riga-di-comando-senza-gui)
-- [Esecuzione su VM cloud](#esecuzione-su-vm-cloud)
-- [Variabili d'ambiente](#variabili-dambiente) · [Log](#log) · [Test e benchmark](#test-e-benchmark) · [Struttura della repo](#struttura-della-repo)
-- [NEXT_STEPS.md](NEXT_STEPS.md) — cosa manca e cosa va sistemato
+Container e `venv_pw` già pronti:
+
+```bash
+./scripts/start_gui_pw.sh     # avvia i container + la GUI, apre http://127.0.0.1:8766
+```
+
+Nella GUI scrivi **contesto** (chi sei) e **compito**, poi premi ▶ Avvia (o da
+Telegram `/start`). Dopo una modifica al codice Python: `./scripts/restart.sh`.
+
+**Prima volta?** Fai una volta il [Setup](#setup-una-tantum) (venv, immagini Docker,
+container del modello e del browser), poi il comando qui sopra. Con un modello via
+API la GPU non serve: vedi [Esecuzione su VM cloud](#esecuzione-su-vm-cloud).
+
+Il resto del documento: [Requisiti](#requisiti-e-hardware) · [Setup](#setup-una-tantum) ·
+[GUI](#come-si-usa-la-gui) · [Guardrail](#guardrail) · [Velocità](#modalità-di-velocità) ·
+[Telegram](#controllo-da-telegram) · [API HTTP](#api-http-tutto-su-loopback) ·
+[Variabili d'ambiente](#variabili-dambiente) · [Test](#test-e-benchmark) ·
+[cosa manca](NEXT_STEPS.md).
 
 ## Requisiti e hardware
 
 Il modello si può servire in due modi, e la differenza di hardware è tutta qui:
 
-| | **A — modello in locale** | **B — modello via API** |
+| | **A: modello in locale** | **B: modello via API** |
 |---|---|---|
 | Cosa serve | GPU NVIDIA + container llama.cpp | solo `FARA_URL` + `FARA_API_KEY` |
 | Da scaricare | 10–18 GB di GGUF | niente |
@@ -65,7 +66,7 @@ Il modello si può servire in due modi, e la differenza di hardware è tutta qui
 | RAM | 8 GB (16 con opzione A) | 32 GB | il browser in container gira su ~1 GB |
 | Disco | 5 GB + i modelli | 40 GB | 27B = 17,5 + 0,6 GB · 9B = 9,5 GB · i log tengono fino a 200 run di screenshot |
 | CPU | 2 core | 8 core | Chromium, Xvfb e xdotool stanno nel container |
-| Sistema | Linux con Docker | — | niente Windows/macOS: serve `docker exec` + display virtuale |
+| Sistema | Linux con Docker | idem | niente Windows/macOS: serve `docker exec` + display virtuale |
 
 Con l'opzione B bastano **2 vCPU / 4 GB / 20 GB di disco** (è il taglio del free
 tier ARM di Oracle Cloud, su cui sono tarati gli script in `scripts/cloud/`).
@@ -96,7 +97,7 @@ Sull'host servono solo tre cose:
 - **Python 3.12** più un venv con `playwright` e `pillow` (passo 1 del setup).
 - Un browser qualsiasi per aprire la GUI.
 
-Tutto il resto — Chromium, Xvfb, xdotool, scrot, x11vnc, socat — è dentro
+Tutto il resto (Chromium, Xvfb, xdotool, scrot, x11vnc, socat) è dentro
 l'immagine Docker del browser: **non va installato sull'host**. Playwright si
 collega al Chromium del container via CDP, quindi non serve `playwright install`.
 Il bot Telegram usa solo la libreria standard di Python: nessuna dipendenza in
@@ -117,130 +118,60 @@ cui hai preso Fara 1.5 in formato GGUF e copiali in `models/`.
 
 ## Setup (una tantum)
 
-### 1. Ambiente Python
+Prerequisiti sull'host: **Docker** (più il [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+per il modello in locale) e **Python 3.12**. Per l'opzione A metti prima i GGUF in
+`models/` (vedi [Modelli](#modelli)). Il resto (Chromium, Xvfb, xdotool, ...) sta
+nell'immagine Docker, non si installa a mano.
 
 ```bash
-python3 -m venv venv_pw
-venv_pw/bin/pip install -r requirements.txt
+./scripts/setup.sh
 ```
 
-Playwright si collega al Chromium già in esecuzione nel container via CDP,
-quindi non serve `playwright install`.
+Crea il venv (`requirements.txt`), la rete `fara-net`, costruisce le immagini e
+avvia i container `fara-browser-pw` e, se i GGUF sono in `models/`, `fara-test` col
+modello. È idempotente; i comandi esatti stanno dentro lo script. Per il 9B imposta
+`FARA_LOCAL_MODEL`/`FARA_LOCAL_MMPROJ` (col 9B tieni il thinking spento). Con un
+modello via API il container del modello e la GPU non servono: imposta
+`FARA_URL`/`FARA_MODEL`/`FARA_API_KEY` (vedi [VM cloud](#esecuzione-su-vm-cloud)).
 
-### 2. Immagini e rete Docker
-
-```bash
-docker network create fara-net
-
-# immagine base del browser (Chromium + Xvfb + xdotool + x11vnc)
-docker build -t fara-browser docker/browser/
-
-# stessa immagine + socat per esporre CDP all'host
-docker build -t fara-browser-pw docker/browser-pw/
-```
-
-### 3. Container del modello (llama.cpp)
+Due file **opzionali**, da copiare dai `.example` (entrambi nel `.gitignore`):
 
 ```bash
-docker run -d --name fara-test --restart unless-stopped \
-  --gpus all --network fara-net \
-  -p 127.0.0.1:8090:8080 \
-  -v "$PWD/models:/models" \
-  ghcr.io/ggml-org/llama.cpp:server-cuda \
-  -m /models/Fara1.5-27B-Q4_K_M.gguf \
-  --mmproj /models/Fara1.5-27B.mmproj-q8_0.gguf \
-  --host 0.0.0.0 --port 8080 \
-  --reasoning-format none -ngl 99 -c 32768
-```
-
-Per usare il 9B cambia `-m` e `--mmproj` con i file 9B. Con il 9B conviene
-lasciare il thinking spento (default): vedi `FARA_ENABLE_THINKING` sotto.
-
-### 4. Container del browser
-
-```bash
-mkdir -p var/logs/pw var/profiles/pw
-
-docker run -d --name fara-browser-pw --restart unless-stopped \
-  --network fara-net --shm-size 64m \
-  -p 127.0.0.1:9333:9333 -p 127.0.0.1:5901:5900 \
-  -v "$PWD/fixtures/pw:/data" \
-  -v "$PWD/var/profiles/pw:/home/browser/chromium-profile" \
-  fara-browser-pw
-```
-
-- `fixtures/pw/` è montata come `/data`: contiene le pagine di test
-  (`file:///data/test.html`, ecc.) e gli screenshot temporanei.
-- `var/profiles/pw/` è il profilo persistente: cookie e login restano tra
-  un riavvio e l'altro. Contiene dati personali, non condividerlo.
-- Porta 5901: VNC del display virtuale (senza password, solo loopback), utile
-  per guardare/intervenire a mano con un client VNC.
-
-### 5. Identità (opzionale)
-
-I campi tipo "Prolific ID" o "email" vengono **copiati, mai inventati**. Se non
-li metti nel contesto del compito, li legge da `agent/identity.json`:
-
-```bash
-cp agent/identity.json.example agent/identity.json
-# poi compila "prolific_id" e "email"
-```
-
-Il file è nel `.gitignore`.
-
-### 6. Telegram (opzionale)
-
-Serve per comandare l'agente e ricevere notifiche dal telefono.
-
-```bash
+cp agent/identity.json.example      agent/identity.json
 cp agent/telegram_config.py.example agent/telegram_config.py
 ```
 
-Poi riempi i due valori: il **token** lo dà [@BotFather](https://t.me/BotFather)
-con `/newbot`, il **chat id** si legge aprendo
-`https://api.telegram.org/bot<TOKEN>/getUpdates` dopo aver scritto un messaggio
-al bot (`result[0].message.chat.id`). Istruzioni anche dentro il file.
+- `agent/identity.json`: "Prolific ID", email e simili, campi che l'agente
+  **copia, mai inventa** (quando non li passi nel contesto del compito).
+- `agent/telegram_config.py`: per comandare l'agente dal telefono. Token da
+  [@BotFather](https://t.me/BotFather) e chat id (istruzioni nel file); senza, bot e
+  notifiche sono saltati in silenzio, e il bot risponde solo a quel chat id. Il token
+  è un segreto.
 
-Se il file non c'è, bot e notifiche vengono saltati in silenzio e il resto
-funziona identico. Il bot risponde **solo** ai messaggi che arrivano da quell'id.
-
-> Il token è un segreto, e da solo basta per pilotare l'agente:
-> `telegram_config.py` è nel `.gitignore` (come `identity.json` e
-> `scripts/cloud/fara.env`), nella repo c'è solo il `.example`.
-> Vedi [Controllo da Telegram](#controllo-da-telegram).
+Il profilo del browser (`var/profiles/pw/`) è persistente: cookie e login restano tra
+i riavvii; contiene dati personali, non condividerlo. VNC del display su
+`127.0.0.1:5901` per guardare o intervenire a mano.
 
 ## Avvio
 
-```bash
-./scripts/start_gui_pw.sh     # avvia i container + la GUI e apre il browser su http://127.0.0.1:8766
-./scripts/restart.sh          # riavvia solo il gui_server (dopo aver modificato il codice Python)
-```
-
-`scripts/start_gui_pw.sh` fa `docker start fara-test fara-browser-pw`, avvia
-`gui_server.py` su `:8766` solo se non risponde già, e apre la GUI nel browser.
-`scripts/restart.sh` in più ferma la run in corso e uccide il processo vecchio prima di
-rilanciare. Il log del server finisce sempre in `var/logs/pw/gui_server.out`.
-
-Oppure a mano:
+Lo start quotidiano è in [Avvio rapido](#avvio-rapido). `start_gui_pw.sh` fa
+`docker start fara-test fara-browser-pw` e avvia `gui_server.py` su `:8766` solo se
+non risponde già; `restart.sh` in più ferma la run e uccide il processo vecchio
+(log in `var/logs/pw/gui_server.out`). A mano, o con un modello via API (allora
+`fara-test` non serve, basta esportare `FARA_URL`/`FARA_MODEL`/`FARA_API_KEY`):
 
 ```bash
 docker start fara-test fara-browser-pw
 cd agent && ../venv_pw/bin/python gui_server.py --port 8766
 ```
 
-Con un modello via API il container `fara-test` non serve: basta esportare
-`FARA_URL`, `FARA_MODEL` e `FARA_API_KEY` prima di avviare il server.
+Col server partono da soli il **bot Telegram** (se `telegram_config.py` esiste,
+manda `/help` per provarlo) e l'aggiornamento degli studi recenti.
 
-> Gli script ricavano i percorsi da dove si trovano, e il codice dalla
-> posizione del file: la cartella del progetto si può spostare o rinominare
-> senza modificare niente. I container, però, hanno i bind mount scritti nella
-> loro configurazione: se sposti la cartella vanno ricreati con i nuovi `-v`
-> (vedi il passo 4).
-
-Avviando il server partono da soli anche due thread di servizio: il **bot
-Telegram** (se `agent/telegram_config.py` esiste — manda `/help` al bot
-per verificare che risponda) e l'aggiornamento degli studi recenti. Non c'è
-niente da lanciare a parte.
+> Script e codice ricavano i percorsi da dove si trovano: la cartella si può
+> spostare o rinominare senza toccare niente. I container no: hanno i bind mount
+> nella loro configurazione, quindi se sposti la cartella vanno ricreati con i
+> nuovi `-v` (passo 4).
 
 ### Verifica e spegnimento
 
@@ -257,12 +188,10 @@ pkill -f "gui_server.py --port 8766"       # ferma server, bot Telegram e stream
 docker stop fara-browser-pw fara-test      # ferma browser e modello
 ```
 
-> Se `/agent/status` mostra `"url": ""` mentre il ciclo risulta in esecuzione,
-> la scheda del browser è bloccata: lo schermo continua a mostrare l'ultimo
-> frame (lo screenshot passa da `scrot`, non da Playwright) ma ogni lettura del
-> DOM resta appesa. Dal ciclo successivo l'agente se ne accorge e sostituisce la
-> scheda da solo; a mano si fa così, senza riavviare il container e senza
-> perdere il login:
+> Se `/agent/status` dà `"url": ""` a ciclo in esecuzione, la scheda è bloccata:
+> lo schermo mostra l'ultimo frame (via `scrot`) ma ogni lettura del DOM resta
+> appesa. L'agente la sostituisce da solo dal ciclo dopo; a mano, senza riavviare
+> il container né perdere il login:
 >
 > ```bash
 > curl -X PUT "localhost:9333/json/new?https://app.prolific.com/studies"
@@ -274,11 +203,10 @@ docker stop fara-browser-pw fara-test      # ferma browser e modello
 
 Il pannello sta su `http://127.0.0.1:8766` (solo loopback).
 
-**Sinistra**: lo schermo live del browser (con marcatore sul punto che l'agente
-sta per cliccare). Quando l'agente è fermo puoi usare il **controllo manuale**:
-barra indirizzi ("Vai"), campo "Digita" e tasti Invio/Tab/Canc/Esc. Serve ad
-esempio per fare il **primo login** su un sito: il browser è in kiosk e non ha
-barra degli indirizzi, quindi si naviga da qui. Il login resta nel profilo.
+**Sinistra**: lo schermo live del browser (con marcatore sul prossimo click). A
+agente fermo c'è il **controllo manuale** (barra indirizzi, "Digita",
+Invio/Tab/Canc/Esc): serve soprattutto per il **primo login** a un sito, dato che
+il browser è in kiosk senza barra indirizzi. Il login resta nel profilo.
 
 **Destra, tab "Impostazioni"**:
 
@@ -324,66 +252,47 @@ Durante la run:
 
 ### Guardrail
 
-- Sui siti in `FARA_GUARDED_HOSTS` (default `prolific.com,prolific.co`) l'agente
-  non può entrare in `/about-you` né nelle pagine di logout: viene riportato
-  all'elenco studi.
-- **Timer dello studio**: parte quando si passa da Prolific a un sito esterno,
-  qualunque sia il modo (click, Invio in un modale, redirect JS), con il minimo
-  letto dalla card dello studio che ha cliccato (e, se lì non lo trova, dal testo
-  della pagina). Finché mancano più di 30 s al minimo l'azione `terminate` viene
-  **rifiutata** e all'agente viene detto di usare `wait`. Tornando a `/studies` il
-  timer si ri-arma per lo studio successivo.
-- La **compilazione batch** è disattivata sulle pagine dei siti guardati: si usa
-  solo sui questionari esterni, non sull'interfaccia di Prolific.
-- **Click verificati**: dopo un click su una checkbox ne rilegge lo stato dal DOM
-  e, se non è cambiato, la ri-clicca via JS. Se il click finisce su un elemento
-  disabilitato (`disabled`, `aria-disabled`, classe `disabled`) l'agente viene
-  avvisato che probabilmente è rimasto un campo obbligatorio da compilare.
-- A studio completato chiude le schede extra rimaste aperte, così il ciclo
-  successivo riparte da una sola scheda.
-- **Memoria degli studi scartati**: ogni ciclo riparte senza memoria, quindi uno
-  studio che è lì ma non si può fare (non idoneo, posti esauriti, già svolto,
-  screened out) verrebbe riaperto ogni volta. Quando la pagina dello studio lo
-  dice a chiare lettere, lo studio finisce in `agent/study_cache.json` e
-  dal ciclo dopo l'agente si vede l'elenco dei titoli da non aprire; se lo riapre
-  comunque, al primo passo viene rimbalzato all'elenco senza spendere altri
-  passi. Il nome dello studio viene letto sulla pagina Prolific, non dentro la
-  survey esterna (dove il titolo sarebbe quello del questionario). Le voci
-  scadono dopo 14 giorni (`FARA_STUDY_CACHE_DAYS`). Si leggono con
-  `curl localhost:8766/study_cache` e si azzerano con
-  `curl -X POST localhost:8766/study_cache/clear`.
-- **Audio/video (opzionale)**: con l'opzione attiva, un `<video>`/`<audio>` o un
-  player incorporato fa abbandonare lo studio su qualunque pagina; le frasi tipo
-  "you will need headphones" o "watch the video" vengono invece lette **solo**
-  sulla pagina Prolific dello studio, dove sono una descrizione — dentro un
-  questionario la stessa frase può essere una domanda, e abbandonare una survey
-  a metà per un falso positivo costa molto più di un click sprecato.
-- **Codice di completamento**, tre casi:
-  1. lo studio rimanda a Prolific con `…/submissions/complete?cc=XXXX`:
-     Prolific registra da solo, l'agente legge il codice **dall'URL** e chiude
-     il ciclo senza chiedere niente al modello;
-  2. lo studio mostra il codice **sulla sua pagina** (testo, campo da copiare,
-     iframe, o nel proprio URL tipo `?code=XXXX`): l'agente torna su Prolific,
-     clicca "I'm finished" e scrive il codice nel campo, come prima. In più ora
-     tutti i codici che compaiono durante lo studio vengono annotati, e alla fine
-     confrontati con quello che il modello ha inserito: se non torna, o se ha
-     chiuso con `NOCODE` mentre un codice c'era, arriva un ⚠️ su Telegram. Il
-     controllo segnala e basta, non corregge il modello;
-  3. lo studio non dà nessun codice: il modello chiude con `NOCODE`, come prima.
-     Un URL senza `cc` non vuol dire "niente codice", vuol dire solo che lì non
-     c'è.
-- **Attesa sull'elenco senza modello**: finito un ciclo in loop, la pagina viene
-  ricaricata e letta dal DOM ogni 45 s circa (la cadenza che il loop aveva già).
-  Se Prolific mostra "Waiting for studies" il modello non viene chiamato; parte
-  solo se c'è qualcosa sull'elenco, se la pagina non è riconoscibile, o ogni
-  15 minuti per sicurezza. Il 13 ottobre il 93% dei cicli era "elenco vuoto".
-- **Velocità del modello sotto controllo**: ogni risposta registra i tempi di
-  llama-server (in `/agent/status` e nel transcript). Se la generazione resta
-  sotto i 10 token/s per 6 risposte di fila (di solito sono ~30) arriva un
-  avviso: è successo il 13 ottobre, dopo ore di cache dei prompt riusata sullo
-  stesso slot, e `docker restart fara-test` l'ha risolto.
-- Le istruzioni nei preset (es. saltare studi con audio/video) sono solo testo
-  del compito: modificale a piacere.
+- Sui siti in `FARA_GUARDED_HOSTS` (default `prolific.com,prolific.co`) l'agente non
+  entra in `/about-you` né nelle pagine di logout: viene riportato all'elenco studi.
+- **Timer dello studio**: parte passando da Prolific a un sito esterno (click, Invio
+  in un modale o redirect JS), col minimo letto dalla card dello studio (o dal testo
+  della pagina). Finché mancano più di 30 s `terminate` viene **rifiutato** e
+  all'agente si dice di usare `wait`; a `/studies` si ri-arma per lo studio dopo.
+- **Batch fill** disattivato sui siti guardati: solo sui questionari esterni.
+- **Click verificati**: dopo un click su una checkbox ne rilegge lo stato dal DOM e,
+  se non è cambiato, la ri-clicca via JS. Un click su un elemento disabilitato
+  (`disabled`/`aria-disabled`/classe `disabled`) avvisa che resta un campo obbligatorio.
+- A studio completato chiude le schede extra, così il ciclo dopo riparte da una sola.
+- **Memoria degli studi scartati**: uno studio listato ma non fattibile (non idoneo,
+  posti esauriti, già svolto, screened out), quando la pagina lo dice chiaramente,
+  finisce in `agent/study_cache.json`; dal ciclo dopo l'agente ne vede il titolo e, se
+  lo riapre, viene rimbalzato all'elenco al primo passo. Il nome è letto sulla pagina
+  Prolific (non dentro la survey). Scade dopo 14 giorni (`FARA_STUDY_CACHE_DAYS`); si
+  legge con `curl localhost:8766/study_cache`, si azzera con `.../study_cache/clear`.
+- **Audio/video (opzionale)**: un `<video>`/`<audio>` o un player fa abbandonare lo
+  studio su qualunque pagina; le frasi tipo "you will need headphones" vengono invece
+  lette **solo** sulla pagina Prolific (dentro un questionario potrebbero essere una
+  domanda, e abbandonare per un falso positivo costa più di un click sprecato).
+- **Codice di completamento**, tre casi: (1) lo studio rimanda a Prolific con
+  `…/submissions/complete?cc=XXXX` → l'agente legge il codice **dall'URL** e chiude
+  senza interpellare il modello; (2) il codice è **sulla pagina** (testo, campo,
+  iframe, o `?code=XXXX` nell'URL) → torna su Prolific, clicca "I'm finished" e lo
+  scrive; tutti i codici visti vengono annotati e confrontati con quello inserito, e
+  se non torna (o chiude `NOCODE` con un codice presente) arriva un ⚠️ su Telegram
+  (segnala soltanto, non corregge); (3) nessun codice → chiude con `NOCODE` (un URL
+  senza `cc` non vuol dire "niente codice", solo che lì non c'è).
+- **Falso completamento**: se il modello chiude con `terminate` a testo libero (non
+  `CODE:`/`NOCODE`) mentre è ancora sul sito della survey e nessun codice è comparso,
+  di solito si è fermato sulla pagina di ringraziamento saltando il bottone finale che
+  riporta a Prolific. La chiusura viene rifiutata una volta sola, con l'invito a cercare
+  quel controllo (Submit/Finish/Return to Prolific); se richiude, viene obbedito.
+- **Attesa sull'elenco senza modello**: in loop la pagina viene ricaricata e letta dal
+  DOM ogni ~45 s; con "Waiting for studies" il modello non viene chiamato, parte solo
+  se c'è qualcosa, se la pagina non è riconoscibile, o ogni 15 min per sicurezza.
+- **Velocità del modello**: ogni risposta registra i tempi di llama-server
+  (`/agent/status` e transcript); sotto i 10 token/s per 6 risposte di fila (di solito
+  ~30) arriva un avviso, di solito risolto con `docker restart fara-test`.
+- Le istruzioni nei preset (es. saltare audio/video) sono solo testo del compito.
 
 ## Modalità di velocità
 
@@ -397,16 +306,14 @@ nella barra della GUI, da Telegram (`/normal`, `/hurry`, `/superfast`) o con
 | `hurry` | PNG ridotto al 75% | 512 | max 10, si taglia a 5 |
 | `super_fast` | JPEG q60 ridotto al 50% | 384 | max 5, si taglia a 2 |
 
-Lo screenshot viene ridimensionato **una volta sola**, direttamente dalla
-cattura a piena risoluzione: ridurlo e poi lasciare che `smart_resize` lo
-riportasse in parte su costava più byte dell'originale (411 KB contro 376 KB su
-uno screenshot vero) perché la sfocatura introdotta è proprio quello che il PNG
-comprime peggio.
+Lo screenshot viene ridimensionato **una volta sola**, dalla cattura a piena
+risoluzione (ridurlo e poi lasciarlo ri-ingrandire a `smart_resize` costava più
+byte dell'originale).
 
 Se uno studio sta sforando il tempo minimo stimato la velocità **sale da sola**:
 `hurry` appena si supera il minimo, `super_fast` dopo 2 minuti di sforamento.
 L'escalation non scende mai di livello e, finito lo studio (o tornando
-all'elenco), si ripristina la modalità che avevi scelto tu — nella GUI il bordo
+all'elenco), si ripristina la modalità che avevi scelto tu; nella GUI il bordo
 giallo sul bottone indica proprio questo.
 
 ## Dashboard delle performance
@@ -419,8 +326,7 @@ viene il codice** (URL o schermo).
 
 La sezione **Dove va il tempo** divide il tempo tra elenco vuoto, studi
 completati e cicli falliti, e i passi tra elenco, dentro uno studio e altrove su
-Prolific, con la velocità recente del modello. Il 13 ottobre: 72% del tempo
-sull'elenco vuoto, 5% negli studi completati.
+Prolific, con la velocità recente del modello.
 
 Ogni run scrive un `summary.json` accanto al transcript e la dashboard legge
 quelli; per le run più vecchie il riassunto si calcola una volta e si salva. Si
@@ -565,15 +471,12 @@ pensato/fatto a ogni passo) e `screenshot_NN.png`. Nel transcript, accanto alle
 righe del dialogo col modello, ci sono righe `{"type": "diag"}` con lo stato
 "meccanico" di ogni passo (URL, sito guardato sì/no, azione, risultato, stato del
 timer, durata letta dalla card): servono per capire a posteriori perché il timer
-è partito o no. La dashboard aggrega tutti i transcript presenti; `var/logs/pw/`
-tiene le ultime 200 run e cancella le più vecchie.
+è partito o no. La dashboard aggrega tutti i transcript presenti.
 
-Passate le ultime `FARA_MAX_RUNS` run (200) gli screenshot vengono cancellati —
-sono loro a riempire il disco, uno per passo — mentre il transcript viene
-compresso in `transcript.jsonl.gz` e **tenuto per sempre**: pesa qualche decina
-di KB ed è l'unica traccia di cosa ha fatto l'agente. Dashboard e conteggio
-degli studi completati leggono entrambe le forme, quindi lo storico delle
-statistiche non si perde.
+Oltre le ultime `FARA_MAX_RUNS` run (200) `var/logs/pw/` cancella gli screenshot
+(sono loro a riempire il disco, uno per passo) ma comprime il transcript in
+`transcript.jsonl.gz` e lo **tiene per sempre** (qualche decina di KB); dashboard
+e conteggi leggono entrambe le forme, quindi lo storico non si perde.
 
 Ogni run ha anche un `summary.json` (esito, da dove viene il codice, passi
 sull'elenco / nello studio / altrove, velocità mediana del modello), e nel
@@ -649,7 +552,7 @@ scripts/
                     start-agent, fara-agent.service, fara.env.example
   tools/            utility (inject_each_cycle.py)
 bench/              benchmark e risultati già raccolti (bench_models/, *.out)
-models/             modelli GGUF — ignorata da git, vedi "Modelli"
+models/             modelli GGUF, ignorata da git, vedi "Modelli"
 var/                tutto ciò che è runtime, ignorato da git:
   logs/pw/          una cartella per run (transcript + screenshot) e gui_server.out
   logs/test/        lo stesso per lo stack di test
