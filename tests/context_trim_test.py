@@ -833,6 +833,62 @@ def _():
         assert 0.3 <= d <= 15, (f, d)
 
 
+class _FakeCDP:
+    def __init__(self):
+        self.sent = []
+    def send(self, method, params):
+        self.sent.append((method, params))
+
+
+@_t("formfill:bezier_path_ends_at_target")
+def _():
+    import form_fill_pw as ff
+    p = ff._cdp_bezier(100, 100, 500, 400)
+    assert 8 <= len(p) <= 45, len(p)
+    assert (round(p[-1][0]), round(p[-1][1])) == (500, 400)   # lands on target
+
+
+@_t("formfill:human_mouse_move_streams_and_tracks_cursor")
+def _():
+    import form_fill_pw as ff
+    ff.time.sleep = lambda s: None
+    ff._CDP_CURSOR[0] = ff._CDP_CURSOR[1] = None
+    s = _FakeCDP()
+    ff._human_mouse_move(s, 420, 310)
+    moves = [params for m, params in s.sent if m == "Input.dispatchMouseEvent"]
+    assert len(moves) >= 5 and all(p["type"] == "mouseMoved" for p in moves)
+    assert (round(moves[-1]["x"]), round(moves[-1]["y"])) == (420, 310)
+    assert [round(c) for c in ff._CDP_CURSOR] == [420, 310]   # cursor persists
+
+
+@_t("formfill:human_type_emits_keydown_keyup_per_char")
+def _():
+    import form_fill_pw as ff
+    ff.time.sleep = lambda s: None
+    s = _FakeCDP()
+    ff._human_type(s, "Hi!")
+    kinds = [params.get("type") for m, params in s.sent if m == "Input.dispatchKeyEvent"]
+    assert kinds == ["keyDown", "keyUp"] * 3, kinds     # real keystrokes, not insertText
+
+
+@_t("formfill:human_type_respects_budget_on_long_text")
+def _():
+    import form_fill_pw as ff
+    real = ff.time.sleep
+    ff.time.sleep = lambda s: None
+    try:
+        # force the budget to be spent immediately so the rest dumps fast
+        orig = ff._TYPE_BUDGET_S
+        ff._TYPE_BUDGET_S = 0.0
+        s = _FakeCDP()
+        ff._human_type(s, "abcdef")
+        inserts = [1 for m, _ in s.sent if m == "Input.insertText"]
+        assert len(inserts) == 6, s.sent       # all chars dumped via insertText
+    finally:
+        ff._TYPE_BUDGET_S = orig
+        ff.time.sleep = real
+
+
 if __name__ == "__main__":
     passed = sum(1 for _, s, _ in _RESULTS if s == "PASS")
     failed = sum(1 for _, s, _ in _RESULTS if s != "PASS")

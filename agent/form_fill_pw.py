@@ -322,6 +322,89 @@ def _frame_offset(frame):
     return dx, dy
 
 
+# -- human-like cursor motion (CDP path, used by batch fill) ----------------
+# The vision path already arcs the OS cursor along a Bezier (agent_core
+# _human_move). Batch-fill clicks went straight to Input.dispatchMouseEvent
+# press/release at the exact point with NO movement, which reCAPTCHA v3 and
+# Qualtrics' behavioural fraud scoring read as a bot -- a real cursor traces a
+# continuous, curved, variable-speed path between targets. So we stream
+# mouseMoved events along a Bezier arc before every press, mirroring the vision
+# path. The CDP cursor position persists across clicks (the bridge is
+# single-threaded) so each click starts from where the last one landed.
+_CDP_CURSOR = [None, None]
+
+
+def _cdp_bezier(x0, y0, x1, y1):
+    dist = math.hypot(x1 - x0, y1 - y0)
+    n = max(8, min(45, int(dist / 15) + random.randint(3, 10)))
+    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+    if dist > 1:
+        nx, ny = -(y1 - y0) / dist, (x1 - x0) / dist
+    else:
+        nx, ny = 0.0, 1.0
+    bulge = random.gauss(0, dist * 0.15)      # arc perpendicular to the line
+    cx, cy = mx + nx * bulge, my + ny * bulge
+    pts = []
+    for i in range(1, n + 1):
+        t = i / n
+        bx = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t ** 2 * x1
+        by = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t ** 2 * y1
+        pts.append((bx, by))
+    return pts
+
+
+def _human_mouse_move(session, x1, y1):
+    x0, y0 = _CDP_CURSOR
+    if x0 is None:          # first move of the session: approach from nearby
+        x0 = x1 + random.uniform(-180, 180)
+        y0 = y1 + random.uniform(-140, 140)
+    path = _cdp_bezier(x0, y0, x1, y1)
+    last = max(1, len(path) - 1)
+    for i, (px, py) in enumerate(path):
+        try:
+            session.send("Input.dispatchMouseEvent",
+                         {"type": "mouseMoved", "x": px, "y": py})
+        except Exception:
+            break
+        t = i / last
+        ease = 1.0 + 2.0 * (1 - 4 * (t - 0.5) ** 2)   # slow at ends, fast mid
+        time.sleep(random.uniform(0.003, 0.012) * ease)
+    _CDP_CURSOR[0], _CDP_CURSOR[1] = x1, y1
+
+
+# -- human-like typing (real keyDown/keyUp, not bulk insertText) ------------
+# insertText drops the whole string in at once with no keyboard events;
+# keystroke-dynamics checks (and reCAPTCHA) flag the absence of keyDown/keyUp
+# and inter-key timing. Type character by character with variable gaps
+# instead -- longer after spaces/punctuation, plus the odd 'thinking' pause.
+# Capped so a very long answer can't block the bridge: past the budget the
+# remainder is inserted fast.
+_TYPE_BUDGET_S = 12.0
+
+
+def _human_type(session, text: str):
+    spent = 0.0
+    for ch in text:
+        if spent >= _TYPE_BUDGET_S:          # out of budget: dump the rest fast
+            session.send("Input.insertText", {"text": ch})
+            continue
+        try:
+            session.send("Input.dispatchKeyEvent",
+                         {"type": "keyDown", "text": ch, "unmodifiedText": ch, "key": ch})
+            session.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch})
+        except Exception:
+            session.send("Input.insertText", {"text": ch})
+        d = random.uniform(0.045, 0.14)
+        if ch in " \n":
+            d += random.uniform(0.04, 0.16)
+        elif ch in ".,!?;:":
+            d += random.uniform(0.08, 0.25)
+        if random.random() < 0.025:          # occasional mid-sentence pause
+            d += random.uniform(0.25, 0.7)
+        time.sleep(d)
+        spent += d
+
+
 def _raw_click(session, frame, tag) -> bool:
     aim = frame.evaluate(_AIM_JS, tag)
     if not aim or not aim["ok"]:
@@ -331,6 +414,7 @@ def _raw_click(session, frame, tag) -> bool:
     # Small jitter on click coordinates (humans never hit the exact pixel)
     x += random.uniform(-2, 2)
     y += random.uniform(-2, 2)
+    _human_mouse_move(session, x, y)   # arc the cursor to the target first
     session.send("Input.dispatchMouseEvent",
                  {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
     # Brief hold between press and release (50-120ms, like a real click)
@@ -367,7 +451,10 @@ def _select_option_el(session, frame, tag):
 
 
 def _type_text(session, frame, tag, text: str):
-    """Replace a text box's content with human-like per-word insertion."""
+    """Replace a text box's content by typing it character by character with
+    real keyDown/keyUp events and a human cadence (_human_type). Focus-selects
+    the field first so the first keystroke overwrites any existing value.
+    Verifies and falls back to a direct fill if anything didn't land."""
     if not frame.evaluate(_FOCUS_SELECT_JS, tag):
         STATS["fallback"] += 1
         handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
@@ -375,25 +462,7 @@ def _type_text(session, frame, tag, text: str):
         if el:
             el.fill(text, timeout=ACTION_TIMEOUT_MS)
         return
-    # Short strings (codes, numbers): just insert directly
-    if len(text) <= 12:
-        session.send("Input.insertText", {"text": text})
-    else:
-        # Break into word-level chunks for natural cadence
-        words = text.split(" ")
-        i = 0
-        while i < len(words):
-            chunk_size = random.randint(1, 3)
-            chunk = " ".join(words[i:i + chunk_size])
-            if i > 0:
-                chunk = " " + chunk
-            session.send("Input.insertText", {"text": chunk})
-            i += chunk_size
-            if i < len(words):
-                try:
-                    cancel.sleep(random.uniform(0.05, 0.25))
-                except Exception:
-                    pass
+    _human_type(session, text)
     if frame.evaluate(_VALUE_JS, tag) == text:
         STATS["fast"] += 1
         return
