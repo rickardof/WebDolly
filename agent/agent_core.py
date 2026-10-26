@@ -31,6 +31,7 @@ import random
 import shutil
 import subprocess
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -474,17 +475,58 @@ def call_fara(messages: list, step: int = None) -> str:
         "model": FARA_MODEL,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": {"normal": 1024, "hurry": 512, "super_fast": 384}[_speed_mode],
+        # hurry inherits what super_fast carried; super_fast caps generation
+        # even lower because its no-thinking mode has nothing long to emit.
+        "max_tokens": {"normal": 1024, "hurry": 384, "super_fast": 256}[_speed_mode],
     }
-    # chat_template_kwargs is llama-server-only — skip when using a cloud API
+    # chat_template_kwargs is llama-server-only — skip when using a cloud API.
+    # super_fast force-disables thinking regardless of ENABLE_THINKING, because
+    # the whole point of this mode is a single-line thought + tool_call: a
+    # 400-800 token <think> preamble per step burns prompt-cache and clock
+    # time with no measured benefit on repetitive select+submit surveys.
     if not FARA_API_KEY:
-        payload["chat_template_kwargs"] = {"enable_thinking": ENABLE_THINKING}
+        thinking_on = False if _speed_mode == "super_fast" else ENABLE_THINKING
+        payload["chat_template_kwargs"] = {"enable_thinking": thinking_on}
     extra_hdrs = {"Authorization": f"Bearer {FARA_API_KEY}"} if FARA_API_KEY else None
     result = cancel.post_chat(FARA_URL, payload, timeout=120,
                               on_delta=lambda t: _live({"type": "token", "step": step, "text": t}),
                               extra_headers=extra_hdrs)
     _record_timing(result.get("timings") or {})
     return result["choices"][0]["message"]["content"]
+
+
+def _lenient_parse_action(action_text: str) -> dict:
+    """Best-effort extraction when a tool_call is neither valid JSON nor valid
+    Python -- typically a long free-text field (a terminate `status`, an
+    ask_user_question `question`) in which the model left quotes, newlines or
+    markdown unescaped, which breaks both json.loads and ast.literal_eval and
+    used to fail the whole cycle. Pulls the action type and structured args
+    out by regex so a chatty summary can no longer take the step down; the
+    free-text fields are captured loosely (inner quotes/newlines tolerated)
+    since they are only used for reporting, never for control flow."""
+    args: dict = {}
+    m = re.search(r'"action"\s*:\s*"([^"\\]+)"', action_text)
+    if m:
+        args["action"] = m.group(1)
+    m = re.search(r'"coordinate"\s*:\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]',
+                  action_text)
+    if m:
+        args["coordinate"] = [float(m.group(1)), float(m.group(2))]
+    for k in ("time", "pixels", "amount", "clicks", "ticks"):
+        m = re.search(r'"' + k + r'"\s*:\s*(-?\d+(?:\.\d+)?)', action_text)
+        if m:
+            args[k] = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+    for k in ("direction", "keys", "code"):   # short, no inner quotes expected
+        m = re.search(r'"' + k + r'"\s*:\s*"([^"\\]*)"', action_text)
+        if m:
+            args[k] = m.group(1)
+    for k in ("text", "question", "status", "summary"):   # free text, lenient
+        m = re.search(r'"' + k + r'"\s*:\s*"(.*)"\s*[},]', action_text, re.DOTALL)
+        if m:
+            args[k] = m.group(1)
+    if "action" not in args:
+        raise ValueError(f"no action extractable from tool_call: {action_text[:200]!r}")
+    return {"arguments": args}
 
 
 def parse_thoughts_and_action(message: str):
@@ -495,9 +537,12 @@ def parse_thoughts_and_action(message: str):
     thoughts = tmp[0].strip()
     action_text = tmp[1].split("\n</tool_call>")[0]
     try:
-        action = json.loads(action_text)
+        action = json.loads(action_text, strict=False)
     except json.JSONDecodeError:
-        action = ast.literal_eval(action_text)
+        try:
+            action = ast.literal_eval(action_text)
+        except (ValueError, SyntaxError):
+            action = _lenient_parse_action(action_text)
     return thoughts, action
 
 
@@ -556,9 +601,14 @@ CONTEXT_TOKEN_BUDGET = int(os.environ.get("FARA_TOKEN_BUDGET", "28000"))
 # 12000 in super_fast makes the trim loop drop oldest text turns much
 # earlier and keeps prompt processing in the 5-6s band.
 _CONTEXT_BUDGETS = {
-    "normal":     int(os.environ.get("FARA_TOKEN_BUDGET",     "28000")),
-    "hurry":      int(os.environ.get("FARA_TOKEN_BUDGET_HURRY",      "18000")),
-    "super_fast": int(os.environ.get("FARA_TOKEN_BUDGET_FAST",       "12000")),
+    "normal":     int(os.environ.get("FARA_TOKEN_BUDGET",       "28000")),
+    # hurry now inherits what super_fast used to be: a 12k-token budget made
+    # a 100-step run end with ~5s/step prompt processing (vs. ~17s on 28k).
+    "hurry":      int(os.environ.get("FARA_TOKEN_BUDGET_HURRY", "12000")),
+    # super_fast goes further still -- plus it disables Fara's <think>
+    # preamble entirely (see call_fara) so each step emits ~1 line of
+    # thought + tool_call instead of a 400-800 token reasoning block.
+    "super_fast": int(os.environ.get("FARA_TOKEN_BUDGET_FAST",  "9000")),
 }
 MEASURED_IMAGE_TOKENS = 1262
 PER_MESSAGE_OVERHEAD_MARGIN = 20
@@ -618,8 +668,9 @@ def _image_turn_idxs(messages: list) -> list:
 # at lower resolution so they cost fewer tokens, letting the model keep more
 # visual context without blowing the budget. The last image (current screenshot)
 # is never touched — it needs full resolution for accurate clicks.
-_TRIM_MAX_IMAGES   = {"normal": 10, "hurry": 8, "super_fast": 5}
-_TRIM_TO_IMAGES    = {"normal": 5,  "hurry": 3, "super_fast": 2}
+# hurry inherits what super_fast used to carry; super_fast is tighter again.
+_TRIM_MAX_IMAGES   = {"normal": 10, "hurry": 5, "super_fast": 3}
+_TRIM_TO_IMAGES    = {"normal": 5,  "hurry": 2, "super_fast": 1}
 
 # Speed-mode text compaction: once there are more than _MAX_THOUGHTS
 # un-stripped past assistant turns, batch-strip all but the last
@@ -628,8 +679,11 @@ _TRIM_TO_IMAGES    = {"normal": 5,  "hurry": 3, "super_fast": 2}
 # that reasoning bloat alone was pushing prompt_n above 27k and
 # costing ~17s per step. Batched like the image trim so a prefix-based
 # KV cache invalidates once per cycle, not every step.
-_MAX_THOUGHTS      = {"normal": 999, "hurry": 10, "super_fast": 6}
-_TRIM_TO_THOUGHTS  = {"normal": 999, "hurry": 5,  "super_fast": 3}
+# hurry inherits what super_fast used to be. In super_fast, assistant turns
+# emit a trivial thought block anyway (enable_thinking=False), so the trim
+# matters less and the smaller numbers just keep the past turns compact.
+_MAX_THOUGHTS      = {"normal": 999, "hurry": 6, "super_fast": 4}
+_TRIM_TO_THOUGHTS  = {"normal": 999, "hurry": 3, "super_fast": 2}
 
 
 def _current_budget() -> int:
@@ -1124,6 +1178,173 @@ def _page_change_hint(prev_fp: str, prev_action: str, curr_fp: str) -> str:
             f"significantly ({pct}% similar) — likely a navigation to a new "
             "trial/question. Do not assume it failed just because the layout "
             "looks similar.\n")
+
+
+# -- pre-screenshot auto-scroll: bring response controls into view -----------
+#
+# Observed on eval.services (and similar long-content survey pages): each
+# trial starts with videos/images and context text, with the response
+# buttons placed below one full viewport. The model needs 1-3 scroll
+# steps per trial to find them -- each step is a full ~16s model
+# round-trip. Measured: 1.43 pre-click scrolls/trial × 16s = ~23s wasted
+# per trial just finding where to click.
+#
+# This JS pre-step moves the viewport (does not click or submit) so the
+# screenshot the model sees already has selectable options in frame.
+# It is idempotent: when a candidate is already in-view it returns
+# 'in-view' and does nothing. When nothing matches (e.g. on the Prolific
+# dashboard, or a non-survey page) it returns 'nothing' and does nothing.
+# Selectors are narrow -- unselected radio/checkbox/aria-radio inputs and
+# likert/choice/option/answer button classes -- so a stray page button
+# (nav, menu, cookie banner) never wins.
+_AUTOSCROLL_TO_CONTROLS_JS = r"""
+(() => {
+  const sel = [
+    '.likert-btn:not(.selected):not(.is-selected):not(.is-active):not(.chosen):not(.checked)',
+    'button[class*="choice"]:not([aria-pressed="true"]):not(.selected):not(.is-selected)',
+    'button[class*="option"]:not([aria-pressed="true"]):not(.selected):not(.is-selected)',
+    'button[class*="answer"]:not([aria-pressed="true"]):not(.selected):not(.is-selected)',
+    'button[class*="likert"]:not(.selected):not(.is-selected)',
+    'input[type="radio"]:not(:checked)',
+    'input[type="checkbox"]:not(:checked)',
+    '[role="radio"][aria-checked="false"]',
+    '[role="checkbox"][aria-checked="false"]'
+  ].join(',');
+  const vh = window.innerHeight;
+  let cands;
+  try { cands = Array.from(document.querySelectorAll(sel)); }
+  catch (e) { return 'error:' + e.message; }
+  // Custom survey UIs (Tailwind/div-based, no radio semantics) expose their
+  // choice controls only as <button>s whose TEXT is the action, e.g.
+  // eval.services "Select (1)" / "Select (2)". Match those by label, but
+  // never the image zoom/preview openers ("Open option 1 ... preview").
+  try {
+    const actionRe = /^\s*(select|choose|pick|vote|rate|confirm)\b/i;
+    const previewRe = /\b(preview|zoom|expand|enlarge|open)\b/i;
+    document.querySelectorAll('button, [role="button"]').forEach(e => {
+      const t = (e.innerText || e.textContent || '').trim();
+      if (t && actionRe.test(t) && !previewRe.test(t)) cands.push(e);
+    });
+  } catch (e) { /* keep the CSS-selector candidates */ }
+  cands = cands.filter(e => {
+    if (!e.offsetParent || e.disabled) return false;
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  });
+  if (cands.length === 0) return 'nothing';
+  // If any candidate is already comfortably in the viewport, do nothing.
+  // 'Comfortably' = top >= 0 and bottom <= viewport (fully inside).
+  const inView = cands.find(e => {
+    const r = e.getBoundingClientRect();
+    return r.top >= 0 && r.bottom <= vh;
+  });
+  if (inView) return 'in-view';
+  // Scroll the first (DOM-order) candidate to the vertical centre.
+  // 'instant' is sync: the scroll position is updated before this returns.
+  cands[0].scrollIntoView({ block: 'center', behavior: 'instant' });
+  return 'scrolled';
+})();
+"""
+
+
+def _prescroll_to_controls() -> str:
+    """Playwright-driven viewport nudge, run just before each screenshot in
+    speed modes while a study is active. Returns the JS result tag
+    ('scrolled' / 'in-view' / 'nothing' / 'error:...') or '' on failure --
+    the caller treats '' and 'nothing' / 'in-view' identically (no settle
+    wait needed). Any exception becomes '': the agent falls back to the
+    old behaviour (model scrolls itself) rather than failing the step."""
+    try:
+        return pw_bridge.evaluate(_AUTOSCROLL_TO_CONTROLS_JS) or ""
+    except Exception:
+        return ""
+
+
+# -- auto-chain Enter after left_click when Enter DIRECTIVE is active --------
+#
+# On domains where the user has repeatedly told the agent "after you
+# select an option, just press Enter" (study_memory counts >= 2 Enter
+# hints -- same threshold that fires the Enter DIRECTIVE), we press
+# Enter ourselves right after the click. Saves the full ~16s model
+# round-trip that it would otherwise take for the model to look at the
+# post-click screenshot and emit `key Return`.
+#
+# Gated hard so this never fires outside the intended pattern:
+#   - URL's domain has >= 2 Enter hints (user asked for it, repeatedly)
+#   - speed mode is not 'normal' (opt-in: 'normal' keeps old behaviour)
+#   - study_timer is active (we are inside a Prolific study)
+#   - click did not land on a disabled control (pending_user_response
+#     branch handles that path; we skip auto-Enter there)
+# Even then, pressing Enter on a page with no selection is a benign
+# no-op on the surveys we have seen -- it either submits a selected
+# option or does nothing. We never chain Enter on a non-click action.
+def _should_auto_chain_enter(url: str) -> bool:
+    if _speed_mode == "normal":
+        return False
+    try:
+        if not study_memory.enter_hint_count(url) >= 2:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+# -- loop detector: break out of same-action-same-page repetition -------------
+#
+# Observed: an agent stuck on a validation error can emit the same
+# "scroll up to find the missing required field" action 6-10 times in a
+# row with no page change. The context trim keeps the per-step cost low
+# but does not break the loop. _action_signature folds coordinates to
+# a coarse grid so natural jitter is not counted as a new action; the URL
+# PATH (not the full URL) is included so a hash fragment change (SPA tab
+# switch) still looks like the same page. _stuck_warning emits a short
+# prefix line when the last STUCK_THRESHOLD recorded signatures all match.
+_STUCK_THRESHOLD = 3
+
+
+def _action_signature(action_type: str, args: dict, url: str) -> str:
+    """Compact (url_path, action, bucketed_args) tuple as a string. The
+    coordinate bucket (50px) absorbs the pw humanization jitter and small
+    model drift so a human-level 'same click' still looks identical."""
+    try:
+        path = urlparse(url).path or ""
+    except Exception:
+        path = ""
+    parts = [path, action_type]
+    if action_type in ("scroll", "hscroll"):
+        parts.append(str(args.get("pixels")))
+    elif action_type == "key":
+        keys = args.get("keys")
+        parts.append(",".join(str(k) for k in keys) if isinstance(keys, list) else str(keys))
+    elif action_type == "type":
+        parts.append(str(len(str(args.get("text", "")))))  # length only, no content
+    elif args.get("coordinate"):
+        c = args["coordinate"]
+        parts.append(f"{int(c[0]) // 50},{int(c[1]) // 50}")
+    return "|".join(parts)
+
+
+def _stuck_warning(sigs: deque) -> str:
+    """Prefix line for the model when it is clearly in a loop. Empty when
+    there are fewer than STUCK_THRESHOLD signatures or they are not all
+    equal. The warning names the repeated action so the model can tell
+    which loop to break (vs. a generic 'try something different'
+    nudge, which was ignored in prior runs)."""
+    if len(sigs) < _STUCK_THRESHOLD:
+        return ""
+    last = list(sigs)[-_STUCK_THRESHOLD:]
+    if len(set(last)) != 1:
+        return ""
+    # Signature is path|action|arg; strip the path for the user-facing
+    # message (the model already sees the URL on its own line).
+    sig = last[0]
+    _, _, tail = sig.partition("|")
+    return (f"[STUCK WARNING: you have performed `{tail}` {_STUCK_THRESHOLD} "
+            "times in a row on this page and nothing changed. STOP "
+            "repeating it. Look at the screenshot and try a DIFFERENT "
+            "approach: a different element, the opposite scroll direction, "
+            "a different action type (key press, type, or terminate), or "
+            "ask the user if truly stuck.]\n")
 
 
 def _study_title() -> str:
@@ -1676,43 +1897,57 @@ def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None)
 # study-list steps when it was rule #12 of a ~2500-token preset).
 _STANDING_RULES_FULL = (
     "\n\nSTANDING RULES (always apply):\n"
-    "1. Choosing a study: compare ALL study cards first; among the eligible ones open the "
+    "1. ATTENTION CHECKS — HARDEST RULE, READ FIRST. Before answering ANY question, scan its "
+    "FULL text (title AND option labels) for an embedded instruction. Patterns to catch: "
+    "'to show you are paying attention select X', 'this is an attention check', "
+    "'please select [specific option]', 'choose the [third/second/last] option', "
+    "'select strongly agree/disagree for this one', 'what colour is the sky', "
+    "'ignore the question above and answer Z', 'if you are reading this select Y'. "
+    "If you find one, obey it EXACTLY — override persona, context, consistency, and what feels "
+    "natural. Failing ONE attention check rejects the whole study and loses the reward. On "
+    "repetitive Likert/A-B batteries, do NOT speed-click past the question text: scan every "
+    "single question's text for a hidden instruction before clicking any option.\n"
+    "2. Choosing a study: compare ALL study cards first; among the eligible ones open the "
     "one with the highest reward rate per hour (the £/hr or $/hr shown), not just the first.\n"
-    "2. NO AUDIO, EVER: a study that requires LISTENING to audio (sounds, speech, music, "
+    "2a. ONLY a study that shows a clickable 'Take part in this study' button is available. A "
+    "study or submission row labelled Returned, Approved, Completed, Rejected, Cancelled, "
+    "Timed-out, or Awaiting review is a PAST participation — it has NO 'Take part' button and "
+    "CANNOT be opened or re-taken. Do NOT click it, its title, or its row hoping it will launch. "
+    "If you click a study and no 'Take part' button appears (and it is not merely loading) after "
+    "one or two tries, treat it as not available: stop retrying, go back to the Studies list, and "
+    "look at other studies. Never spend many steps trying to launch the same un-openable study.\n"
+    "3. NO AUDIO, EVER: a study that requires LISTENING to audio (sounds, speech, music, "
     "recordings, 'audio playback', headphones or speakers) is not eligible. An 'Audio' "
     "icon/label on the card means skip it. Videos are OK as long as the study does not "
     "require hearing their sound — you can watch silent or muted videos. Microphone or "
     "camera requirements alone do NOT disqualify a study. "
     "Before pressing 'Take part in this study', read the requirements section; if it "
     "mentions listening or audio playback, do not take part.\n"
-    "3. Answer quality: read every question and its FULL text carefully before answering. "
-    "ATTENTION CHECKS are critical — questions like 'select Strongly Agree', 'choose option 3', "
-    "'what colour is the sky', or 'please select X to show you are paying attention' MUST be "
-    "answered exactly as instructed, even if the answer seems wrong in context. Failing an "
-    "attention check can invalidate the entire submission. Keep every answer consistent with "
-    "the persona and with your earlier answers in the same survey. Write specific, relevant "
-    "open-ended answers in the survey's language, never generic filler.\n"
-    "4. Scope: your only job is to take part in studies that meet the criteria and, when none "
+    "4. Answer quality: read every question and its FULL text carefully before answering. "
+    "Keep every answer consistent with the persona and with your earlier answers in the same "
+    "survey. Write specific, relevant open-ended answers in the survey's language, never "
+    "generic filler.\n"
+    "5. Scope: your only job is to take part in studies that meet the criteria and, when none "
     "is available, to wait and re-check the list of studies for new ones. Never open the "
     "'About you' section of the site or answer profile questionnaires outside a study.\n"
-    "4a. After clicking 'Take part in this study', the button turns grey/disabled while loading — "
+    "5a. After clicking 'Take part in this study', the button turns grey/disabled while loading — "
     "this is NORMAL. Wait a few seconds for the study to open; do NOT go back or assume it failed.\n"
-    "4b. After finishing a survey: ALWAYS switch back to the Prolific tab before calling "
+    "5b. After finishing a survey: ALWAYS switch back to the Prolific tab before calling "
     "terminate. On the Prolific tab: (a) click 'I'm finished'; (b) if a completion-code field "
     "appears, enter the code you received, or if no code was given click 'I didn't receive a "
     "completion code' (or type NOCODE in the field if that link is absent); (c) confirm/submit. "
     "Only after this Prolific-side step call terminate with CODE:<code> or NOCODE.\n"
-    "4c. Broken / screened-out studies: if the external survey is stuck, broken, or you were "
+    "5c. Broken / screened-out studies: if the external survey is stuck, broken, or you were "
     "screened out and cannot finish, use Ctrl+Shift+Tab to switch to the Prolific tab (do NOT "
     "use history_back — the survey is in a separate tab). On the Prolific tab click "
     "'Cancel participation' (a red button), confirm in the modal, then terminate with NOCODE. "
     "Do NOT keep refreshing or waiting — cancel and move on.\n"
-    "5. Minimum study time: the estimated completion time shown on the study page is a minimum "
+    "6. Minimum study time: the estimated completion time shown on the study page is a minimum "
     "you must respect. A 'Study timer' line will appear in your status once you enter a study. "
     "If you reach what looks like the final submit/finish page and the timer says time remains, "
     "use the `wait` action to wait (e.g. wait 30s at a time), then check the status line again. "
     "Submit only once the timer says 'OK to submit now'.\n"
-    "6. Screener questions: before and during a study, read the description and requirements "
+    "7. Screener questions: before and during a study, read the description and requirements "
     "carefully to understand what profile the researcher is looking for. When answering screener "
     "questions, emphasise whichever TRUE aspects of the persona best match those criteria — the "
     "goal is to avoid being excluded for a trivially wrong answer when the persona genuinely "
@@ -1720,14 +1955,15 @@ _STANDING_RULES_FULL = (
     "(e.g. 'I use AI tools every day' if the persona does). You must NEVER invent facts that "
     "directly contradict the given persona (age, nationality, profession, stated experience), "
     "and never claim qualifications the persona does not have.\n"
-    "7. Repetitive trials: when a survey has many identical repeated trials (e.g. 60 A/B "
+    "8. Repetitive trials: when a survey has many identical repeated trials (e.g. 60 A/B "
     "comparisons, repeated Likert scales), work through them efficiently with normal clicks — "
     "develop a fast rhythm: select option, scroll to submit, click submit, wait for next trial. "
     "Do NOT use run_js (it is disabled). Vary your selections when uncertain — never pick "
     "the same column/option for every single trial (straight-lining triggers rejection). "
     "Follow any guidance from past user corrections shown in the [Things the user told you] "
-    "section — they carry across studies on the same domain.\n"
-    "8. NEVER ask_user_question — this run is unattended and nobody will reply. The USER PROFILE "
+    "section — they carry across studies on the same domain. "
+    "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction.\n"
+    "9. NEVER ask_user_question — this run is unattended and nobody will reply. The USER PROFILE "
     "block at the top of this task counts as 'explicitly provided' for the critical-point rule, "
     "so any demographic (age, gender, nationality, native language, education, employment, "
     "household, income band, political view, lifestyle habit, …) is already supplied. If a "
@@ -1739,17 +1975,26 @@ _STANDING_RULES_FULL = (
 
 _STANDING_RULES_COMPACT = (
     "\n\nRULES: "
-    "1. Pick the highest £/hr study. "
-    "2. NO AUDIO — skip studies requiring listening/speakers/headphones. Videos OK if no audio needed. "
-    "3. Read FULL question text before answering. ATTENTION CHECKS are critical — answer exactly as instructed even if it seems wrong. Stay consistent with persona; no filler. "
-    "4. Only do studies, nothing else. After 'Take part' button goes grey, WAIT — it's loading. "
+    "1. ATTENTION CHECKS — HARDEST RULE. Scan every question's FULL text (title + options) for an "
+    "embedded instruction: 'select X to show you are paying attention', 'this is an attention check', "
+    "'please pick [option]', 'choose the third option', 'what colour is the sky', 'if reading this select Y'. "
+    "If found, obey EXACTLY — override persona, consistency, everything. One failure rejects the whole study. "
+    "On repetitive Likert/A-B trials, scan each trial's text before clicking; do NOT speed-click past it. "
+    "2. Pick the highest £/hr study. Only a study with a clickable 'Take part' button is open-able; a row "
+    "marked Returned/Approved/Completed/Cancelled/Awaiting-review is a PAST participation (no Take-part, "
+    "can't reopen). If no Take-part appears after 1-2 clicks (and it's not just loading), stop, go back to "
+    "the list, try others. "
+    "3. NO AUDIO — skip studies requiring listening/speakers/headphones. Videos OK if no audio needed. "
+    "4. Read FULL question text before answering. Stay consistent with persona; no filler. "
+    "5. Only do studies, nothing else. After 'Take part' button goes grey, WAIT — it's loading. "
     "After survey: Prolific tab → 'I'm finished' → enter code → confirm → terminate. "
     "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
-    "5. Respect minimum time — wait if timer says time remains. "
-    "6. Screener: emphasise true persona traits that match; never invent contradicting facts. "
-    "7. Repetitive trials: work through them efficiently with normal clicks. "
+    "6. Respect minimum time — wait if timer says time remains. "
+    "7. Screener: emphasise true persona traits that match; never invent contradicting facts. "
+    "8. Repetitive trials: work through them efficiently with normal clicks. "
     "Do NOT use run_js. Vary selections — never straight-line. "
-    "8. NEVER ask_user_question — unattended run. Treat the USER PROFILE above as 'explicitly provided'; "
+    "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction. "
+    "9. NEVER ask_user_question — unattended run. Treat the USER PROFILE above as 'explicitly provided'; "
     "for any demographic not in it, invent a value consistent with the profile and your prior answers in this survey."
 )
 
@@ -1894,15 +2139,29 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
         _last_action_type_for_signal: str = ""
+        # Loop detector: last few action signatures with their URL path. When
+        # the SAME signature on the SAME path repeats STUCK_THRESHOLD times
+        # in a row, step N+1 gets a prepended STUCK WARNING in its prefix so
+        # the model is told explicitly to break the loop instead of
+        # continuing. Reset per run.
+        _recent_action_sigs: deque = deque(maxlen=4)
 
-        def _record_user_correction(text: str) -> None:
+        def _record_user_correction(text: str, persist: bool = True) -> None:
             """A user instruction (question answer or injected steer) arrived.
 
-            Log it to the transcript -- these were previously invisible, which
-            made it impossible to see afterwards what the user had to step in
-            and tell the agent -- and remember it against the current domain so
-            study_memory.user_hints_for() can surface it on later steps and
-            future runs, sparing the user from repeating the same correction.
+            Always logged to the transcript -- these were previously invisible,
+            which made it impossible to see afterwards what the user had to
+            step in and tell the agent.
+
+            `persist` controls whether it is also stored as a durable
+            study_memory hint (surfaced on every later step and future run on
+            this domain). Proactive steers injected mid-run are durable
+            guidance and persist. Answers to the agent's OWN ask_user_question
+            are transient and instance-specific ("cancel this study",
+            "answer 25") -- persisting them made the agent carry a one-off
+            reply into every future study on the domain (e.g. a "cancel the
+            study" answer made it cancel later studies it should complete), so
+            those are logged only, never stored.
             """
             text = (text or "").strip()
             if not text:
@@ -1911,10 +2170,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             try:
                 transcript.write(json.dumps(
                     {"step": step, "type": "user_correction", "text": text,
-                     "url": url}) + "\n")
+                     "url": url, "persisted": persist}) + "\n")
                 transcript.flush()
             except Exception:
                 pass
+            if not persist:
+                return
             try:
                 study_memory.record_user_hint(url, text)
             except Exception:
@@ -2191,6 +2452,24 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pass
 
             _live({"type": "phase", "phase": "observe", "step": step})
+            # Pre-screenshot viewport nudge: in speed modes, inside a study,
+            # on non-guarded pages (Prolific dashboard is excluded), bring
+            # the first unselected response control into view BEFORE scrot
+            # captures. Saves 1-3 model-driven scroll steps per trial on
+            # long-content surveys. Safe no-op when nothing matches, when
+            # a candidate is already in view, or when pw_bridge throws.
+            prescroll_result = ""
+            if (_speed_mode != "normal" and study_timer.is_active()
+                    and not here_guarded):
+                prescroll_result = _prescroll_to_controls()
+                if prescroll_result == "scrolled":
+                    # Scroll is sync (behavior: instant) but repaint still
+                    # needs one frame; without this scrot can land mid-paint
+                    # and the model sees a torn screenshot.
+                    try:
+                        cancel.sleep(0.05)
+                    except Exception:
+                        pass
             img = take_screenshot(run_dir, step)
             data_url = encode_for_model(img)
             # Fingerprint the page NOW so step N+1 can tell whether this
@@ -2225,6 +2504,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
                 prefix += page_signal
+                prefix += _stuck_warning(_recent_action_sigs)
                 prefix += skip_hint + nav_hint + mem_hint
                 timer_line = study_timer.status_line()
                 if timer_line:
@@ -2291,7 +2571,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     yield {"type": "done", "answer": "STOPPED", "messages": messages}
                     return
                 pending_user_response = answer
-                _record_user_correction(answer)
+                _record_user_correction(answer, persist=False)
                 continue
 
             target = {"type": "target", "step": step, "action": action_type}
@@ -2324,6 +2604,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             else:
                 _last_action_type_for_signal = ""
             _last_page_fp = curr_page_fp
+            _recent_action_sigs.append(_action_signature(action_type, args, here))
             try:
                 result_desc = dispatch_action(action_type, args)
             except Exception as e:
@@ -2366,6 +2647,29 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         "or unchecked mandatory checkboxes. Fill them in first, then "
                         "try clicking the button again.")
 
+            # Auto-chain Enter after left_click on domains where the user
+            # repeatedly asked for the click-then-Enter pattern. Saves one
+            # full model round-trip (~16s) per trial on surveys like
+            # eval.services. See _should_auto_chain_enter above for gating.
+            # Skipped when the disabled-near branch above flagged the click,
+            # since Enter on a disabled page would likely re-trigger whatever
+            # validation message is already blocking the user.
+            if (action_type == "left_click"
+                    and not pending_user_response
+                    and study_timer.is_active()
+                    and _should_auto_chain_enter(here)):
+                try:
+                    # Humanized delay matching a hand reaching for the
+                    # keyboard after a mouse click.
+                    cancel.sleep(random.uniform(0.15, 0.35))
+                    docker_exec("xdotool", "key", "Return")
+                    result_desc = f"{result_desc} +auto-Enter"
+                except Exception:
+                    # Any failure (bridge gone, xdotool missing) leaves the
+                    # click intact and the next step runs the model as
+                    # usual -- back to the old behaviour.
+                    pass
+
 
             # --- diagnostic log entry (separate from model transcript) ---
             diag: dict = {
@@ -2375,6 +2679,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 "prev_guarded": _prev_was_guarded,  # value BEFORE this step updated it
                 "action": action_type,
                 "result": result_desc,
+                "prescroll": prescroll_result,
                 "timer_active": study_timer.is_active(),
                 "timer_elapsed": round(study_timer.elapsed(), 1) if study_timer.is_active() else None,
                 "timer_remaining": round(study_timer.remaining(), 1) if study_timer.is_active() else None,

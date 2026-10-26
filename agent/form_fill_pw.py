@@ -1,4 +1,4 @@
-"""Playwright-backed batch form-filling: extract -> decide -> apply -> verify.
+"""Playwright-backed batch form-filling: extract -> decide -> apply.
 
 Same pipeline and the same proven decision logic as form_fill.py (it is
 reused, not copied); what changes is everything that touches the browser:
@@ -9,19 +9,23 @@ reused, not copied); what changes is everything that touches the browser:
   * It always targets the tab actually on screen (pw_bridge.active_page),
     not the first tab -- after a survey opens via target=_blank, cdp.py
     kept reading the hidden dashboard tab.
-  * Answers are applied with real input (locator.check/fill/click/
-    select_option), so events are isTrusted=true. Sites that ignore
-    synthetic events rejected the cdp.py version's submissions outright.
-  * Each extracted element is tagged with a data-ff attribute, so apply
-    and verify address exactly the element extraction saw, instead of
-    re-deriving groups in a separate JS call.
+  * Answers are applied with real input (CDP mouse events / InsertText),
+    so events are isTrusted=true. Sites that ignore synthetic events
+    rejected the cdp.py version's submissions outright.
+  * Extracted elements are stored in a JS-side Map (no DOM mutation),
+    so apply addresses exactly the element extraction saw without
+    tripping MutationObserver-based anti-bot detection.
   * "Did the page advance?" no longer trusts a text change alone: a
     rejection message appearing used to read as success.
 """
 
 import json
+import math
 import random
+import re
+import secrets
 import time
+import unicodedata
 
 import cancel
 import form_fill as base
@@ -37,19 +41,83 @@ MIN_QUESTION_LIKE_FIELDS = base.MIN_QUESTION_LIKE_FIELDS
 
 ACTION_TIMEOUT_MS = 2500
 
+# Human reading/typing delays run in the AGENT thread, between one-field bridge
+# calls, NOT inside them -- so the bridge is never blocked for more than a
+# single field's DOM work and a form of any size stays fully human-paced
+# without ever hitting a bridge-call timeout. This is the per-field bridge
+# timeout: one field is at most a few 2.5s actions plus some evaluate calls.
+_FIELD_BRIDGE_TIMEOUT = 30.0
+
+# Playwright errors that mean "the action took effect and the page then
+# navigated / re-rendered", which tears down the JS execution context. For a
+# form apply this is success (the control changed and the page advanced), not
+# a failure, so it must not be reported as an apply error.
+_NAV_ERR_MARKERS = (
+    "Execution context was destroyed",
+    "because of a navigation",
+    "Target closed",
+    "Target page, context or browser has been closed",
+    "frame was detached",
+    "Frame was detached",
+)
+
+
+def _is_nav_error(e) -> bool:
+    s = str(e)
+    return any(m in s for m in _NAV_ERR_MARKERS)
+
+
+def _norm_opt(s) -> str:
+    """Normalise an option label or model answer for tolerant comparison.
+    Fixes 'option not found' when extraction captured a decorated label
+    ('🅏 I agree') but the model answered the clean text ('I agree'), or vice
+    versa. Leading emoji / symbol decoration is stripped BEFORE NFKC, because
+    NFKC turns some of it into letters (🅏 -> 'wc'), which would defeat the
+    strip; then NFKC-fold the rest, collapse whitespace, casefold."""
+    s = str(s).strip()
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isspace() or unicodedata.category(ch)[0] == "S" or ord(ch) >= 0x1F000:
+            i += 1
+        else:
+            break
+    s = unicodedata.normalize("NFKC", s[i:]).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s.casefold()
+
+
+def _match_option(answer, options: list):
+    """The exact option string the answer refers to, or None. Exact match
+    first, then normalised (unicode / leading symbol / whitespace / case)."""
+    if answer in options:
+        return answer
+    na = _norm_opt(answer)
+    for o in options:
+        if _norm_opt(o) == na:
+            return o
+    return None
+
+
 # How often each input path was taken -- for tests/diagnostics only.
 STATS = {"fast": 0, "fallback": 0}
 
-# -- extraction (tags every element it reports) -----------------------------
+# Session-unique key for the JS-side element Map.  Elements are stored here
+# instead of as DOM attributes (data-ff), invisible to MutationObserver.
+_FF_KEY = f"__ff{secrets.token_hex(4)}"
+
+# -- extraction (stores elements in a JS Map, zero DOM mutation) -----------
 
 # Playwright treats a string starting with "function" as a function body,
 # so every script is one arrow function with the shared helpers inside.
 _TAG_EXTRACT_JS = "() => {" + base._SHARED_JS + r"""
 return (function() {
   const PREFIX = %(prefix_json)s;
-  document.querySelectorAll('[data-ff]').forEach(e => e.removeAttribute('data-ff'));
+  const K = %(ff_key)s;
+  if (!window[K]) window[K] = new Map();
+  window[K].clear();
   const fields = [];
-  const tag = (el, t) => el.setAttribute('data-ff', t);
+  const tag = (el, t) => window[K].set(t, el);
   // A single field's question: its own label, else the enclosing
   // question's legend / aria-labelledby. Qualtrics text-entry questions put
   // the question only in the fieldset legend; without this the model saw
@@ -153,10 +221,12 @@ def _frames(b):
 def _extract(b):
     page, frames = _frames(b)
     all_fields, has_password = [], False
+    fmt = {"ff_key": json.dumps(_FF_KEY)}
     for idx, fr in enumerate(frames):
         prefix = "" if fr == page.main_frame else f"f{idx}:"
+        fmt["prefix_json"] = json.dumps(prefix)
         try:
-            out = json.loads(fr.evaluate(_TAG_EXTRACT_JS % {"prefix_json": json.dumps(prefix)}))
+            out = json.loads(fr.evaluate(_TAG_EXTRACT_JS % fmt))
         except Exception:
             continue  # frame navigated away / not scriptable -- skip it
         has_password = has_password or out["has_password"]
@@ -190,25 +260,11 @@ def batch_fill_verdict(fields: list, has_password: bool = None) -> tuple:
 
 # -- apply (real input, trusted events) -------------------------------------
 
-def _q(tag: str) -> str:
-    return '[data-ff="' + tag.replace("\\", "\\\\").replace('"', '\\"') + '"]'
+# Element lookup from the JS-side Map (no DOM attribute query).
+_FIND = f"const e=(window['{_FF_KEY}']||new Map()).get(t);"
 
-
-# Fast trusted input. Measured: Playwright's locator.click() costs 100-150ms
-# per click (scroll, two-frame stability wait, hit-target check, post-click
-# navigation wait) -- ~3s for a 15-field form -- while the actual trusted
-# event, a raw CDP Input.dispatchMouseEvent press+release, costs ~4ms. So
-# clicks are aimed and hit-tested in one cheap evaluate, sent raw, and the
-# result checked; only if something covers the target or the click had no
-# effect does it fall back to the full (slow, careful) Playwright click.
-
-# Element lookup by data-ff tag inside page JS. Measured: locator.evaluate()
-# costs ~95ms per call (it re-resolves the selector through Playwright's
-# polling machinery) versus ~3ms for a plain frame.evaluate -- and the
-# first fast-path version made 2-3 locator calls per option, which is why
-# it was no faster than plain locator.click(). Locators are now only used
-# for the slow, careful fallback.
-_FIND = "const e = Array.from(document.querySelectorAll('[data-ff]')).find(x => x.getAttribute('data-ff') === t);"
+# Get an element handle from the Map for Playwright fallback operations.
+_GET_HANDLE_JS = f"(t) => (window['{_FF_KEY}']||new Map()).get(t)"
 
 _AIM_JS = "(t) => {" + _FIND + r"""
   if (!e) return null;
@@ -234,8 +290,13 @@ _AIM_JS = "(t) => {" + _FIND + r"""
 
 _IS_ON_JS = "(t) => {" + _FIND + r"""
   if (!e) return null;
-  return e.tagName === 'INPUT' ? e.checked
-    : (e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true');
+  if (e.tagName === 'INPUT') return e.checked;
+  if (e.getAttribute('aria-checked') === 'true') return true;
+  if (e.getAttribute('aria-pressed') === 'true') return true;
+  if (e.getAttribute('aria-selected') === 'true') return true;
+  if (e.getAttribute('data-selected') === 'true') return true;
+  if (e.getAttribute('data-checked') === 'true') return true;
+  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(e.className || '');
 }"""
 
 _IS_NATIVE_JS = "(t) => {" + _FIND + " return !!e && e.tagName === 'INPUT'; }"
@@ -286,12 +347,10 @@ def _set_checked(session, frame, tag, want: bool):
         STATS["fast"] += 1
         return
     STATS["fallback"] += 1
-    # Covered target or no effect: the full actionable Playwright click.
-    loc = frame.locator(_q(tag))
-    if frame.evaluate(_IS_NATIVE_JS, tag):
-        loc.set_checked(want, timeout=ACTION_TIMEOUT_MS, force=True)
-    else:
-        loc.click(timeout=ACTION_TIMEOUT_MS)
+    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
+    el = handle.as_element()
+    if el:
+        el.click(force=True, timeout=ACTION_TIMEOUT_MS)
 
 
 def _select_option_el(session, frame, tag):
@@ -301,16 +360,20 @@ def _select_option_el(session, frame, tag):
         STATS["fast"] += 1
         return
     STATS["fallback"] += 1
-    frame.locator(_q(tag)).click(timeout=ACTION_TIMEOUT_MS)
+    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
+    el = handle.as_element()
+    if el:
+        el.click(timeout=ACTION_TIMEOUT_MS)
 
 
 def _type_text(session, frame, tag, text: str):
-    """Replace a text box's content with human-like per-word insertion.
-    Breaks text into small chunks (1-3 words) with natural pauses between,
-    instead of inserting the entire string at once (which is a bot tell)."""
+    """Replace a text box's content with human-like per-word insertion."""
     if not frame.evaluate(_FOCUS_SELECT_JS, tag):
         STATS["fallback"] += 1
-        frame.locator(_q(tag)).fill(text, timeout=ACTION_TIMEOUT_MS)
+        handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
+        el = handle.as_element()
+        if el:
+            el.fill(text, timeout=ACTION_TIMEOUT_MS)
         return
     # Short strings (codes, numbers): just insert directly
     if len(text) <= 12:
@@ -335,148 +398,173 @@ def _type_text(session, frame, tag, text: str):
         STATS["fast"] += 1
         return
     STATS["fallback"] += 1
-    frame.locator(_q(tag)).fill(text, timeout=ACTION_TIMEOUT_MS)
+    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
+    el = handle.as_element()
+    if el:
+        el.fill(text, timeout=ACTION_TIMEOUT_MS)
 
 
-def _apply(b, fields_by_id: dict, answers: dict):
+def _read_delay(f: dict, is_first: bool = False) -> float:
+    """Lognormal per-field delay that looks human at the page level."""
+    t = (f or {}).get("type")
+    label = ((f or {}).get("text") or "") + " " + " ".join((f or {}).get("options") or [])
+    long_q = len(label) > 160
+    if t in ("radio", "select") or (f or {}).get("widget") == "listbox":
+        mu, sigma = (2.8, 0.45) if long_q else (2.0, 0.35)
+    elif t == "checkbox":
+        mu, sigma = (2.4, 0.4) if long_q else (1.7, 0.3)
+    elif t in ("text", "textarea"):
+        mu, sigma = (3.8, 0.5) if long_q else (2.8, 0.4)
+    elif t == "date":
+        mu, sigma = 1.8, 0.35
+    elif t == "range":
+        mu, sigma = 1.8, 0.4
+    else:
+        mu, sigma = 1.4, 0.3
+    delay = random.lognormvariate(math.log(mu), sigma)
+    delay = max(0.4, min(delay, mu * 3))
+    if is_first:
+        delay += random.uniform(2.0, 5.0)
+    return delay
+
+
+def _apply_field_dom(session, fr, f: dict, fid: str, answer):
+    """Apply ONE field's answer to the DOM. Runs inside a bridge call. Raises
+    on failure (the caller classifies nav errors vs real errors)."""
+    t = f["type"]
+    if t in ("radio", "checkbox") or f.get("widget") == "listbox":
+        options = f["options"]
+        wanted = answer if isinstance(answer, list) else [answer]
+        if t == "radio" or f.get("widget") == "listbox":
+            match = _match_option(answer, options)
+            if match is None:
+                raise ValueError(f"option not found: {answer}")
+            idx = options.index(match)
+            if f.get("widget") == "listbox":
+                _select_option_el(session, fr, f"{fid}|{idx}")
+            else:
+                _set_checked(session, fr, f"{fid}|{idx}", True)
+        elif f.get("widget") == "switch":
+            on = answer is True or "true" in {_norm_opt(w) for w in wanted}
+            _set_checked(session, fr, f"{fid}|0", on)
+        else:
+            wanted_norm = {_norm_opt(w) for w in wanted}
+            for i, label in enumerate(options):
+                _set_checked(session, fr, f"{fid}|{i}", _norm_opt(label) in wanted_norm)
+    elif t == "select":
+        handle = fr.evaluate_handle(_GET_HANDLE_JS, fid)
+        el = handle.as_element()
+        labels = answer if isinstance(answer, list) else [answer]
+        el.select_option(label=labels, timeout=ACTION_TIMEOUT_MS)
+    elif t == "range":
+        fr.evaluate("([t, v]) => {" + _FIND + """
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e, v);
+            e.dispatchEvent(new Event('input', {bubbles:true}));
+            e.dispatchEvent(new Event('change', {bubbles:true})); }""", [fid, str(answer)])
+    elif t == "date":
+        handle = fr.evaluate_handle(_GET_HANDLE_JS, fid)
+        el = handle.as_element()
+        if el:
+            el.fill(str(answer), timeout=ACTION_TIMEOUT_MS)
+    elif t in ("text", "textarea"):
+        _type_text(session, fr, fid, str(answer))
+    else:
+        raise ValueError(f"unsupported type {t}")
+
+
+def _apply_field(b, fields_by_id: dict, fid: str, answer):
+    """Bridge worker: set up (cached) CDP session + frames and apply one
+    field. Returns {applied} / {error} / {nav} -- never raises -- so the
+    orchestrator can keep going (or stop on navigation) per field."""
     page, frames = _frames(b)
     # Opening a CDP session costs ~86ms; keep one per page on the bridge.
     if getattr(b, "_cdp_page", None) is not page:
         b._cdp_session = page.context.new_cdp_session(page)
         b._cdp_page = page
+    f = fields_by_id.get(fid)
+    if f is None:
+        return {"error": "unknown field id"}
     try:
-        return _apply_with(b._cdp_session, frames, fields_by_id, answers)
-    except Exception:
-        b._cdp_page = None  # stale session (page navigated/closed): rebuild next time
-        raise
+        fr = frames[f["_frame"]]
+    except (IndexError, KeyError):
+        return {"nav": True}       # the frame is gone — the page navigated
+    try:
+        _apply_field_dom(b._cdp_session, fr, f, fid, answer)
+        return {"applied": True}
+    except Exception as e:
+        if _is_nav_error(e):
+            b._cdp_page = None     # session is stale after a navigation
+            return {"nav": True}
+        return {"error": str(e).splitlines()[0][:200]}
 
 
-def _apply_with(session, frames, fields_by_id: dict, answers: dict):
-    applied, errors, freeform = {}, {}, []
+def apply_answers(fields: list, answers: dict) -> dict:
+    """Apply every answer, ONE field per bridge call, with the human reading
+    and thinking delays running in THIS (agent) thread between calls -- never
+    inside a bridge call. So the Playwright bridge is only ever held for a
+    single field's DOM work: a form of any size stays fully human-paced and
+    no call can time out. Choice fields go first, then free-text (a choice can
+    reveal a dependent text field). A field whose action navigates the page
+    (nav) ends the pass -- the remaining fields no longer exist on it."""
+    by_id = {f["id"]: f for f in fields}
+    choice_items, free_items = [], []
+    for fid, answer in answers.items():
+        f = by_id.get(fid)
+        is_free = f is not None and f["type"] in ("text", "textarea", "date", "range")
+        (free_items if is_free else choice_items).append((fid, answer))
 
-    def frame_of(fid):
-        return frames[fields_by_id[fid]["_frame"]]
-
-    # Reading-time distribution per field type. Current 0.3-1.2s was fast
-    # enough that a 10-field survey finished in ~8s where a human takes
-    # 60-180s. These ranges still beat human speed but close the gap to the
-    # point the overall cadence is plausible rather than machine-like.
-    def _read_delay(f: dict) -> float:
-        t = f.get("type")
-        label = (f.get("label") or "") + " " + " ".join(f.get("options") or [])
-        long_q = len(label) > 160
-        if t in ("radio", "select") or f.get("widget") == "listbox":
-            lo, hi = (0.9, 2.2) if long_q else (0.6, 1.5)
-        elif t == "checkbox":
-            lo, hi = (0.8, 1.9) if long_q else (0.5, 1.3)
-        elif t in ("text", "textarea"):
-            lo, hi = (1.6, 3.5) if long_q else (1.1, 2.4)
-        elif t == "date":
-            lo, hi = 0.6, 1.5
-        elif t == "range":
-            lo, hi = 0.6, 1.6
-        else:
-            lo, hi = 0.4, 1.1
-        return random.uniform(lo, hi)
-
-    def _reading_sleep(f: dict):
+    def _human_sleep(seconds: float):
         try:
-            cancel.sleep(_read_delay(f))
+            cancel.sleep(seconds)
         except cancel.Cancelled:
             raise
         except Exception:
             pass
 
-    for fid, answer in answers.items():
-        f = fields_by_id.get(fid)
-        if f is None:
-            errors[fid] = "unknown field id"
-            continue
-        if f["type"] in ("text", "textarea", "date", "range"):
-            freeform.append((fid, answer))  # after choices: they may reveal fields
-            continue
-        # Reading delay BEFORE each field — including the first — because a
-        # human reads the first question too, they just land on the page a
-        # fraction earlier (that part is covered by the agent's own dwell).
-        _reading_sleep(f)
-        try:
-            fr = frame_of(fid)
-            if f["type"] in ("radio", "checkbox") or f.get("widget") == "listbox":
-                options = f["options"]
-                wanted = answer if isinstance(answer, list) else [answer]
-                if f["type"] == "radio" or f.get("widget") == "listbox":
-                    if answer not in options:
-                        errors[fid] = f"option not found: {answer}"
-                        continue
-                    loc = fr.locator(_q(f"{fid}|{options.index(answer)}"))
-                    if f.get("widget") == "listbox":
-                        _select_option_el(session, fr, f"{fid}|{options.index(answer)}")
-                    else:
-                        _set_checked(session, fr, f"{fid}|{options.index(answer)}", True)
-                else:
-                    if f.get("widget") == "switch":
-                        wanted = ["true"] if (answer is True or "true" in wanted) else []
-                        _set_checked(session, fr, f"{fid}|0", bool(wanted))
-                    else:
-                        for i, label in enumerate(options):
-                            _set_checked(session, fr, f"{fid}|{i}", label in wanted)
-                applied[fid] = True
-            elif f["type"] == "select":
-                loc = fr.locator(_q(fid))
-                labels = answer if isinstance(answer, list) else [answer]
-                loc.select_option(label=labels, timeout=ACTION_TIMEOUT_MS)
-                applied[fid] = True
-            else:
-                errors[fid] = f"unsupported type {f['type']}"
-        except Exception as e:
-            errors[fid] = str(e).splitlines()[0][:200]
-
-    for fid, answer in freeform:
-        f = fields_by_id[fid]
-        # Text fields deserve the longer reading delay too; they also need
-        # composition time, which _type_text's per-char cadence already covers.
-        _reading_sleep(f)
-        try:
-            loc = frame_of(fid).locator(_q(fid))
-            if f["type"] == "range":
-                # Playwright has no fill() for range; set it like a native
-                # drag would end up (value + input/change events).
-                frame_of(fid).evaluate("([t, v]) => {" + _FIND + """
-                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e, v);
-                    e.dispatchEvent(new Event('input', {bubbles:true}));
-                    e.dispatchEvent(new Event('change', {bubbles:true})); }""", [fid, str(answer)])
-            elif f["type"] == "date":
-                loc.fill(str(answer), timeout=ACTION_TIMEOUT_MS)
-            else:
-                _type_text(session, frame_of(fid), fid, str(answer))
+    applied, errors = {}, {}
+    field_idx = 0
+    next_pause_at = random.randint(3, 5)
+    for fid, answer in choice_items + free_items:
+        f = by_id.get(fid)
+        # Human pacing happens HERE, bridge free: a 'thinking' pause every few
+        # fields, then a per-field reading delay (longer for the first field
+        # and for long questions). Fully human at any form size.
+        if field_idx > 0 and field_idx >= next_pause_at:
+            _human_sleep(random.uniform(1.5, 4.0))
+            next_pause_at = field_idx + random.randint(3, 5)
+        _human_sleep(_read_delay(f, is_first=(field_idx == 0)))
+        field_idx += 1
+        res = pw_bridge.run(_apply_field, by_id, fid, answer,
+                            timeout=_FIELD_BRIDGE_TIMEOUT)
+        if res.get("applied"):
             applied[fid] = True
-        except Exception as e:
-            errors[fid] = str(e).splitlines()[0][:200]
+        if res.get("error"):
+            errors[fid] = res["error"]
+        if res.get("nav"):
+            applied[fid] = True
+            break
     return {"applied": applied, "errors": errors}
 
 
-def apply_answers(fields: list, answers: dict) -> dict:
-    by_id = {f["id"]: f for f in fields}
-    return pw_bridge.run(_apply, by_id, answers)
+# -- verify (kept for bench/test tools; no longer called in production) ----
 
-
-# -- verify (DOM read-back through the same tags) ---------------------------
-
-_VERIFY_JS = "(spec) => {" + base._SHARED_JS + r"""
+_VERIFY_JS = ("(spec) => {" + base._SHARED_JS + r"""
 return ((spec) => {
+  const m = window[%(ff_key)s] || new Map();
   const out = {};
   for (const f of spec) {
     if (f.kind === 'group') {
-      const els = Array.from(document.querySelectorAll('[data-ff]'))
-        .filter(e => e.getAttribute('data-ff').startsWith(f.id + '|'))
-        .sort((a, b) => +a.getAttribute('data-ff').split('|').pop() - +b.getAttribute('data-ff').split('|').pop());
+      const els = [];
+      for (const [k, el] of m) {
+        if (k.startsWith(f.id + '|')) els.push([+k.split('|').pop(), el]);
+      }
+      els.sort((a, b) => a[0] - b[0]);
       if (!els.length) { out[f.id] = null; continue; }
-      const idx = els.map((e, i) => (f.listbox ? e.getAttribute('aria-selected') === 'true'
-                                                : _isChecked(e)) ? i : -1).filter(i => i >= 0);
+      const idx = els.map((pair, i) => (f.listbox ? pair[1].getAttribute('aria-selected') === 'true'
+                                                  : _isChecked(pair[1])) ? i : -1).filter(i => i >= 0);
       out[f.id] = {__idx: idx};
     } else {
-      const el = Array.from(document.querySelectorAll('[data-ff]'))
-        .find(e => e.getAttribute('data-ff') === f.id);
+      const el = m.get(f.id);
       if (!el) { out[f.id] = null; continue; }
       if (el.tagName === 'SELECT') {
         const s = Array.from(el.selectedOptions).map(o => o.textContent.trim());
@@ -486,7 +574,7 @@ return ((spec) => {
   }
   return JSON.stringify(out);
 })(spec);
-}"""
+}""") % {"ff_key": json.dumps(_FF_KEY)}
 
 
 def _verify(b, fields: list):
@@ -646,16 +734,8 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
                        | set(identity_missing))
     new_answers.update(identity_answers)
 
-    apply_errors, verify_result, mismatches, attempts = {}, dict(preserved), [], 0
-    pending = dict(new_answers)
-    while pending and attempts < max_apply_attempts:
-        attempts += 1
-        res = apply_answers(fields, pending)
-        apply_errors.update(res["errors"])
-        verify_result.update(verify_fields([f for f in fields if f["id"] in pending]))
-        mismatches = _compute_mismatches(fields, new_answers, verify_result)
-        retry = {m["id"] for m in mismatches} - set(apply_errors)
-        pending = {k: v for k, v in new_answers.items() if k in retry}
+    res = apply_answers(fields, new_answers)
+    apply_errors = res.get("errors", {})
 
     if memory is not None:
         for f in fields:
@@ -665,18 +745,19 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
         "skipped": False, "field_count": len(fields),
         "already_answered_count": len(preserved), "newly_answered_count": len(new_answers),
         "undecided": undecided, "answers": {**preserved, **new_answers},
-        "apply_errors": apply_errors, "mismatches": mismatches,
-        "verified_state": verify_result, "apply_attempts": attempts,
+        "apply_errors": apply_errors, "mismatches": [],
+        "verified_state": {}, "apply_attempts": 1,
         "frames_used": sorted({f["_frame"] for f in fields}),
     }
 
 
 # -- DOM-first advance (Next/Submit) ----------------------------------------
 
-_FIND_ADVANCE_JS = r"""
+_FIND_ADVANCE_JS = (r"""
 (args) => {
   const [allow, block] = args;
-  document.querySelectorAll('[data-ff-adv]').forEach(e => e.removeAttribute('data-ff-adv'));
+  const K = %(ff_key)s;
+  if (!window[K]) window[K] = new Map();
   const visible = el => !!(el.offsetParent !== null || el.getClientRects().length);
   const labelOf = el => (((el.tagName === 'INPUT' ? el.value : el.textContent) || '').trim()
                           || (el.getAttribute('aria-label') || '').trim()).replace(/\s+/g, ' ').toLowerCase();
@@ -688,28 +769,33 @@ _FIND_ADVANCE_JS = r"""
       const meta = [el.id, el.name, el.getAttribute('aria-label'), el.title]
         .filter(Boolean).join(' ').toLowerCase();
       if (block.some(b => l.includes(b) || meta.includes(b))) return false;
-      // Survey tools often label "next" with just an arrow (Qualtrics
-      // classic: <input id="NextButton" value=">>">), so arrows and a
-      // next-ish id/aria-label count too.
       if (['>>', '>', '→', '»', '›', '->', '=>'].includes(l)) return true;
       if (/(^|[\s_-])next(button|[\s_-]|$)/.test(meta) || meta.startsWith('next')) return true;
       if (!l || l.length > 40) return false;
       return allow.some(a => l === a || l.startsWith(a + ' ') || l === a + '!');
     });
   if (!c.length) return null;
-  const chosen = c[c.length - 1];  // advance control is conventionally last
-  chosen.setAttribute('data-ff-adv', '1');
+  const chosen = c[c.length - 1];
+  window[K].set('__adv', chosen);
   return { label: labelOf(chosen), count: c.length };
 }
-"""
+""") % {"ff_key": json.dumps(_FF_KEY)}
+
+
+_HAS_MAP_ENTRIES_JS = f"() => {{ const m = window['{_FF_KEY}']; return m ? m.size : 0; }}"
 
 
 def _find_advance(b):
     page, frames = _frames(b)
-    # Prefer frames that hold the form we just filled (the iframe's own
-    # Next button, not the wrapper page's), then the rest.
+
+    def _map_size(fr):
+        try:
+            return fr.evaluate(_HAS_MAP_ENTRIES_JS) or 0
+        except Exception:
+            return 0
+
     for idx, fr in sorted(enumerate(frames),
-                          key=lambda t: 0 if t[1].locator("[data-ff]").count() else 1):
+                          key=lambda t: 0 if _map_size(t[1]) else 1):
         try:
             hit = fr.evaluate(_FIND_ADVANCE_JS, [base._ADVANCE_LABELS, base._BLOCKED_LABELS])
         except Exception:
@@ -719,12 +805,25 @@ def _find_advance(b):
     return None, None
 
 
+_VISIBLE_COUNT_JS = f"""() => {{
+  const m = window['{_FF_KEY}'];
+  if (!m) return 0;
+  let n = 0;
+  for (const [k, el] of m) {{
+    if (k === '__adv') continue;
+    try {{ if (el && (el.offsetParent !== null || el.getClientRects().length)) n++; }}
+    catch(e) {{}}
+  }}
+  return n;
+}}"""
+
+
 def _snapshot(b):
     page, frames = _frames(b)
     tagged = 0
     for fr in frames:
         try:
-            tagged += fr.locator("[data-ff]:visible").count()
+            tagged += fr.evaluate(_VISIBLE_COUNT_JS)
         except Exception:
             pass
     lines = set()
@@ -744,7 +843,11 @@ def _click_advance(b):
         return {"attempted": False, "reason": "no forward-navigation button matched"}
     before = _snapshot(b)
     page, frames = _frames(b)
-    frames[idx].locator("[data-ff-adv]").click(timeout=ACTION_TIMEOUT_MS)
+    handle = frames[idx].evaluate_handle(_GET_HANDLE_JS, "__adv")
+    el = handle.as_element()
+    if not el:
+        return {"attempted": False, "reason": "advance button lost from Map"}
+    el.click(timeout=ACTION_TIMEOUT_MS)
     # Poll instead of a fixed settle sleep: a real advance (new URL, new
     # tab, fields gone) is detected within ~100ms; only a click that did
     # NOT advance (e.g. validation error) waits out the full window.

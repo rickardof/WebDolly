@@ -586,6 +586,112 @@ def _run_regression_tests(ac, ctx):
         return "5 runs, no args leaked"
 
 
+def _run_button_group_extractor_tests(ctx):
+    """Live-DOM check for the custom-widget radio group extractor.
+
+    Reproduces the netlify-hosted Likert survey layout that made
+    batch_fill return `0 field(s), none of them a real question` and left
+    the agent stuck in a scroll loop: <button class="likert-btn"> siblings
+    with one carrying `likert-btn selected`, no native inputs anywhere.
+    """
+    print("\n== BUTTON-GROUP EXTRACTOR ==")
+    import form_fill  # the shared JS lives here
+
+    def _extract_fields(page) -> list:
+        # Call _EXTRACT_JS directly against the test page's active document,
+        # which bypasses pw_bridge/active_page plumbing. Equivalent to what
+        # form_fill_pw.extract_fields would see on the real browser.
+        # _EXTRACT_JS is "_SHARED_JS + (function(){...})()" — a bare IIFE
+        # expression. An arrow-wrapper does not return it implicitly, so
+        # splice an explicit `return` between the shared helpers and the
+        # IIFE for page.evaluate.
+        import json as _json
+        shared = form_fill._SHARED_JS
+        iife = form_fill._EXTRACT_JS[len(shared):].strip()
+        wrapped = "() => { " + shared + "\nreturn " + iife + "; }"
+        raw = page.evaluate(wrapped)
+        return _json.loads(raw) if isinstance(raw, str) else raw
+
+    @_t("extractor:likert_buttons_detected_as_radio")
+    def _():
+        html = """
+        <div>
+          <h3>is genuine</h3>
+          <div class="likert-row">
+            <button class="likert-btn">0</button>
+            <button class="likert-btn">1</button>
+            <button class="likert-btn">2</button>
+            <button class="likert-btn">3</button>
+            <button class="likert-btn">4</button>
+            <button class="likert-btn selected">5</button>
+            <button class="likert-btn">6</button>
+            <button class="likert-btn">7</button>
+          </div>
+        </div>
+        """
+        page = _new_test_page(ctx, html)
+        page.wait_for_timeout(100)
+        fields = _extract_fields(page)
+        page.close()
+        assert fields, f"expected at least one group, got {fields!r}"
+        g = next((f for f in fields if f["type"] == "radio"), None)
+        assert g is not None, f"no radio group found: {fields!r}"
+        assert g["current"] == "5", f"expected '5' selected, got {g['current']!r}"
+        assert set(g["options"]) == {"0","1","2","3","4","5","6","7"}, f"options={g['options']!r}"
+        assert g["answered"] is True
+
+    @_t("extractor:aria_pressed_toggle_group")
+    def _():
+        # Toolbar-style radio using role=button + aria-pressed. Must be
+        # detected and the pressed one reported as current.
+        html = """
+        <div>
+          <h3>severity</h3>
+          <div>
+            <div role="button" class="opt">low</div>
+            <div role="button" class="opt" aria-pressed="true">medium</div>
+            <div role="button" class="opt">high</div>
+          </div>
+        </div>
+        """
+        page = _new_test_page(ctx, html)
+        page.wait_for_timeout(100)
+        fields = _extract_fields(page)
+        page.close()
+        g = next((f for f in fields if f["type"] == "radio" and "medium" in f.get("options", [])), None)
+        assert g is not None, f"aria-pressed group missing: {fields!r}"
+        assert g["current"] == "medium", g
+
+    @_t("extractor:toolbar_without_selected_not_a_group")
+    def _():
+        # Three unrelated action buttons at the top of a page should NOT be
+        # treated as a radio group: none is "selected" and the texts are
+        # command verbs, not answer options.
+        html = """
+        <div>
+          <nav>
+            <button class="toolbar-btn">Save</button>
+            <button class="toolbar-btn">Cancel</button>
+            <button class="toolbar-btn">Help</button>
+          </nav>
+          <h3>Please pick a plan</h3>
+          <div>
+            <button class="plan-btn">Free</button>
+            <button class="plan-btn selected">Pro</button>
+            <button class="plan-btn">Team</button>
+          </div>
+        </div>
+        """
+        page = _new_test_page(ctx, html)
+        page.wait_for_timeout(100)
+        fields = _extract_fields(page)
+        page.close()
+        # Both clusters are detected (allButtonish branch takes toolbar too),
+        # but at least the plan-btn one must come back with 'Pro' selected.
+        plan = next((f for f in fields if "Pro" in f.get("options", [])), None)
+        assert plan is not None and plan["current"] == "Pro", f"plan group: {plan!r}"
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -612,6 +718,7 @@ def main():
             _run_mouse_tests(ac, ctx)
             _run_fingerprint_tests(ctx, _STEALTH_JS)
             _run_regression_tests(ac, ctx)
+            _run_button_group_extractor_tests(ctx)
         finally:
             # Always clean up on exit so a subsequent run isn't poisoned by
             # a half-finished xdotool chain.

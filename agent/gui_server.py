@@ -715,6 +715,23 @@ def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue
         return False, messages, "STOPPED"
 
 
+# Injected in place of a human answer when the model calls ask_user_question
+# during an UNATTENDED loop run. The whole point of loop mode is a 24/7 run
+# the user does not have to babysit, so a question must never stall it: the
+# agent is steered to decide for itself and keep moving. The user keeps full
+# control via /inject at any time, and gets a non-blocking Telegram heads-up.
+_UNATTENDED_ANSWER = (
+    "You are running UNATTENDED in a 24/7 loop — no human will answer, so stop "
+    "asking questions (this is a standing rule). Decide for yourself using the "
+    "standing rules. If a study will not open, is broken, or you are stuck, go "
+    "back to the Prolific studies list and pick another eligible study; if none "
+    "is open, wait and re-check the list. If you genuinely cannot finish the "
+    "current study, cancel/return it (Ctrl+Shift+Tab to the Prolific tab → "
+    "Cancel participation) then terminate with NOCODE and move on. Never stop "
+    "to ask again."
+)
+
+
 def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill,
                   wander_seconds=0, skip_av=False):
     gen = run_agent(task, url, max_rounds, stop_event=stop_event, messages=messages,
@@ -733,6 +750,24 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
         if event["type"] == "done":
             return True, latest_messages, event.get("answer", "")
         if event["type"] == "question":
+            # Unattended loop: never block on a human. Auto-steer the model to
+            # proceed on its own and keep the 24/7 loop moving. A "this study
+            # won't open, what should I do?" question would otherwise stall the
+            # whole run until someone replied. The user still sees it (feed +
+            # non-blocking Telegram) and can redirect with /inject anytime.
+            if state.get("loop"):
+                _push_event({"type": "auto_answer", "step": event.get("step"),
+                             "question": event["question"],
+                             "answer": "(unattended: proceeding autonomously)"})
+                try:
+                    agent_core._notify_telegram(
+                        "ℹ️ L'agente avrebbe chiesto (procedo in autonomia, nessun blocco):\n"
+                        + str(event["question"])[:400]
+                        + "\n\nPer intervenire: /inject <testo>.")
+                except Exception:
+                    pass
+                event = gen.send(_UNATTENDED_ANSWER)
+                continue
             with state_lock:
                 state["pending_question"] = event["question"]
             _publish_state()

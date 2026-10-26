@@ -173,20 +173,73 @@ def user_hints_for(url: str) -> str:
     bullets = "\n".join(f"  - {h.get('text', '')}" for h in hints[-MAX_USER_HINTS_PER_DOMAIN:])
     block = (f'[Things the user told you before on {domain} (apply when relevant, '
              f'do not repeat past mistakes):\n{bullets}]\n')
-    # Imperative escalation: if the user has repeatedly asked for speed/efficiency
-    # on this domain, prepend a stronger directive so the model actually follows.
-    speed_kw = ("veloce", "velocement", "fast", "faster", "quickly",
-                "speed", "efficien", "ritmo", "rhythm")
-    speed_hits = sum(1 for h in hints
-                     if any(k in h.get("text", "").lower() for k in speed_kw))
+    # Imperative escalations: if the user has repeatedly asked for the same
+    # pattern on this domain, prepend a stronger directive so the model actually
+    # follows. Keyword sets are deliberately narrow (two hints with the same
+    # intent must concur) to avoid firing on one-off remarks.
+    low = [h.get("text", "").lower() for h in hints]
+    enter_hits = sum(1 for t in low if any(k in t for k in _ENTER_KW))
+    speed_hits = sum(1 for t in low if any(k in t for k in _SPEED_KW))
+    # Order: later prepends sit on TOP. We put the speed DIRECTIVE on the
+    # bottom (prepended first) and the more specific Enter DIRECTIVE on top
+    # (prepended last) -- when both fire the Enter one must dominate.
+    # When Enter is active, the speed DIRECTIVE drops its 'scroll to submit →
+    # click submit' rhythm (which contradicts Enter) and adopts the Enter
+    # rhythm instead, so the two no longer tell the model opposite things.
     if speed_hits >= 2:
+        rhythm = ("click an option → press Enter → wait for next trial → repeat"
+                  if enter_hits >= 2 else
+                  "select → scroll to submit → click submit → wait for next "
+                  "trial → repeat")
         block = (f'[DIRECTIVE on {domain}: user has asked {speed_hits} times '
                  f'to work faster/more efficiently here. On repetitive '
                  f'select+submit surveys, develop a fast clicking rhythm: '
-                 f'select → scroll to submit → click submit → wait for next '
-                 f'trial → repeat. Do NOT hesitate between trials. Vary '
+                 f'{rhythm}. Do NOT hesitate between trials. Vary '
                  f'your selections naturally — never straight-line.]\n' + block)
+    if enter_hits >= 2:
+        block = (f'[DIRECTIVE on {domain}: the user has told you {enter_hits} '
+                 f'times that after selecting an option on this survey you '
+                 f'MUST press Enter to proceed to the next trial. '
+                 f'Do NOT scroll looking for a submit button. Do NOT click '
+                 f'submit. IMPORTANT: the harness ALREADY presses Enter for '
+                 f'you right after each left_click on this domain — you must '
+                 f'NOT emit a key action with Return/Tab/Enter yourself '
+                 f'(pressing Enter twice advances two trials and submits the '
+                 f'next one with no selection). After left_click, your very '
+                 f'next action is to take the next screenshot (wait or the '
+                 f'next click on the new trial), never a key action.]\n' + block)
     return block
+
+
+# Keyword sets exposed at module level so other modules (e.g. agent_core,
+# which auto-chains Enter after a click when the Enter DIRECTIVE is active)
+# and tests can reuse the exact same list that gates the DIRECTIVE text.
+_ENTER_KW = ("press enter", "press the enter", "just press", "just enter",
+             "hit enter", "use enter", "enter key", "enter to", "no submit",
+             "no scroll", "don't scroll", "dont scroll", "don't click submit",
+             "dont click submit", "no need to scroll", "no need to click",
+             "reach submit", "clicking submit")
+_SPEED_KW = ("veloce", "velocement", "fast", "faster", "quickly",
+             "speed", "efficien", "ritmo", "rhythm")
+
+
+def enter_hint_count(url: str) -> int:
+    """How many Enter-rhythm user hints are stored for this URL's domain.
+
+    Agent-core consults this to decide whether to auto-chain an Enter press
+    after a left_click: on domains where the user has repeatedly asked for
+    the click-then-Enter pattern, we skip the extra model round-trip and
+    press Enter ourselves. 0 when the domain or its hint list is empty.
+    """
+    domain = domain_of(url)
+    if not domain:
+        return 0
+    with _lock:
+        data = _fresh(_read())
+    entry = data.get(domain) or {}
+    hints = entry.get("user_hints") or []
+    low = [h.get("text", "").lower() for h in hints]
+    return sum(1 for t in low if any(k in t for k in _ENTER_KW))
 
 
 def entries() -> dict:

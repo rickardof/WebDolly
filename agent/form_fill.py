@@ -144,7 +144,16 @@ function _precedingHeadingText(el) {
 }
 function _isChecked(el) {
   if (el.tagName === 'INPUT') return el.checked;
-  return el.getAttribute('aria-checked') === 'true';
+  if (el.getAttribute('aria-checked') === 'true') return true;
+  if (el.getAttribute('aria-pressed') === 'true') return true;
+  if (el.getAttribute('aria-selected') === 'true') return true;
+  if (el.getAttribute('data-selected') === 'true') return true;
+  if (el.getAttribute('data-checked') === 'true') return true;
+  // Custom-widget selected markers: "selected", "is-selected", "chosen",
+  // "checked", "is-active". `active` alone deliberately excluded -- too
+  // many unrelated navs use it. Only applied to non-input elements, which
+  // are already group members (verified by _getChoiceGroups/_getButtonGroups).
+  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(el.className || '');
 }
 function _optionLabel(el) {
   if (el.tagName === 'INPUT') return _labelFor(el) || el.value;
@@ -224,6 +233,12 @@ function _getChoiceGroups() {
     groups.push({ id: els.length > 1 ? `cgp:${idx}` : `cb:${idx}`, kind: 'checkbox', els, text });
   });
 
+  // Last pass: custom-widget radio groups built from <button>/role=button
+  // siblings (likert-btn, option-pill, choice-chip, ...). These are picked
+  // up only if nothing above already consumed them, and extraction treats
+  // them exactly like a radio group thanks to _isChecked's class-marker
+  // branch.
+  _getButtonGroups(consumed).forEach(g => groups.push(g));
   return groups;
 }
 
@@ -240,6 +255,77 @@ function _getListboxes() {
     return { id: `lb:${idx}`, els: opts,
       text: _groupLegend(lb) || _precedingHeadingText(lb) || `lb:${idx}` };
   }).filter(g => g.els.length);
+}
+
+// A custom-widget radio group: sibling <button>/<div role=button> elements
+// with the same base class, where none is a native input/role=radio (those
+// are already covered above) and at least one carries a "selected" marker
+// (an extra class suffix like `selected|active|checked|is-selected|on`, or
+// `aria-pressed=true`, `aria-checked=true`, or `data-selected=true`).
+// Catches survey tools that render Likert scales as <button class="likert-btn">
+// / <button class="likert-btn selected">, which native + ARIA extraction misses.
+// Each group is a parent whose children match this shape; the LABEL of the
+// question is the preceding heading text (same mechanism as role=radio groups).
+function _getButtonGroups(consumed) {
+  const groups = [];
+  const _SELECT_MARKER_RE = /\b(selected|active|checked|is-selected|is-active|on|chosen|current)\b/i;
+  const _looksSelected = el => {
+    if (el.getAttribute('aria-pressed') === 'true') return true;
+    if (el.getAttribute('aria-checked') === 'true') return true;
+    if (el.getAttribute('aria-selected') === 'true') return true;
+    if (el.getAttribute('data-selected') === 'true') return true;
+    if (el.getAttribute('data-checked') === 'true') return true;
+    return _SELECT_MARKER_RE.test(el.className || '');
+  };
+  // Base class token = the first non-selected class token the element carries
+  // (so "likert-btn selected" and "likert-btn" share base "likert-btn"). An
+  // element with only a selected-marker class is base "" -- not a group key.
+  const _baseKey = el => {
+    const cls = (el.className || '').split(/\s+/).filter(Boolean);
+    const base = cls.filter(c => !_SELECT_MARKER_RE.test(c));
+    return base.join(' ');
+  };
+
+  const parents = new Map();  // parentNode -> Map<baseKey, [elements]>
+  const sel = 'button, [role="button"], [tabindex]:not(input):not(textarea):not(select):not(a)';
+  document.querySelectorAll(sel).forEach(el => {
+    if (!_visible(el) || el.disabled || consumed.has(el)) return;
+    if (el.tagName === 'INPUT') return;
+    const txt = (el.textContent || '').trim();
+    if (!txt || txt.length > 40) return;
+    const base = _baseKey(el);
+    if (!base) return;
+    const p = el.parentElement;
+    if (!p) return;
+    if (!parents.has(p)) parents.set(p, new Map());
+    const byKey = parents.get(p);
+    if (!byKey.has(base)) byKey.set(base, []);
+    byKey.get(base).push(el);
+  });
+
+  let idx = 0;
+  parents.forEach((byKey, parent) => {
+    byKey.forEach((els, key) => {
+      if (els.length < 2) return;
+      const uniq = new Set(els.map(e => (e.textContent || '').trim()));
+      if (uniq.size < 2) return;
+      // Need at least one visually "selected" sibling OR a role=button/tabindex
+      // signature, otherwise we might capture a toolbar of actions.
+      const hasSelected = els.some(_looksSelected);
+      const allButtonish = els.every(e => e.tagName === 'BUTTON'
+        || e.getAttribute('role') === 'button' || e.hasAttribute('tabindex'));
+      if (!hasSelected && !allButtonish) return;
+      els.forEach(e => consumed.add(e));
+      groups.push({
+        id: `bg:${idx++}`, kind: 'radio', els,
+        text: _groupLegend(parent.closest('fieldset'))
+          || _precedingHeadingText(parent)
+          || _labelFor(parent)
+          || `bg:${idx}`,
+      });
+    });
+  });
+  return groups;
 }
 """
 
@@ -486,10 +572,22 @@ def _ask_llm_for_chunk(fields: list, persona: str, temperature: float) -> dict:
         "information). Below is a JSON list of the questions currently "
         "visible on the page.\n\n"
         f"{persona_line}"
+        "ATTENTION CHECKS -- HARDEST RULE, APPLY FIRST. For EVERY question, scan "
+        "its FULL `text` field AND every option label for an embedded instruction. "
+        "Patterns to catch: 'to show you are paying attention select X', "
+        "'this is an attention check, choose Y', 'please select [specific option]', "
+        "'choose the [third/second/last] option', 'select strongly agree/disagree "
+        "for this one', 'what colour is the sky', 'if you are reading this select Z'. "
+        "If a question contains such an instruction, your answer MUST obey it EXACTLY, "
+        "overriding persona, consistency, variance, and what feels natural. One failed "
+        "attention check invalidates the whole submission and loses the reward. Treat "
+        "any question whose text includes 'attention', 'paying attention', 'to verify', "
+        "'to confirm you are reading', or names a specific option as directive. "
+        "Only once no attention-check instruction is present, fall back to the normal "
+        "answer rules below.\n\n"
         "Answer ALL of them with plausible, internally consistent values. "
-        "Quality rules: read each question fully -- if a question or its "
-        "instructions say which option to choose (an attention check), choose "
-        "exactly that. Stay consistent with the persona and with any answers "
+        "Quality rules: read each question fully. "
+        "Stay consistent with the persona and with any answers "
         "already given earlier in this survey (listed below if any). Answer "
         "open-ended questions specifically about what is asked, in the "
         "language the question is written in -- no generic filler. Do not "
