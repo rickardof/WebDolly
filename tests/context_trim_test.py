@@ -889,6 +889,55 @@ def _():
         ff.time.sleep = real
 
 
+@_t("complete:pushes_back_on_survey_host_thankyou")
+def _():
+    msg = agent_core.completion_pushback(
+        "Completed the study successfully. Thank you for your participation!",
+        "https://eval.services/?evaluation_id=abc&study_id=xyz",
+        [], [], False)
+    assert msg, "free-text done on survey host with no code must push back"
+    assert "eval.services" in msg, msg          # names the host it is stuck on
+    assert "Prolific" in msg
+
+
+@_t("complete:accepts_code_answer")
+def _():
+    msg = agent_core.completion_pushback(
+        "CODE: CSA95SMN", "https://surreyfbel.qualtrics.com/jfe/form/SV_x",
+        [], [], False)
+    assert msg == "", "a CODE: answer is a real outcome, not a false stop"
+
+
+@_t("complete:accepts_nocode_answer")
+def _():
+    assert agent_core.completion_pushback(
+        "NOCODE", "https://eval.services/x", [], [], False) == ""
+
+
+@_t("complete:no_pushback_when_back_on_prolific")
+def _():
+    msg = agent_core.completion_pushback(
+        "Completed the study", "https://app.prolific.com/submissions", [], [], False)
+    assert msg == "", "already back on Prolific: nothing to nudge"
+
+
+@_t("complete:no_pushback_when_a_code_was_seen")
+def _():
+    assert agent_core.completion_pushback(
+        "Completed the study", "https://eval.services/x", ["C1A2B3"], [], False) == "", \
+        "a code seen earlier in the run counts as completion"
+    assert agent_core.completion_pushback(
+        "Completed the study", "https://eval.services/x", [], ["C1A2B3"], False) == "", \
+        "a code on the end page counts as completion"
+
+
+@_t("complete:fires_at_most_once_per_study")
+def _():
+    assert agent_core.completion_pushback(
+        "Completed the study", "https://eval.services/x", [], [], True) == "", \
+        "already pushed back once: must not loop"
+
+
 if __name__ == "__main__":
     passed = sum(1 for _, s, _ in _RESULTS if s == "PASS")
     failed = sum(1 for _, s, _ in _RESULTS if s != "PASS")

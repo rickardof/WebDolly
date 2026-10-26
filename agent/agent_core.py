@@ -1595,6 +1595,43 @@ def terminate_refusal(timer: "StudyTimer") -> str:
     return ""
 
 
+def completion_pushback(answer: str, url: str, seen_codes: list,
+                        page_codes: list, already_pushed: bool) -> str:
+    """One-shot nudge when a free-text `terminate` has not actually reached
+    Prolific, or "" if the termination may stand.
+
+    A Prolific study is only really finished once you are back on Prolific
+    with a completion code (that case is caught earlier, from the URL) or a
+    code was shown on the study's own pages. A free-text "I completed the
+    study" while still on the survey host, with no code seen anywhere, almost
+    always means the model stopped on the host's own "thank you"/validation
+    screen and never clicked the final control that submits and returns to
+    Prolific -- so nothing was registered. Generic on purpose: it keys off the
+    invariant (back on Prolific OR a code), not on any one platform, trial
+    count or button label. Fires at most once per study; if the model still
+    terminates after it, that judgment is obeyed.
+    """
+    if already_pushed:
+        return ""
+    if answer.startswith("CODE:") or answer == "NOCODE":
+        return ""                      # a code outcome: check_code handles it
+    if _on_guarded_site(url):
+        return ""                      # already back on Prolific
+    if seen_codes or page_codes:
+        return ""                      # a code did appear somewhere
+    host = urlparse(url or "").hostname or "this site"
+    return (
+        f"NOT DONE YET: you are ending the task but you are still on {host}, not back "
+        "on Prolific, and no completion code has appeared anywhere. A study only counts "
+        "as submitted once you return to Prolific (the page URL becomes "
+        "app.prolific.com/.../complete) or a completion code is shown on screen. A "
+        "'thank you' or validation screen on the survey site is NOT the end by itself. "
+        "Look on this page for the final control that submits or returns you to Prolific "
+        "-- a button or link such as Submit, Finish, Done, Continue, or Return to "
+        "Prolific -- and click it, then wait. Only if there is truly no such control and "
+        "no code anywhere should you end the task again.")
+
+
 def _near_checkbox_state(x: float, y: float):
     """Return checked state of nearest checkbox within 80px, or None."""
     _JS = """([x, y]) => {
@@ -2135,6 +2172,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _seen_codes: list = []  # completion codes spotted on the study's own pages
         # _used_run_js removed — run_js is disabled for anti-detection
         _survey_url: str = ""  # URL of the external survey (for study_memory)
+        # Completion guard: nudge a free-text "I'm done" that never got back to
+        # Prolific / a code, at most once per study so a re-terminate is obeyed.
+        _completion_pushed_back: bool = False
         # Content-change signal: see _page_fingerprint / _page_change_hint.
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
@@ -2301,6 +2341,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _current_study_id = None
                 _current_study_title = ""
                 _seen_codes = []
+                _completion_pushed_back = False
 
             # --- studies that lead nowhere (and, opt-in, audio/video ones) ---
             # A study that is listed but not doable gets opened again on every
@@ -2706,8 +2747,19 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if refusal:
                     pending_user_response = refusal
                     continue
-                yield step_event
                 answer = args.get("answer", "")
+                # A free-text "I completed the study" that never got back to
+                # Prolific and shows no code is almost always a stop on the
+                # survey host's own thank-you/validation page, with the final
+                # "submit & return to Prolific" control skipped. Nudge once.
+                nudge = completion_pushback(
+                    answer, here, _seen_codes,
+                    codes_on_page(_end_page_text()), _completion_pushed_back)
+                if nudge:
+                    _completion_pushed_back = True
+                    pending_user_response = nudge
+                    continue
+                yield step_event
                 _restore_user_speed()
                 _close_extra_tabs()
                 check = None
