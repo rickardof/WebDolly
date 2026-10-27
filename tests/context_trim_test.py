@@ -1014,6 +1014,47 @@ def _():
         "https://app.prolific.com/submissions/complete?cc=C7737BD52") == agent_core.studies_url()
 
 
+@_t("progress:counter_extracted")
+def _():
+    assert agent_core._progress_counter("4/35 Time: 6:06 Select (1)") == (4, 35)
+    assert agent_core._progress_counter("no counter here") is None
+    assert agent_core._progress_counter("ratio 40/35 is invalid") is None   # n > tot
+
+
+@_t("pagesignal:counter_move_reads_as_advance")
+def _():
+    prev = ("4/35 Time: 6:06 Select (1) Select (2) It's a Draw Ready to Submit? "
+            "Submit Vote Press Enter to submit D for draw")
+    curr = ("5/35 Time: 6:20 Select (1) Select (2) It's a Draw Ready to Submit? "
+            "Submit Vote Press Enter to submit D for draw")
+    out = agent_core._page_change_hint(prev, "key", curr)
+    assert "ADVANCED" in out and "5/35" in out and "5 of 35" in out, out
+    # the two trials are near-identical text, so without the counter check the
+    # similarity tier would NOT classify this as a clear navigation
+    assert agent_core._text_similarity(prev, curr) < 0.92
+
+
+@_t("pagesignal:same_trial_selection_not_advance")
+def _():
+    prev = "4/35 Time: 6:06 Select (1) Select (2) It's a Draw Ready to Submit? Submit Vote"
+    curr = ("4/35 Time: 6:08 Choice 1 selected Select (1) Select (2) It's a Draw "
+            "Ready to Submit? Submit Vote")
+    out = agent_core._page_change_hint(prev, "left_click", curr)
+    assert "ADVANCED" not in out, out      # same trial counter: must not claim an advance
+
+
+@_t("pagesignal:image_swap_lowers_similarity")
+def _():
+    # the fingerprint now includes image srcs, so swapping the trial's images
+    # (same layout text, same counter) no longer reads as "mostly unchanged"
+    base = "4/35 Select (1) Select (2) It's a Draw Ready to Submit? Submit Vote"
+    prev = base + " https://eval.services/i/a1.png https://eval.services/i/b1.png"
+    curr = base + " https://eval.services/i/a2.png https://eval.services/i/b2.png"
+    out = agent_core._page_change_hint(prev, "left_click", curr)
+    assert "MOSTLY unchanged" not in out, out
+    assert agent_core._text_similarity(prev, curr) < 0.92
+
+
 if __name__ == "__main__":
     passed = sum(1 for _, s, _ in _RESULTS if s == "PASS")
     failed = sum(1 for _, s, _ in _RESULTS if s != "PASS")

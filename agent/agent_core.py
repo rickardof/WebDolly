@@ -1098,8 +1098,9 @@ _WS_RE = re.compile(r"\s+")
 
 
 def _page_fingerprint(limit: int = 8000) -> str:
-    """Normalized visible page text, used by _page_change_hint to tell
-    the model how much its previous action changed the page.
+    """Normalized visible page text PLUS the srcs of the visible images, used
+    by _page_change_hint to tell the model how much its previous action
+    changed the page.
 
     Problem it solves: on multi-trial surveys the URL stays the same when
     "Submit" advances to the next trial. A binary "same/different" hash
@@ -1110,16 +1111,37 @@ def _page_fingerprint(limit: int = 8000) -> str:
     the hint compute token-level similarity and distinguish minor UI
     updates from real navigation.
 
+    innerText is text only, so an image-comparison trial that swaps its
+    images but keeps the same layout labels (Select 1/2, Submit, ...) read as
+    "unchanged" and the model thought it was stuck. The srcs of the visible
+    images are appended (query strings stripped so cache-busters don't churn,
+    tiny icons skipped) so an image swap registers as a real content change.
+
     Whitespace is collapsed so reflow-only differences (window resize,
     tooltip ghost, cursor-induced :hover text) don't register as changes.
     """
+    _JS = r"""(limit) => {
+        const txt = (document.body ? document.body.innerText : '').slice(0, limit);
+        const imgs = [];
+        for (const el of document.querySelectorAll('img')) {
+            const r = el.getBoundingClientRect();
+            if (r.width < 32 || r.height < 32) continue;       // skip icons/pixels
+            let s = el.currentSrc || el.src || '';
+            if (!s || s.startsWith('data:')) continue;
+            imgs.push(s.split('?')[0]);                        // drop cache-busters
+            if (imgs.length >= 30) break;
+        }
+        return txt + ' ' + imgs.join(' ');
+    }"""
     try:
-        txt = _page_text(limit)
-        if not txt:
-            return ""
-        return _WS_RE.sub(" ", txt).strip()
+        out = pw_bridge.run(lambda b: b.active_page().evaluate(_JS, limit)) or ""
+        return _WS_RE.sub(" ", out).strip()
     except Exception:
-        return ""
+        # Fall back to text only if the combined read fails.
+        try:
+            return _WS_RE.sub(" ", _page_text(limit)).strip()
+        except Exception:
+            return ""
 
 
 def _text_similarity(a: str, b: str) -> float:
@@ -1133,6 +1155,29 @@ def _text_similarity(a: str, b: str) -> float:
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / len(sa | sb)
+
+
+_PROGRESS_RE = re.compile(r"\b(\d{1,3})\s*/\s*(\d{1,3})\b")
+
+
+def _progress_counter(fp: str):
+    """The first 'N/M' progress counter in the page text (e.g. 4/35), as
+    (n, m), or None.
+
+    Multi-trial surveys show one and advance it each trial while the URL and
+    the rest of the layout stay identical. A change in it is a reliable
+    "moved to the next item" signal that token similarity -- dominated by the
+    unchanged layout (Select 1/2, Submit, ...) -- otherwise misses, reading
+    two different trials as "mostly unchanged". The timer ("Time: 9:24") uses
+    ':' so it never matches, and a static date like 10/27 never changes
+    step-to-step, so only a real counter move triggers the signal."""
+    m = _PROGRESS_RE.search(fp or "")
+    if not m:
+        return None
+    n, tot = int(m.group(1)), int(m.group(2))
+    if tot == 0 or n > tot:
+        return None
+    return (n, tot)
 
 
 # Which action types might legitimately advance the page content. For
@@ -1158,6 +1203,18 @@ def _page_change_hint(prev_fp: str, prev_action: str, curr_fp: str) -> str:
     """
     if not prev_fp or not curr_fp or prev_action not in _ADVANCING_ACTIONS:
         return ""
+    # A multi-trial progress counter (N/M) that moved is a definitive advance
+    # to a new item, even though the layout text barely changed. Say the new
+    # position explicitly so the model stops re-doing the previous trial --
+    # the exact failure where it reads the small counter wrong and loops.
+    prev_prog, curr_prog = _progress_counter(prev_fp), _progress_counter(curr_fp)
+    if (prev_prog and curr_prog and prev_prog[1] == curr_prog[1]
+            and prev_prog[0] != curr_prog[0]):
+        return (f"[page-signal] You ADVANCED: the progress counter moved from "
+                f"{prev_prog[0]}/{prev_prog[1]} to {curr_prog[0]}/{curr_prog[1]}. "
+                f"Your previous {prev_action} registered and you are now on item "
+                f"{curr_prog[0]} of {curr_prog[1]}. Do NOT redo the previous item; "
+                "continue with this one.\n")
     if prev_fp == curr_fp:
         return (f"[page-signal] Your previous {prev_action}: page innerText is "
                 "IDENTICAL (0% change). The action had no visible effect — try "
