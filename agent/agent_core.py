@@ -2157,6 +2157,23 @@ def _standing_rules() -> str:
     return _STANDING_RULES_COMPACT
 
 
+def _identity_hint_text(idv: dict) -> str:
+    """The line that gives the model its EXACT Prolific ID / email (from
+    identity.json or the task) so it types them when a study asks, instead of
+    refusing as 'not provided'. Empty when nothing is known."""
+    parts = []
+    if (idv or {}).get("prolific_id"):
+        parts.append(f"Prolific ID is exactly {idv['prolific_id']}")
+    if (idv or {}).get("email"):
+        parts.append(f"Prolific email is exactly {idv['email']}")
+    if not parts:
+        return ""
+    return ("\n\nYOUR ACCOUNT DETAILS (known, from file -- use the EXACT value, never alter or "
+            "invent): " + "; ".join(parts) + ". When a study or survey asks for your Prolific ID "
+            "or email, type exactly this value. It is already available, so never say it is "
+            "missing and never refuse, cancel, or return a study over a Prolific ID / email field.")
+
+
 def summarize_transcript(lines: list, started: datetime = None, ended: datetime = None) -> dict:
     """One run, reduced to what the dashboard and the daily summary need.
 
@@ -2300,6 +2317,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # the model is told explicitly to break the loop instead of
         # continuing. Reset per run.
         _recent_action_sigs: deque = deque(maxlen=4)
+        # Identity (Prolific ID / email) the user put in identity.json or the
+        # task, surfaced to the model so it can TYPE the exact value when a study
+        # asks for it. The DOM identity-fill stays primary; this is the fallback
+        # for pages the extractor can't tag (e.g. a Prolific-ID page the vision
+        # model otherwise refused, believing the ID "was not provided"). Fetched
+        # once: these values are account-level constants.
+        _identity_hint = ""
+        try:
+            _identity_hint = _identity_hint_text(form_fill.identity_values(task))
+        except Exception:
+            _identity_hint = ""
 
         def _record_user_correction(text: str, persist: bool = True) -> None:
             """A user instruction (question answer or injected steer) arrived.
@@ -2652,7 +2680,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             "working through it. Continue where you left off — complete the "
                             "current question and proceed. Do NOT navigate back to Prolific "
                             "until the survey is complete.")
-                text = task + _standing_rules() + (f"\n\n{skip_hint}" if skip_hint else "") + resume_hint
+                text = task + _standing_rules() + _identity_hint + (f"\n\n{skip_hint}" if skip_hint else "") + resume_hint
                 if pending_user_response:
                     text += f"\n\n[User (mid-run instruction)]: {pending_user_response}"
                     pending_user_response = ""
