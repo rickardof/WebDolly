@@ -14,6 +14,8 @@ on:
       - "agent/pw_bridge.py"
       - "agent/gui_server.py"
       - "agent/dashboard.html"
+      - "agent/form_fill_pw.py"
+      - "agent/tests_pw.py"
       - "docker/browser/**"
       - "docker/browser-pw/**"
       - "tests/humanization_e2e.py"
@@ -105,6 +107,15 @@ jobs:
           FARA_CONTAINER: fara-browser-test
           FARA_CDP_URL: http://127.0.0.1:9334
         run: python tests/humanization_e2e.py
+
+      - name: Run Playwright form-fill suite
+        # The batch-fill apply layer against the form fixtures, verified from the
+        # final DOM. No model in CI, so only the DOM / apply_answers (real-input
+        # xdotool) tests run; the run_batch_fill (LLM) tests self-skip.
+        env:
+          FARA_CONTAINER: fara-browser-test
+          FARA_CDP_URL: http://127.0.0.1:9334
+        run: python agent/tests_pw.py
 
       - name: Container logs on failure
         if: failure()
