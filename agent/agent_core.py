@@ -300,6 +300,27 @@ def _human_type(text: str):
     docker_exec("xdotool", *args)
 
 
+def _wheel_scroll(down: bool, ticks: int):
+    """A real mouse-wheel scroll (xdotool), so batch-fill brings fields into
+    view the way the vision path does -- never JS scrollIntoView."""
+    btn = "5" if down else "4"
+    docker_exec("xdotool", *_wheel_click_args(btn, max(1, int(ticks)), random.randint(25, 60)))
+
+
+# Hand batch-fill (form_fill_pw) the real xdotool input backend so it drives the
+# same cursor the vision path uses, never CDP Input.dispatch* or DOM writes
+# (which behavioural fraud scoring flags). Defined here, after the primitives
+# above exist; form_fill is form_fill_pw, imported at the top with no cycle back.
+form_fill.set_real_input({
+    "move": _human_move,
+    "click": lambda: docker_exec("xdotool", "click", "1"),
+    "wheel": _wheel_scroll,
+    "type": _human_type,
+    "key": lambda keys, repeat=1: docker_exec(
+        "xdotool", "key", "--clearmodifiers", "--repeat", str(max(1, int(repeat))), keys),
+})
+
+
 
 
 def take_screenshot(run_dir: Path, step: int) -> Image.Image:

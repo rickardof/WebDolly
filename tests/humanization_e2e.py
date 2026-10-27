@@ -332,9 +332,9 @@ def _run_mouse_tests(ac, ctx):
             # Return a fake result (we don't want 60 real cursor moves)
             class R: stdout = "X=0\nY=0\nSCREEN=0\nWINDOW=0"; stderr = ""; returncode = 0
             return R()
-        orig_near = ac._near_checkbox_state
+        orig_near = ac._nearest_checkbox
         orig_pos = ac._get_cursor_pos
-        ac._near_checkbox_state = lambda x, y: None
+        ac._nearest_checkbox = lambda x, y: None
         ac._get_cursor_pos = lambda: (0, 0)
         ac.docker_exec = _cap
         devs = []
@@ -354,7 +354,7 @@ def _run_mouse_tests(ac, ctx):
             assert last_aim, "no mousemove waypoints in big call"
             devs.append(math.hypot(last_aim[0]-500, last_aim[1]-400))
         ac.docker_exec = orig
-        ac._near_checkbox_state = orig_near
+        ac._nearest_checkbox = orig_near
         ac._get_cursor_pos = orig_pos
         mean = sum(devs)/len(devs)
         off = sum(1 for d in devs if d >= 1)

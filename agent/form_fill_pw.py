@@ -46,7 +46,9 @@ ACTION_TIMEOUT_MS = 2500
 # single field's DOM work and a form of any size stays fully human-paced
 # without ever hitting a bridge-call timeout. This is the per-field bridge
 # timeout: one field is at most a few 2.5s actions plus some evaluate calls.
-_FIELD_BRIDGE_TIMEOUT = 30.0
+_FIELD_BRIDGE_TIMEOUT = 60.0   # real xdotool input (wheel scroll + arc + typing
+#   a long answer char-by-char) runs inside the per-field bridge call, so give
+#   it headroom; a radio/checkbox is still ~1-2s.
 
 # Playwright errors that mean "the action took effect and the page then
 # navigated / re-rendered", which tears down the JS execution context. For a
@@ -268,7 +270,8 @@ _GET_HANDLE_JS = f"(t) => (window['{_FF_KEY}']||new Map()).get(t)"
 
 _AIM_JS = "(t) => {" + _FIND + r"""
   if (!e) return null;
-  e.scrollIntoView({block: 'center', inline: 'center'});
+  // NO scrollIntoView: the real cursor scrolls the control into view with
+  // wheel events (_scroll_into_view_real), the way the vision path does.
   let target = e, r = e.getBoundingClientRect();
   const tiny = r.width < 4 || r.height < 4 || getComputedStyle(e).opacity === '0';
   if (e.tagName === 'INPUT' && tiny) {
@@ -282,10 +285,14 @@ _AIM_JS = "(t) => {" + _FIND + r"""
   // its centre: labels can contain a nested text box ("Other: specify").
   const x = target === e ? r.left + r.width / 2 : r.left + Math.min(12, r.width / 2);
   const y = r.top + r.height / 2;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  // ok = on screen AND hittable at (x,y). elementFromPoint returns null for a
+  // point outside the viewport, so a field below/above the fold reports ok
+  // false and the caller wheels toward it (cy gives the direction).
   const hit = document.elementFromPoint(x, y);
   const related = hit && (hit === e || hit === target || target.contains(hit) || e.contains(hit));
   const stray = hit && hit !== e && (hit.tagName === 'INPUT' || hit.tagName === 'TEXTAREA' || hit.tagName === 'SELECT');
-  return { x, y, ok: !!related && !stray };
+  return { x, y, cy: y, vh, ok: !!related && !stray };
 }"""
 
 _IS_ON_JS = "(t) => {" + _FIND + r"""
@@ -310,6 +317,10 @@ _FOCUS_SELECT_JS = "(t) => {" + _FIND + r"""
 
 _VALUE_JS = "(t) => {" + _FIND + " return e ? e.value : null; }"
 
+_SELECT_OPTIONS_JS = "(t) => {" + _FIND + " return (e && e.options) ? [...e.options].map(o => o.text) : null; }"
+
+_SELECTED_LABEL_JS = "(t) => {" + _FIND + " return (e && e.selectedOptions && e.selectedOptions[0]) ? e.selectedOptions[0].text : null; }"
+
 _FRAME_OFFSET_JS = "el => { const r = el.getBoundingClientRect(); return [r.left + el.clientLeft, r.top + el.clientTop]; }"
 
 
@@ -322,155 +333,130 @@ def _frame_offset(frame):
     return dx, dy
 
 
-# -- human-like cursor motion (CDP path, used by batch fill) ----------------
-# The vision path already arcs the OS cursor along a Bezier (agent_core
-# _human_move). Batch-fill clicks went straight to Input.dispatchMouseEvent
-# press/release at the exact point with NO movement, which reCAPTCHA v3 and
-# Qualtrics' behavioural fraud scoring read as a bot -- a real cursor traces a
-# continuous, curved, variable-speed path between targets. So we stream
-# mouseMoved events along a Bezier arc before every press, mirroring the vision
-# path. The CDP cursor position persists across clicks (the bridge is
-# single-threaded) so each click starts from where the last one landed.
-_CDP_CURSOR = [None, None]
+# -- real OS input (xdotool), injected by agent_core ------------------------
+# Batch-fill must drive the SAME real cursor the vision path uses -- xdotool:
+# mouse-wheel scroll, Bézier cursor move, click, real keystrokes -- never CDP
+# Input.dispatch* events or DOM writes. Behavioural fraud scoring (Qualtrics
+# RelevantID, reCAPTCHA) flags a form filled with no wheel events and synthetic
+# input, and that happened ONLY on batch-filled pages, never on the vision
+# path. So there is NO CDP and NO DOM fallback here: a field the real path
+# can't set is reported unapplied and left for the vision path (also real
+# xdotool), so nothing batch-fill does is ever flaggable.
+_REAL = None
 
 
-def _cdp_bezier(x0, y0, x1, y1):
-    dist = math.hypot(x1 - x0, y1 - y0)
-    n = max(8, min(45, int(dist / 15) + random.randint(3, 10)))
-    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-    if dist > 1:
-        nx, ny = -(y1 - y0) / dist, (x1 - x0) / dist
-    else:
-        nx, ny = 0.0, 1.0
-    bulge = random.gauss(0, dist * 0.15)      # arc perpendicular to the line
-    cx, cy = mx + nx * bulge, my + ny * bulge
-    pts = []
-    for i in range(1, n + 1):
-        t = i / n
-        bx = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t ** 2 * x1
-        by = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t ** 2 * y1
-        pts.append((bx, by))
-    return pts
+def set_real_input(backend):
+    """agent_core injects {move, click, wheel, type, key} (all xdotool)."""
+    global _REAL
+    _REAL = backend
 
 
-def _human_mouse_move(session, x1, y1):
-    x0, y0 = _CDP_CURSOR
-    if x0 is None:          # first move of the session: approach from nearby
-        x0 = x1 + random.uniform(-180, 180)
-        y0 = y1 + random.uniform(-140, 140)
-    path = _cdp_bezier(x0, y0, x1, y1)
-    last = max(1, len(path) - 1)
-    for i, (px, py) in enumerate(path):
-        try:
-            session.send("Input.dispatchMouseEvent",
-                         {"type": "mouseMoved", "x": px, "y": py})
-        except Exception:
-            break
-        t = i / last
-        ease = 1.0 + 2.0 * (1 - 4 * (t - 0.5) ** 2)   # slow at ends, fast mid
-        time.sleep(random.uniform(0.003, 0.012) * ease)
-    _CDP_CURSOR[0], _CDP_CURSOR[1] = x1, y1
-
-
-# -- human-like typing (real keyDown/keyUp, not bulk insertText) ------------
-# insertText drops the whole string in at once with no keyboard events;
-# keystroke-dynamics checks (and reCAPTCHA) flag the absence of keyDown/keyUp
-# and inter-key timing. Type character by character with variable gaps
-# instead -- longer after spaces/punctuation, plus the odd 'thinking' pause.
-# Capped so a very long answer can't block the bridge: past the budget the
-# remainder is inserted fast.
-_TYPE_BUDGET_S = 12.0
-
-
-def _human_type(session, text: str):
-    spent = 0.0
-    for ch in text:
-        if spent >= _TYPE_BUDGET_S:          # out of budget: dump the rest fast
-            session.send("Input.insertText", {"text": ch})
-            continue
-        try:
-            session.send("Input.dispatchKeyEvent",
-                         {"type": "keyDown", "text": ch, "unmodifiedText": ch, "key": ch})
-            session.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": ch})
-        except Exception:
-            session.send("Input.insertText", {"text": ch})
-        d = random.uniform(0.045, 0.14)
-        if ch in " \n":
-            d += random.uniform(0.04, 0.16)
-        elif ch in ".,!?;:":
-            d += random.uniform(0.08, 0.25)
-        if random.random() < 0.025:          # occasional mid-sentence pause
-            d += random.uniform(0.25, 0.7)
-        time.sleep(d)
-        spent += d
-
-
-def _raw_click(session, frame, tag) -> bool:
+def _scroll_into_view_real(frame, tag):
+    """Bring the control on screen with REAL xdotool wheel events (like the
+    vision path), never scrollIntoView. Returns the aim dict once the point is
+    on screen and hittable, or None. Runs in the bridge thread."""
     aim = frame.evaluate(_AIM_JS, tag)
-    if not aim or not aim["ok"]:
+    for _ in range(10):
+        if not aim:
+            return None
+        if aim["ok"]:
+            return aim
+        vh = aim["vh"] or 900
+        # Wheel toward the control by an amount PROPORTIONAL to how far off it
+        # is (~100px per tick, like the vision path): fixed 2-4 ticks couldn't
+        # reach a field far down a long form within the loop. Target ~40% down
+        # the viewport; stop as soon as it is on screen and hittable (ok).
+        delta = aim["cy"] - vh * 0.4
+        ticks = max(1, min(14, int(round(abs(delta) / 100))))
+        _REAL["wheel"](delta > 0, ticks)             # delta>0: below -> scroll down
+        time.sleep(random.uniform(0.12, 0.3))
+        aim = frame.evaluate(_AIM_JS, tag)
+    return aim if (aim and aim["ok"]) else None
+
+
+def _real_click(frame, tag) -> bool:
+    """Scroll the control into view and click it with the real cursor
+    (xdotool arc + click). False if it couldn't be brought on screen."""
+    aim = _scroll_into_view_real(frame, tag)
+    if not aim:
         return False
     dx, dy = _frame_offset(frame)
-    x, y = aim["x"] + dx, aim["y"] + dy
-    # Small jitter on click coordinates (humans never hit the exact pixel)
-    x += random.uniform(-2, 2)
-    y += random.uniform(-2, 2)
-    _human_mouse_move(session, x, y)   # arc the cursor to the target first
-    session.send("Input.dispatchMouseEvent",
-                 {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
-    # Brief hold between press and release (50-120ms, like a real click)
-    time.sleep(random.uniform(0.05, 0.12))
-    session.send("Input.dispatchMouseEvent",
-                 {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+    # Small jitter -- humans never hit the exact pixel.
+    x = aim["x"] + dx + random.uniform(-2, 2)
+    y = aim["y"] + dy + random.uniform(-2, 2)
+    _REAL["move"](int(round(x)), int(round(y)))
+    _REAL["click"]()
     return True
 
 
-def _set_checked(session, frame, tag, want: bool):
+def _set_checked(frame, tag, want: bool) -> bool:
+    """Set a radio/checkbox/switch to `want` with a real click. True on
+    success. No DOM fallback: a miss is reported so the vision path takes over."""
     if frame.evaluate(_IS_ON_JS, tag) == want:
-        return
-    if _raw_click(session, frame, tag) and frame.evaluate(_IS_ON_JS, tag) == want:
-        STATS["fast"] += 1
-        return
-    STATS["fallback"] += 1
-    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
-    el = handle.as_element()
-    if el:
-        el.click(force=True, timeout=ACTION_TIMEOUT_MS)
+        return True
+    for _ in range(2):
+        if not _real_click(frame, tag):
+            return False
+        time.sleep(random.uniform(0.05, 0.15))
+        if frame.evaluate(_IS_ON_JS, tag) == want:
+            STATS["fast"] += 1
+            return True
+    return False
 
 
-def _select_option_el(session, frame, tag):
+def _select_option_el(frame, tag) -> bool:
+    """Pick an ARIA listbox option with a real click. True on success."""
     if frame.evaluate(_IS_ON_JS, tag):
-        return
-    if _raw_click(session, frame, tag) and frame.evaluate(_IS_ON_JS, tag):
+        return True
+    for _ in range(2):
+        if not _real_click(frame, tag):
+            return False
+        time.sleep(random.uniform(0.05, 0.15))
+        if frame.evaluate(_IS_ON_JS, tag):
+            STATS["fast"] += 1
+            return True
+    return False
+
+
+def _set_select_native(frame, fid, match) -> bool:
+    """Native <select>: focus/open it with a real click, then navigate with the
+    real keyboard (Home + Down x index) and confirm with Return. No DOM write."""
+    options = frame.evaluate(_SELECT_OPTIONS_JS, fid) or []
+    try:
+        idx = [_norm_opt(o) for o in options].index(_norm_opt(match))
+    except ValueError:
+        return False
+    if not _real_click(frame, fid):
+        return False
+    time.sleep(random.uniform(0.1, 0.25))
+    _REAL["key"]("Home")
+    time.sleep(random.uniform(0.05, 0.12))
+    if idx > 0:
+        _REAL["key"]("Down", idx)
+        time.sleep(random.uniform(0.05, 0.12))
+    _REAL["key"]("Return")
+    time.sleep(random.uniform(0.05, 0.12))
+    sel = frame.evaluate(_SELECTED_LABEL_JS, fid)
+    if sel is not None and _norm_opt(str(sel)) == _norm_opt(match):
         STATS["fast"] += 1
-        return
-    STATS["fallback"] += 1
-    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
-    el = handle.as_element()
-    if el:
-        el.click(timeout=ACTION_TIMEOUT_MS)
+        return True
+    return False
 
 
-def _type_text(session, frame, tag, text: str):
-    """Replace a text box's content by typing it character by character with
-    real keyDown/keyUp events and a human cadence (_human_type). Focus-selects
-    the field first so the first keystroke overwrites any existing value.
-    Verifies and falls back to a direct fill if anything didn't land."""
-    if not frame.evaluate(_FOCUS_SELECT_JS, tag):
-        STATS["fallback"] += 1
-        handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
-        el = handle.as_element()
-        if el:
-            el.fill(text, timeout=ACTION_TIMEOUT_MS)
-        return
-    _human_type(session, text)
+def _type_text(frame, tag, text: str) -> bool:
+    """Focus a text box with a real click, clear it (Ctrl+A), and type with the
+    real keyboard (xdotool, human cadence). True if the value landed. No DOM
+    fill fallback."""
+    if not _real_click(frame, tag):
+        return False
+    _REAL["key"]("ctrl+a")
+    time.sleep(random.uniform(0.03, 0.08))
+    _REAL["type"](text)
+    time.sleep(random.uniform(0.05, 0.12))
     if frame.evaluate(_VALUE_JS, tag) == text:
         STATS["fast"] += 1
-        return
-    STATS["fallback"] += 1
-    handle = frame.evaluate_handle(_GET_HANDLE_JS, tag)
-    el = handle.as_element()
-    if el:
-        el.fill(text, timeout=ACTION_TIMEOUT_MS)
+        return True
+    return False
 
 
 def _read_delay(f: dict, is_first: bool = False) -> float:
@@ -497,9 +483,11 @@ def _read_delay(f: dict, is_first: bool = False) -> float:
     return delay
 
 
-def _apply_field_dom(session, fr, f: dict, fid: str, answer):
-    """Apply ONE field's answer to the DOM. Runs inside a bridge call. Raises
-    on failure (the caller classifies nav errors vs real errors)."""
+def _apply_field_dom(fr, f: dict, fid: str, answer) -> bool:
+    """Apply ONE field's answer with REAL xdotool input. Returns True if it
+    landed, False if the real path couldn't set it (the caller reports it so
+    the vision path takes over). No DOM/CDP writes anywhere. Runs in the bridge
+    thread; may raise a nav error, which the caller classifies."""
     t = f["type"]
     if t in ("radio", "checkbox") or f.get("widget") == "listbox":
         options = f["options"]
@@ -507,49 +495,46 @@ def _apply_field_dom(session, fr, f: dict, fid: str, answer):
         if t == "radio" or f.get("widget") == "listbox":
             match = _match_option(answer, options)
             if match is None:
-                raise ValueError(f"option not found: {answer}")
+                return False
             idx = options.index(match)
-            if f.get("widget") == "listbox":
-                _select_option_el(session, fr, f"{fid}|{idx}")
-            else:
-                _set_checked(session, fr, f"{fid}|{idx}", True)
-        elif f.get("widget") == "switch":
+            tag = f"{fid}|{idx}"
+            return (_select_option_el(fr, tag) if f.get("widget") == "listbox"
+                    else _set_checked(fr, tag, True))
+        if f.get("widget") == "switch":
             on = answer is True or "true" in {_norm_opt(w) for w in wanted}
-            _set_checked(session, fr, f"{fid}|0", on)
-        else:
-            wanted_norm = {_norm_opt(w) for w in wanted}
-            for i, label in enumerate(options):
-                _set_checked(session, fr, f"{fid}|{i}", _norm_opt(label) in wanted_norm)
-    elif t == "select":
-        handle = fr.evaluate_handle(_GET_HANDLE_JS, fid)
-        el = handle.as_element()
-        labels = answer if isinstance(answer, list) else [answer]
-        el.select_option(label=labels, timeout=ACTION_TIMEOUT_MS)
-    elif t == "range":
-        fr.evaluate("([t, v]) => {" + _FIND + """
-            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e, v);
-            e.dispatchEvent(new Event('input', {bubbles:true}));
-            e.dispatchEvent(new Event('change', {bubbles:true})); }""", [fid, str(answer)])
-    elif t == "date":
-        handle = fr.evaluate_handle(_GET_HANDLE_JS, fid)
-        el = handle.as_element()
-        if el:
-            el.fill(str(answer), timeout=ACTION_TIMEOUT_MS)
-    elif t in ("text", "textarea"):
-        _type_text(session, fr, fid, str(answer))
-    else:
-        raise ValueError(f"unsupported type {t}")
+            return _set_checked(fr, f"{fid}|0", on)
+        wanted_norm = {_norm_opt(w) for w in wanted}
+        ok = True
+        for i, label in enumerate(options):
+            if not _set_checked(fr, f"{fid}|{i}", _norm_opt(label) in wanted_norm):
+                ok = False
+        return ok
+    if t == "select":
+        match = _match_option(answer if not isinstance(answer, list) else answer[0],
+                              f.get("options") or [])
+        return _set_select_native(fr, fid, match) if match is not None else False
+    if t == "date":
+        if not _real_click(fr, fid):
+            return False
+        _REAL["key"]("ctrl+a")
+        _REAL["type"](str(answer))
+        time.sleep(random.uniform(0.05, 0.12))
+        if fr.evaluate(_VALUE_JS, fid) == str(answer):
+            STATS["fast"] += 1
+            return True
+        return False               # native date is finicky: leave it for vision
+    if t in ("text", "textarea"):
+        return _type_text(fr, fid, str(answer))
+    # range (and anything else): too fiddly for reliable real input -- leave it
+    # for the vision path rather than touch the DOM.
+    return False
 
 
 def _apply_field(b, fields_by_id: dict, fid: str, answer):
-    """Bridge worker: set up (cached) CDP session + frames and apply one
-    field. Returns {applied} / {error} / {nav} -- never raises -- so the
-    orchestrator can keep going (or stop on navigation) per field."""
+    """Bridge worker: apply one field with real xdotool input. Returns
+    {applied} / {error} / {nav} -- never raises. An {error} (including a real
+    input that couldn't set the field) leaves it for the vision path."""
     page, frames = _frames(b)
-    # Opening a CDP session costs ~86ms; keep one per page on the bridge.
-    if getattr(b, "_cdp_page", None) is not page:
-        b._cdp_session = page.context.new_cdp_session(page)
-        b._cdp_page = page
     f = fields_by_id.get(fid)
     if f is None:
         return {"error": "unknown field id"}
@@ -558,11 +543,11 @@ def _apply_field(b, fields_by_id: dict, fid: str, answer):
     except (IndexError, KeyError):
         return {"nav": True}       # the frame is gone — the page navigated
     try:
-        _apply_field_dom(b._cdp_session, fr, f, fid, answer)
-        return {"applied": True}
+        if _apply_field_dom(fr, f, fid, answer):
+            return {"applied": True}
+        return {"error": "real input could not set this field"}
     except Exception as e:
         if _is_nav_error(e):
-            b._cdp_page = None     # session is stale after a navigation
             return {"nav": True}
         return {"error": str(e).splitlines()[0][:200]}
 
@@ -912,11 +897,12 @@ def _click_advance(b):
         return {"attempted": False, "reason": "no forward-navigation button matched"}
     before = _snapshot(b)
     page, frames = _frames(b)
-    handle = frames[idx].evaluate_handle(_GET_HANDLE_JS, "__adv")
-    el = handle.as_element()
-    if not el:
-        return {"attempted": False, "reason": "advance button lost from Map"}
-    el.click(timeout=ACTION_TIMEOUT_MS)
+    # Click Next/Submit with the SAME real xdotool cursor the fields use, never a
+    # synthetic el.click(): a page advance done by DOM click is a behavioural
+    # tell on every page of a multi-page survey (no mouse movement, no real
+    # event), exactly what we removed from the field inputs.
+    if not _real_click(frames[idx], "__adv"):
+        return {"attempted": False, "reason": "advance button not reachable with real input"}
     # Poll instead of a fixed settle sleep: a real advance (new URL, new
     # tab, fields gone) is detected within ~100ms; only a click that did
     # NOT advance (e.g. validation error) waits out the full window.

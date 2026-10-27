@@ -833,60 +833,103 @@ def _():
         assert 0.3 <= d <= 15, (f, d)
 
 
-class _FakeCDP:
+class _FakeBackend:
+    """Records the real-input (xdotool) calls batch-fill makes."""
     def __init__(self):
-        self.sent = []
-    def send(self, method, params):
-        self.sent.append((method, params))
+        self.calls = []
+    def as_dict(self):
+        return {
+            "move": lambda x, y: self.calls.append(("move", x, y)),
+            "click": lambda: self.calls.append(("click",)),
+            "wheel": lambda down, ticks: self.calls.append(("wheel", down, ticks)),
+            "type": lambda text: self.calls.append(("type", text)),
+            "key": lambda keys, repeat=1: self.calls.append(("key", keys, repeat)),
+        }
 
 
-@_t("formfill:bezier_path_ends_at_target")
-def _():
+class _FakeFrame:
+    """Stands in for a Playwright frame: returns scripted values for the aim /
+    is-on / value JS probes, and has no parent (so _frame_offset is 0,0)."""
+    def __init__(self, aim_seq, is_on_seq=None, value=None):
+        self.aim_seq = list(aim_seq)
+        self.is_on_seq = list(is_on_seq or [])
+        self.value = value
+        self.parent_frame = None
+    def evaluate(self, js, tag=None):
+        import form_fill_pw as ff
+        if js == ff._AIM_JS:
+            return self.aim_seq.pop(0) if self.aim_seq else None
+        if js == ff._IS_ON_JS:
+            return self.is_on_seq.pop(0) if self.is_on_seq else False
+        if js == ff._VALUE_JS:
+            return self.value
+        return None
+
+
+def _with_real(be, fn):
+    """Run fn() with form_fill_pw's real-input backend stubbed + sleep nulled."""
     import form_fill_pw as ff
-    p = ff._cdp_bezier(100, 100, 500, 400)
-    assert 8 <= len(p) <= 45, len(p)
-    assert (round(p[-1][0]), round(p[-1][1])) == (500, 400)   # lands on target
-
-
-@_t("formfill:human_mouse_move_streams_and_tracks_cursor")
-def _():
-    import form_fill_pw as ff
-    ff.time.sleep = lambda s: None
-    ff._CDP_CURSOR[0] = ff._CDP_CURSOR[1] = None
-    s = _FakeCDP()
-    ff._human_mouse_move(s, 420, 310)
-    moves = [params for m, params in s.sent if m == "Input.dispatchMouseEvent"]
-    assert len(moves) >= 5 and all(p["type"] == "mouseMoved" for p in moves)
-    assert (round(moves[-1]["x"]), round(moves[-1]["y"])) == (420, 310)
-    assert [round(c) for c in ff._CDP_CURSOR] == [420, 310]   # cursor persists
-
-
-@_t("formfill:human_type_emits_keydown_keyup_per_char")
-def _():
-    import form_fill_pw as ff
-    ff.time.sleep = lambda s: None
-    s = _FakeCDP()
-    ff._human_type(s, "Hi!")
-    kinds = [params.get("type") for m, params in s.sent if m == "Input.dispatchKeyEvent"]
-    assert kinds == ["keyDown", "keyUp"] * 3, kinds     # real keystrokes, not insertText
-
-
-@_t("formfill:human_type_respects_budget_on_long_text")
-def _():
-    import form_fill_pw as ff
-    real = ff.time.sleep
-    ff.time.sleep = lambda s: None
+    old_real, old_sleep = ff._REAL, ff.time.sleep
     try:
-        # force the budget to be spent immediately so the rest dumps fast
-        orig = ff._TYPE_BUDGET_S
-        ff._TYPE_BUDGET_S = 0.0
-        s = _FakeCDP()
-        ff._human_type(s, "abcdef")
-        inserts = [1 for m, _ in s.sent if m == "Input.insertText"]
-        assert len(inserts) == 6, s.sent       # all chars dumped via insertText
+        ff._REAL = be.as_dict()
+        ff.time.sleep = lambda s: None
+        return fn()
     finally:
-        ff._TYPE_BUDGET_S = orig
-        ff.time.sleep = real
+        ff._REAL, ff.time.sleep = old_real, old_sleep
+
+
+@_t("formfill:set_checked_real_click_no_wheel_when_in_view")
+def _():
+    import form_fill_pw as ff
+    be = _FakeBackend()
+    def go():
+        fr = _FakeFrame(aim_seq=[{"x": 100, "y": 200, "cy": 200, "vh": 900, "ok": True}],
+                        is_on_seq=[False, True])   # off before, on after the real click
+        return ff._set_checked(fr, "f|0", True)
+    assert _with_real(be, go) is True
+    kinds = [c[0] for c in be.calls]
+    assert "move" in kinds and "click" in kinds, be.calls   # real cursor + click
+    assert "wheel" not in kinds, be.calls                   # already in view
+
+
+@_t("formfill:scroll_into_view_uses_real_wheel")
+def _():
+    import form_fill_pw as ff
+    be = _FakeBackend()
+    def go():
+        fr = _FakeFrame(aim_seq=[{"x": 100, "y": 1200, "cy": 1200, "vh": 900, "ok": False},
+                                 {"x": 100, "y": 400, "cy": 400, "vh": 900, "ok": True}])
+        return ff._scroll_into_view_real(fr, "f|0")
+    aim = _with_real(be, go)
+    assert aim and aim["ok"], aim
+    wheels = [c for c in be.calls if c[0] == "wheel"]
+    assert wheels and wheels[0][1] is True, be.calls        # real wheel, scrolled DOWN
+
+
+@_t("formfill:type_text_real_keyboard")
+def _():
+    import form_fill_pw as ff
+    be = _FakeBackend()
+    def go():
+        fr = _FakeFrame(aim_seq=[{"x": 50, "y": 100, "cy": 100, "vh": 900, "ok": True}],
+                        value="hello")
+        return ff._type_text(fr, "f", "hello")
+    assert _with_real(be, go) is True
+    assert ("key", "ctrl+a", 1) in be.calls, be.calls       # select-all, then real typing
+    assert ("type", "hello") in be.calls, be.calls
+
+
+@_t("formfill:real_input_failure_returns_false_no_dom")
+def _():
+    import form_fill_pw as ff
+    be = _FakeBackend()
+    def go():
+        # never hittable: scroll gives up, _set_checked returns False (left for the
+        # vision path) instead of writing the DOM -- nothing flaggable
+        fr = _FakeFrame(aim_seq=[{"x": 1, "y": 2000, "cy": 2000, "vh": 900, "ok": False}] * 13,
+                        is_on_seq=[False])
+        return ff._set_checked(fr, "f|0", True)
+    assert _with_real(be, go) is False
 
 
 @_t("complete:pushes_back_on_survey_host_thankyou")
