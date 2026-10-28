@@ -1,4 +1,4 @@
-# web-agent
+# web-dolly
 
 Un agente che usa un browser reale al posto tuo, guidato da **Fara 1.5**
 (modello vision-language che guarda gli screenshot e decide dove cliccare/cosa
