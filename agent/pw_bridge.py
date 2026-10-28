@@ -87,7 +87,16 @@ class _Bridge:
 
     def _connect(self):
         self._pw = self._pw if getattr(self, "_pw", None) else sync_playwright().start()
-        self._browser = self._pw.chromium.connect_over_cdp(CDP_URL)
+        # no_defaults keeps Playwright from applying its default overrides to the
+        # existing default context, which is the one we attach to. It is the
+        # public, documented way to avoid two fingerprints: focus emulation
+        # (document.hasFocus() keeps returning true on a background tab, which a
+        # real browser never does) and media emulation (colorScheme,
+        # reducedMotion, forcedColors and contrast forced to Playwright's values
+        # instead of the browser's own). Undoing the focus one over raw CDP
+        # instead needs a session kept attached per page AND a re-send after
+        # every navigation, since Playwright re-applies it for each document.
+        self._browser = self._pw.chromium.connect_over_cdp(CDP_URL, no_defaults=True)
         # Fingerprint stealth: inject on every existing context (for all
         # pages opened later in that context) AND evaluate on every open
         # page right now, since init-scripts don't retro-apply. The script
@@ -106,13 +115,12 @@ class _Bridge:
                 except Exception:
                     pass
             for page in ctx.pages:
-                if id(page) in self._stealth_pages:
-                    continue
-                try:
-                    page.evaluate(_STEALTH_JS)
-                    self._stealth_pages.add(id(page))
-                except Exception:
-                    pass
+                if id(page) not in self._stealth_pages:
+                    try:
+                        page.evaluate(_STEALTH_JS)
+                        self._stealth_pages.add(id(page))
+                    except Exception:
+                        pass
 
     def _run(self):
         self._pw = None

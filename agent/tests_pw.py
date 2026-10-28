@@ -150,5 +150,31 @@ record("detached field is reported, not silently set",
 record("detached field does not scroll the page away",
        y_after == y_before, f"scrollY {y_before} -> {y_after}")
 
+# 12. Playwright enables focus emulation on every page it attaches to, so
+#     document.hasFocus() keeps returning true on a BACKGROUND tab. A real
+#     browser focuses one document at a time, so that is an automation
+#     fingerprint; pw_bridge connects with no_defaults=True to leave the
+#     default context's focus emulation alone. Note this page has navigated
+#     many times by the time we get here, which is the point: turning the
+#     emulation off over raw CDP instead gets wiped by every navigation.
+def _focus_probe(b):
+    a = b.active_page()
+    second = a.context.new_page()
+    try:
+        second.set_content("<body>second</body>")
+        b._sync_tabs()              # keep the bridge's own tab list current
+        second.bring_to_front()
+        second.wait_for_timeout(400)
+        return a.evaluate("() => document.hasFocus()")
+    finally:
+        try:
+            second.close()
+            a.bring_to_front()
+        except Exception:
+            pass
+
+bg_focus = pb.run(_focus_probe)
+record("background tab does not fake focus", bg_focus is False, f"hasFocus={bg_focus}")
+
 print(f"\n{sum(results)}/{len(results)} passed   input paths: {ff.STATS}")
 sys.exit(0 if all(results) else 1)
