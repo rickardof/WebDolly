@@ -1690,6 +1690,23 @@ def terminate_refusal(timer: "StudyTimer") -> str:
     return ""
 
 
+# A forward control whose label matches this SUBMITS/FINISHES the whole survey,
+# as opposed to a "next page"/"continue" that only advances within it. Clicking
+# it redirects to Prolific with the completion code, which returns the study
+# irreversibly -- so while the study timer is still under its minimum this one
+# click must be held, even though intermediate next/continue advances are free.
+# Stems (no trailing boundary) so complet->complete/completa, termin->termina,
+# finaliz->finalize/finalise, conclud->concludi all match. Kept deliberately
+# narrow: "next"/"avanti"/arrows are NOT here, they must keep flowing.
+_SUBMIT_RE = re.compile(
+    r"(?i)\b(submit|invia|finish|complet|finali[sz]|conclud|termin|done|end survey)")
+
+
+def _is_terminal_submit(label: str) -> bool:
+    """True if a forward-button label means 'submit/finish the whole survey'."""
+    return bool(label and _SUBMIT_RE.search(label))
+
+
 def completion_pushback(answer: str, url: str, seen_codes: list,
                         page_codes: list, already_pushed: bool) -> str:
     """One-shot nudge when a free-text `terminate` has not actually reached
@@ -1784,6 +1801,38 @@ def _check_disabled_near(x: float, y: float) -> bool:
         return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
     except Exception:
         return False
+
+
+def _click_hits_submit(x: float, y: float) -> str:
+    """Return the label of the submit/finish control at (x, y), else "".
+
+    Walks up from the clicked point to the nearest button/link/role=button and
+    reports its label only when that label reads as a whole-survey submit (so a
+    'Next'/'Continue' click returns "" and is never held). Top-document only,
+    like _check_disabled_near: an iframe survey's own submit is caught by the
+    batch-fill peek instead, which searches every frame.
+    """
+    _JS = r"""([x, y]) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el) return "";
+        let node = el;
+        for (let i = 0; i < 10 && node && node !== document.body; i++) {
+            const tag = node.tagName;
+            if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'A'
+                || node.getAttribute('role') === 'button') {
+                const t = (node.tagName === 'INPUT' ? node.value : node.textContent) || '';
+                const aria = node.getAttribute('aria-label') || '';
+                return (t.trim() || aria.trim()).replace(/\s+/g, ' ');
+            }
+            node = node.parentElement;
+        }
+        return "";
+    }"""
+    try:
+        label = pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+    except Exception:
+        return ""
+    return label if _is_terminal_submit(label) else ""
 
 
 def dispatch_action(action_type: str, args: dict) -> str:
@@ -1946,7 +1995,8 @@ def dispatch_action(action_type: str, args: dict) -> str:
     raise ValueError(f"Unknown action: {action_type}")
 
 
-def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None):
+def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None,
+                      timer: "StudyTimer | None" = None):
     """Checks the current page for a batch-fillable form and, if found and
     not already attempted, runs form_fill's extract/decide/apply/verify
     cycle. Returns (step_event, next_turn_text, diag): the first two are
@@ -1996,13 +2046,40 @@ def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None)
              and not result.get("undecided"))
     advance = None
     if clean:
-        try:
-            advance = form_fill.click_advance_button()
-        except Exception as e:
-            advance = {"attempted": False, "reason": f"error: {e}"}
+        # Minimum-time guard. Before auto-advancing, peek at the forward
+        # button: if it SUBMITS the whole survey (not just a next page) and
+        # the study timer has not reached its minimum yet, do NOT click it.
+        # This is the deterministic replacement for the status-line hint,
+        # which the autonomous batch-fill path never shows the model -- that
+        # gap is what returned a 10-min study ~30s after it began. Intermediate
+        # next/continue advances are left free so multi-page surveys still flow.
+        held_label = ""
+        if timer is not None and timer.is_active() and timer.remaining() > TERMINATE_GRACE_SECONDS:
+            try:
+                peek = form_fill.find_advance_button()
+            except Exception:
+                peek = None
+            if peek and peek.get("found") and _is_terminal_submit(peek.get("label")):
+                held_label = peek.get("label")
+        if held_label:
+            advance = {"attempted": False, "held_for_timer": True,
+                       "label": held_label, "remaining": int(timer.remaining())}
+        else:
+            try:
+                advance = form_fill.click_advance_button()
+            except Exception as e:
+                advance = {"attempted": False, "reason": f"error: {e}"}
         result["advance"] = advance
 
-    if advance and advance.get("advanced"):
+    if advance and advance.get("held_for_timer"):
+        rem = advance.get("remaining", 0)
+        summary += (f" The page is filled, but the final '{advance['label']}' button was "
+                    f"NOT clicked: the study's minimum time is not reached yet "
+                    f"(~{rem}s remaining).")
+        next_text = (
+            f"{summary} Do NOT submit yet. Use the `wait` action (e.g. wait 30) and keep "
+            "waiting until the Study timer line says 'OK to submit now', then submit.")
+    elif advance and advance.get("advanced"):
         summary += f" Then clicked '{advance['label']}' and the page advanced."
         next_text = (
             f"{summary} Take a screenshot and continue from the new page "
@@ -2421,38 +2498,46 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if cc:
                 capture_page("complete")
                 answer = f"CODE: {cc}"
+                # Backstop: the submit guards above hold the final submit until
+                # the timer clears, so reaching the completion URL early should
+                # be impossible. If it happens anyway (e.g. a survey whose only
+                # end control is an unlabeled arrow that the label classifier
+                # cannot recognise as a submit), the study is already returned
+                # and cannot be undone -- but flag it loudly instead of logging
+                # a silent success, so the slipping survey can be handled.
+                early = (study_timer.is_active()
+                         and study_timer.remaining() > TERMINATE_GRACE_SECONDS)
                 transcript.write(json.dumps({
                     "step": step, "action_type": "terminate", "args": {"answer": answer},
-                    "code_source": "url", "url": here}) + "\n")
+                    "code_source": "url", "url": here,
+                    "early_return": bool(early),
+                    "timer_remaining": round(study_timer.remaining(), 1) if early else None,
+                }) + "\n")
                 transcript.flush()
                 _restore_user_speed()
                 _close_extra_tabs()
-                _notify_telegram(f"Fara studio completato ✅\n{answer} (dall'URL)\n"
-                                 f"Ciclo: {run_dir.name if run_dir else '?'}")
+                if early:
+                    rem = int(study_timer.remaining())
+                    _live({"type": "notice",
+                           "text": f"⚠️ Studio restituito {rem}s SOTTO il tempo minimo "
+                                   f"(min {study_timer.min_seconds:.0f}s) via URL: submit sfuggito alle gate."})
+                    _notify_telegram(f"⚠️ Fara: studio restituito TROPPO PRESTO\n{answer}\n"
+                                     f"{rem}s sotto il minimo ({study_timer.min_seconds:.0f}s)\n{here}")
+                else:
+                    _notify_telegram(f"Fara studio completato ✅\n{answer} (dall'URL)\n"
+                                     f"Ciclo: {run_dir.name if run_dir else '?'}")
                 yield {"type": "notice", "text": f"Codice di completamento letto dall'URL: {cc}",
                        "messages": messages}
                 yield {"type": "done", "answer": answer, "messages": messages}
                 return
 
-            if batch_fill and not _on_guarded_site(here):
-                batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
-                    task, attempted_form_signatures, survey_memory)
-                transcript.write(json.dumps(
-                    {"step": step, "batch_fill_check": batch_diag}) + "\n")
-                transcript.flush()
-                if batch_step_event is not None:
-                    pending_user_response = batch_next_text
-                    batch_step_event["step"] = step
-                    batch_step_event["messages"] = messages
-                    injected = yield batch_step_event
-                    if injected:
-                        pending_user_response = injected
-                        _record_user_correction(injected)
-                    continue
-
             # Stateful transition check: if previous step was on Prolific and now we're
             # external, start the timer regardless of HOW the navigation happened
-            # (left_click, key press, Enter in a modal, JS redirect, etc.)
+            # (left_click, key press, Enter in a modal, JS redirect, etc.).
+            # Done BEFORE the batch-fill block so the timer is already active when
+            # batch-fill decides whether to hold a final submit on the very first
+            # external page (a one-page fill-and-submit survey would otherwise be
+            # submitted before the timer ever started).
             here_guarded = _on_guarded_site(here)
             _timer_started_this_step = False
             if _prev_was_guarded and not here_guarded and not study_timer.is_active():
@@ -2473,6 +2558,22 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # Keep the previous URL available for the just_landed check in the
             # dwell block below. _prev_here must be updated at the END of the
             # step, not here, or the check never sees a different value.
+
+            if batch_fill and not here_guarded:
+                batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
+                    task, attempted_form_signatures, survey_memory, timer=study_timer)
+                transcript.write(json.dumps(
+                    {"step": step, "batch_fill_check": batch_diag}) + "\n")
+                transcript.flush()
+                if batch_step_event is not None:
+                    pending_user_response = batch_next_text
+                    batch_step_event["step"] = step
+                    batch_step_event["messages"] = messages
+                    injected = yield batch_step_event
+                    if injected:
+                        pending_user_response = injected
+                        _record_user_correction(injected)
+                    continue
 
             # Reset timer when back at the studies list (timer re-arms for next study).
             on_list = here_guarded and bool(_LIST_PATH.match(urlparse(here).path or ""))
@@ -2789,20 +2890,54 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _last_action_type_for_signal = ""
             _last_page_fp = curr_page_fp
             _recent_action_sigs.append(_action_signature(action_type, args, here))
-            try:
-                result_desc = dispatch_action(action_type, args)
-            except Exception as e:
-                # One failed browser action (timeout, element gone, tab
-                # closed) must not end a 24/7 run -- it used to: a
-                # history_back timeout raised straight out of the generator
-                # and stopped everything. Tell the model what failed so it
-                # can try something else on the next screenshot.
-                msg = str(e).splitlines()[0][:200]
-                result_desc = f"ACTION FAILED ({action_type}): {msg}"
-                pending_user_response = (
-                    f"Your last action ({action_type}) failed: {msg}. The page may be in a "
-                    "different state than you expect; look at the screenshot and try a "
-                    "different approach.")
+
+            # Minimum-time guard, model-driven path: on an external survey, while
+            # the study timer is still below its minimum, a left_click that lands
+            # on a submit/finish control is held and turned into a wait instead of
+            # being dispatched. Once submitted the survey redirects to Prolific
+            # with the completion code and the study is returned irreversibly, so
+            # the hold has to happen here, before dispatch. Next/Continue clicks
+            # (and every click off a submit control) are not affected. Setting
+            # pending_user_response also suppresses the auto-chain-Enter below,
+            # which would otherwise submit the page the click did not.
+            submit_held = ""
+            if (action_type == "left_click"
+                    and not here_guarded
+                    and study_timer.is_active()
+                    and study_timer.remaining() > TERMINATE_GRACE_SECONDS):
+                coord = args.get("coordinate")
+                if coord:
+                    submit_held = _click_hits_submit(coord[0], coord[1])
+
+            if submit_held:
+                rem = int(study_timer.remaining())
+                result_desc = (f"SUBMIT HELD (study timer): '{submit_held}' not clicked, "
+                               f"~{rem}s below the study minimum")
+                _live({"type": "notice",
+                       "text": f"[timer] submit '{submit_held}' trattenuto: {rem}s sotto il minimo"})
+                try:
+                    cancel.sleep(min(30.0, max(5.0, study_timer.remaining())))
+                except cancel.Cancelled:
+                    raise
+                except Exception:
+                    pass
+                pending_user_response = (study_timer.status_line() or
+                                         "Do NOT submit yet; wait for the study minimum time.")
+            else:
+                try:
+                    result_desc = dispatch_action(action_type, args)
+                except Exception as e:
+                    # One failed browser action (timeout, element gone, tab
+                    # closed) must not end a 24/7 run -- it used to: a
+                    # history_back timeout raised straight out of the generator
+                    # and stopped everything. Tell the model what failed so it
+                    # can try something else on the next screenshot.
+                    msg = str(e).splitlines()[0][:200]
+                    result_desc = f"ACTION FAILED ({action_type}): {msg}"
+                    pending_user_response = (
+                        f"Your last action ({action_type}) failed: {msg}. The page may be in a "
+                        "different state than you expect; look at the screenshot and try a "
+                        "different approach.")
 
             # Resting cursor drift: after a click or mouse_move, ~40% of the
             # time a human's hand settles the cursor a few pixels away from

@@ -1114,6 +1114,130 @@ def _():
     assert agent_core._identity_hint_text(None) == ""
 
 
+# ---------------------------------------------------------------------------
+# Minimum-completion-time guard. A study was being returned ~30s into a 10-min
+# minimum because the autonomous batch-fill path auto-clicked the final Submit
+# with no timer check (the status-line hint it bypasses never reaches the
+# model). These lock in the deterministic guard: classify submit vs next, and
+# hold ONLY a terminal submit while the timer is under its minimum.
+# ---------------------------------------------------------------------------
+
+@_t("submit:labels_classified_terminal")
+def _():
+    for lbl in ["Submit", "SUBMIT", "Invia", "Finish survey", "Complete",
+                "Completa", "Concludi", "Finalize", "Finalise", "Termina",
+                "end survey", "Done", "Submit answers"]:
+        assert agent_core._is_terminal_submit(lbl), f"should be terminal: {lbl!r}"
+
+
+@_t("submit:labels_classified_intermediate")
+def _():
+    for lbl in ["Next", "Next page", "Continue", "Avanti", "Continua",
+                "Proceed", "Procedi", ">>", "→", "»", "Start", "Begin", ""]:
+        assert not agent_core._is_terminal_submit(lbl), f"should NOT be terminal: {lbl!r}"
+
+
+class _FakeTimer:
+    """StudyTimer with a controllable remaining(), for the hold-decision tests."""
+    def __init__(self, remaining, min_seconds=600.0):
+        self._rem = remaining
+        self.min_seconds = min_seconds
+    def is_active(self):
+        return True
+    def remaining(self):
+        return self._rem
+    def status_line(self):
+        return "Study timer: wait."
+
+
+def _patch_batch(advance_label, monkey):
+    """Stub form_fill so _maybe_batch_fill does one clean fill; `monkey`
+    collects originals for restore. click_advance_button records if called."""
+    ff = agent_core.form_fill
+    saved = {}
+    def _save(obj, name, val):
+        saved[(id(obj), name)] = (obj, name, getattr(obj, name))
+        setattr(obj, name, val)
+    clicked = {"advance": False}
+    _save(ff, "extract_fields", lambda: [{"id": "q1", "text": "Q", "type": "radio"}])
+    _save(ff, "batch_fill_verdict", lambda fields: (True, "ok"))
+    _save(ff, "run_batch_fill", lambda **k: {
+        "skipped": False, "field_count": 1, "mismatches": [], "apply_errors": {},
+        "undecided": [], "already_answered_count": 0, "newly_answered_count": 1})
+    _save(ff, "summarize_for_agent", lambda r: "filled 1/1")
+    _save(ff, "find_advance_button", lambda: {"found": True, "label": advance_label})
+    def _click():
+        clicked["advance"] = True
+        return {"attempted": True, "advanced": True, "label": advance_label}
+    _save(ff, "click_advance_button", _click)
+    _save(agent_core, "get_current_url", lambda: "https://survey.example/p1")
+    _save(agent_core, "_live", lambda *a, **k: None)
+    monkey.extend(saved.values())
+    return clicked
+
+
+def _restore(monkey):
+    for obj, name, val in monkey:
+        setattr(obj, name, val)
+
+
+@_t("timer:batch_holds_final_submit_under_min")
+def _():
+    monkey = []
+    clicked = _patch_batch("Submit", monkey)
+    try:
+        timer = _FakeTimer(remaining=571.0)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        assert ev is not None, "should still fill the page"
+        adv = ev["result"].get("advance") or {}
+        assert adv.get("held_for_timer") is True, adv
+        assert clicked["advance"] is False, "must NOT click Submit under minimum"
+        assert "do not submit" in (nxt or "").lower(), nxt
+    finally:
+        _restore(monkey)
+
+
+@_t("timer:batch_advances_next_under_min")
+def _():
+    monkey = []
+    clicked = _patch_batch("Next", monkey)   # intermediate page, not terminal
+    try:
+        timer = _FakeTimer(remaining=571.0)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        adv = ev["result"].get("advance") or {}
+        assert not adv.get("held_for_timer"), "a Next page must never be held"
+        assert clicked["advance"] is True, "should advance intermediate pages freely"
+    finally:
+        _restore(monkey)
+
+
+@_t("timer:batch_submits_once_min_reached")
+def _():
+    monkey = []
+    clicked = _patch_batch("Submit", monkey)
+    try:
+        timer = _FakeTimer(remaining=0.0)   # minimum reached -> submit allowed
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        adv = ev["result"].get("advance") or {}
+        assert not adv.get("held_for_timer"), "must not hold once the minimum is reached"
+        assert clicked["advance"] is True, "should click Submit once time is up"
+    finally:
+        _restore(monkey)
+
+
+@_t("timer:batch_no_timer_behaves_as_before")
+def _():
+    monkey = []
+    clicked = _patch_batch("Submit", monkey)
+    try:
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=None)
+        adv = ev["result"].get("advance") or {}
+        assert not adv.get("held_for_timer"), "no timer -> no hold"
+        assert clicked["advance"] is True
+    finally:
+        _restore(monkey)
+
+
 if __name__ == "__main__":
     passed = sum(1 for _, s, _ in _RESULTS if s == "PASS")
     failed = sum(1 for _, s, _ in _RESULTS if s != "PASS")
