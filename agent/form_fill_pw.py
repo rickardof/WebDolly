@@ -800,6 +800,29 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     res = apply_answers(fields, new_answers)
     apply_errors = res.get("errors", {})
 
+    # Human-readable errors naming the QUESTION and the OPTION that did not get
+    # set, so the vision path knows exactly what to click. Without this the
+    # model only saw "fs:2:radio: real input could not set this field" -- a
+    # positional id it cannot act on -- and, seeing an 'Other' text box that
+    # WAS filled, wrongly concluded the question was answered and looped for
+    # dozens of steps. For a choice field the message spells out that a filled
+    # text box does not register until its option is selected.
+    by_id = {f["id"]: f for f in fields}
+    apply_errors_human = []
+    for fid in apply_errors:
+        f = by_id.get(fid, {})
+        q = (f.get("text") or "").strip().replace("\n", " ")[:90] or fid
+        want = new_answers.get(fid)
+        want = ", ".join(map(str, want)) if isinstance(want, list) else str(want)
+        if f.get("type") in ("radio", "checkbox") or f.get("widget") == "listbox":
+            apply_errors_human.append(
+                f"Could NOT select '{want}' for \"{q}\" -- select that option yourself by "
+                "clicking it. If it is an 'Other'/'please specify' choice, the text box being "
+                "filled does NOT count until you click the option itself.")
+        else:
+            apply_errors_human.append(
+                f"Could NOT fill \"{q}\" with '{want}' -- enter it yourself.")
+
     if memory is not None:
         for f in fields:
             if f["id"] in new_answers and f["id"] not in apply_errors:
@@ -808,7 +831,8 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
         "skipped": False, "field_count": len(fields),
         "already_answered_count": len(preserved), "newly_answered_count": len(new_answers),
         "undecided": undecided, "answers": {**preserved, **new_answers},
-        "apply_errors": apply_errors, "mismatches": [],
+        "apply_errors": apply_errors, "apply_errors_human": apply_errors_human,
+        "mismatches": [],
         "verified_state": {}, "apply_attempts": 1,
         "frames_used": sorted({f["_frame"] for f in fields}),
     }

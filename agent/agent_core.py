@@ -264,9 +264,13 @@ def _human_type(text: str):
     keypress and drops the char ~70% of the time on Xvfb."""
     if not text:
         return
-    if len(text) <= 6:
-        docker_exec("xdotool", "type", "--clearmodifiers", "--", text)
-        return
+    # NB: no fast path for short text. A single `xdotool type` fires its
+    # keystrokes at a uniform cadence with no variance, which is exactly the
+    # "typing speed consistent with software, not a human" signal Prolific's
+    # bot check looks for. Short answers (an age like "34", a ZIP, yes/no, a
+    # single word) are the common case in surveys, so they must be typed with
+    # the same per-key human timing as long ones -- go through the loop below
+    # for ANY length.
     # Single xdotool invocation: chain type + sleep per character.
     args = []
     n = len(text)
@@ -809,12 +813,19 @@ def _trim_to_budget(messages: list, budget: int | None = None,
         messages[i]["content"] = [c for c in messages[i]["content"] if c.get("type") != "image_url"]
         current -= MEASURED_IMAGE_TOKENS
 
-    # Still over budget: the bloat is coming from text, not images (e.g. a
-    # large task prompt re-injected on step 1 of every cycle, repeated
-    # across many quick cycles). Only removing whole old messages can fix
-    # this. Never drop index 0 (system prompt).
-    while current > budget and len(messages) > 2:
-        del messages[1]
+    # Still over budget: the bloat is coming from text, not images. Only
+    # removing whole old messages can fix this. Pin index 0 (system prompt)
+    # AND index 1 (the step-1 user turn: persona/profile + standing rules +
+    # identity hint). Dropping index 1 was evicting the persona on long
+    # studies -- the model then no longer knew demographics that ARE in the
+    # profile (age, nationality, Prolific ID) and invented them, e.g. typing
+    # age 34 when the profile says 25, which contradicts the Prolific
+    # prescreening and gets the submission flagged. Drop from index 2 instead,
+    # so the durable facts survive the whole study. If [system, persona, last
+    # turn] still exceed the budget we send slightly over rather than lose the
+    # persona -- a wrong demographic costs far more than a few tokens.
+    while current > budget and len(messages) > 3:
+        del messages[2]
         current = _real_token_count(messages)
 
     return current
@@ -1995,7 +2006,13 @@ def dispatch_action(action_type: str, args: dict) -> str:
     raise ValueError(f"Unknown action: {action_type}")
 
 
-def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None,
+# How many times batch-fill may attempt the same page/field-set before it
+# cedes to the vision path. >1 so a validation-blocked page gets a second shot
+# at a still-empty required field; small so it never hammers submit in a loop.
+_MAX_BATCH_ATTEMPTS = 2
+
+
+def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None,
                       timer: "StudyTimer | None" = None):
     """Checks the current page for a batch-fillable form and, if found and
     not already attempted, runs form_fill's extract/decide/apply/verify
@@ -2022,9 +2039,17 @@ def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None,
     # the whole survey and reuses positional ids (fs:0:radio) on every
     # page, so ids+URL alone made every later page look "already tried".
     signature = (url, tuple(sorted((f["id"], f.get("text", "")) for f in fields)))
-    if signature in attempted_signatures:
-        return None, None, f"already attempted this page/field-set ({len(fields)} fields)"
-    attempted_signatures.add(signature)
+    # Allow a bounded retry instead of ceding the page forever after one try.
+    # A page that did not advance (a validation error: a required field still
+    # empty or invalid) keeps the same signature, and ceding it immediately to
+    # vision is how an unfilled age/country field got stuck. A second attempt
+    # lets batch-fill re-answer what is still missing; the cap stops it from
+    # re-clicking submit forever on a page it genuinely cannot satisfy.
+    attempts = attempted_signatures.get(signature, 0)
+    if attempts >= _MAX_BATCH_ATTEMPTS:
+        return None, None, (f"already attempted this page/field-set "
+                            f"{attempts}x ({len(fields)} fields)")
+    attempted_signatures[signature] = attempts + 1
 
     _live({"type": "phase", "phase": "form", "fields": len(fields)})
     try:
@@ -2065,6 +2090,16 @@ def _maybe_batch_fill(task: str, attempted_signatures: set, memory: list = None,
             advance = {"attempted": False, "held_for_timer": True,
                        "label": held_label, "remaining": int(timer.remaining())}
         else:
+            # A human glances over the filled page before clicking Next, they
+            # do not submit the instant the last field is set. Without this the
+            # page-to-page submit cadence is machine-fast, which feeds the
+            # "completion speed" side of a bot check. Cheap, bridge-free.
+            try:
+                cancel.sleep(random.uniform(0.8, 2.4))
+            except cancel.Cancelled:
+                raise
+            except Exception:
+                pass
             try:
                 advance = form_fill.click_advance_button()
             except Exception as e:
@@ -2369,7 +2404,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # this cycle's first request, not just after.
             _trim_to_budget(messages)
         pending_user_response = ""
-        attempted_form_signatures = set()
+        attempted_form_signatures = {}   # signature -> attempt count (see _MAX_BATCH_ATTEMPTS)
         survey_memory = []  # (question, answer) given so far in this run
         wander = WanderGuard(wander_seconds)
         study_timer = StudyTimer()

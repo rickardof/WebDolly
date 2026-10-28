@@ -1120,7 +1120,9 @@ def summarize_for_agent(result: dict) -> str:
         msg += f" ({already} were already answered and left untouched.)"
     if undecided:
         msg += f" Could not decide answers for {undecided} -- fill those yourself."
-    if result["apply_errors"]:
+    if result.get("apply_errors_human"):
+        msg += " " + " ".join(result["apply_errors_human"])
+    elif result["apply_errors"]:
         msg += f" Errors: {result['apply_errors']}."
     if result["mismatches"]:
         msg += f" Mismatches: {result['mismatches']}."

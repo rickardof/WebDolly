@@ -1187,7 +1187,7 @@ def _():
     clicked = _patch_batch("Submit", monkey)
     try:
         timer = _FakeTimer(remaining=571.0)
-        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", {}, None, timer=timer)
         assert ev is not None, "should still fill the page"
         adv = ev["result"].get("advance") or {}
         assert adv.get("held_for_timer") is True, adv
@@ -1203,7 +1203,7 @@ def _():
     clicked = _patch_batch("Next", monkey)   # intermediate page, not terminal
     try:
         timer = _FakeTimer(remaining=571.0)
-        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", {}, None, timer=timer)
         adv = ev["result"].get("advance") or {}
         assert not adv.get("held_for_timer"), "a Next page must never be held"
         assert clicked["advance"] is True, "should advance intermediate pages freely"
@@ -1217,7 +1217,7 @@ def _():
     clicked = _patch_batch("Submit", monkey)
     try:
         timer = _FakeTimer(remaining=0.0)   # minimum reached -> submit allowed
-        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=timer)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", {}, None, timer=timer)
         adv = ev["result"].get("advance") or {}
         assert not adv.get("held_for_timer"), "must not hold once the minimum is reached"
         assert clicked["advance"] is True, "should click Submit once time is up"
@@ -1230,12 +1230,73 @@ def _():
     monkey = []
     clicked = _patch_batch("Submit", monkey)
     try:
-        ev, nxt, diag = agent_core._maybe_batch_fill("persona", set(), None, timer=None)
+        ev, nxt, diag = agent_core._maybe_batch_fill("persona", {}, None, timer=None)
         adv = ev["result"].get("advance") or {}
         assert not adv.get("held_for_timer"), "no timer -> no hold"
         assert clicked["advance"] is True
     finally:
         _restore(monkey)
+
+
+# A validation-blocked page keeps the same signature; batch-fill must get a
+# bounded retry (so a still-empty required field gets a second shot) and then
+# cede, never hammer submit forever.
+@_t("batch:retry_bounded_then_cedes")
+def _():
+    monkey = []
+    _patch_batch("Next", monkey)
+    try:
+        sigs = {}
+        r1 = agent_core._maybe_batch_fill("persona", sigs, None)
+        r2 = agent_core._maybe_batch_fill("persona", sigs, None)
+        r3 = agent_core._maybe_batch_fill("persona", sigs, None)
+        assert r1[0] is not None, "1st attempt should fill"
+        assert r2[0] is not None, "2nd attempt (retry) should fill"
+        assert r3[0] is None and "already attempted" in (r3[2] or ""), \
+            f"3rd attempt must cede, got {r3[2]!r}"
+    finally:
+        _restore(monkey)
+
+
+# Short answers (age, ZIP, yes/no) must be typed with per-key human timing,
+# not a single uniform xdotool burst -- the latter is the "typing speed looks
+# like software" signal. Assert the generated xdotool chain for a 2-char value
+# interleaves sleeps rather than one bare `type <text>`.
+@_t("typing:short_text_has_human_cadence")
+def _():
+    calls = []
+    orig = agent_core.docker_exec
+    agent_core.docker_exec = lambda *a, **k: calls.append(a)
+    try:
+        agent_core._human_type("34")
+    finally:
+        agent_core.docker_exec = orig
+    assert calls, "should have invoked xdotool"
+    args = calls[-1]
+    # Not the old fast path: old path was exactly ("xdotool","type","--clearmodifiers","--","34")
+    assert not (len(args) == 5 and args[3] == "--" and args[4] == "34"), \
+        f"short text still uses the uniform fast path: {args}"
+    assert "sleep" in args, f"no per-key sleep in the chain: {args}"
+
+
+# When a choice option could not be clicked, the model must be told, in plain
+# language, WHICH option on WHICH question is unselected and that a filled text
+# box does not count -- not a cryptic "fs:2:radio: real input could not set
+# this field", which let it loop for dozens of steps believing the 'Other'
+# text it saw meant the question was answered.
+@_t("batch:apply_error_is_actionable")
+def _():
+    r = {"skipped": False, "field_count": 2, "undecided": [], "mismatches": [],
+         "apply_errors": {"fs:1:radio": "real input could not set this field"},
+         "apply_errors_human": ["Could NOT select 'Other' for \"How did you hear?\" -- "
+                                "select that option yourself by clicking it. If it is an "
+                                "'Other'/'please specify' choice, the text box being filled "
+                                "does NOT count until you click the option itself."],
+         "already_answered_count": 1}
+    out = agent_core.form_fill.summarize_for_agent(r)
+    assert "select that option yourself" in out, out
+    assert "does NOT count" in out, out
+    assert "fs:1:radio" not in out, f"cryptic field id leaked to the model: {out}"
 
 
 if __name__ == "__main__":
