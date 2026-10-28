@@ -130,5 +130,25 @@ if MODEL:
     record("Qualtrics: scale answered toward 'Much higher'", rec.get("QR~QID3") in ("4", "5", "6"), f"scale={rec.get('QR~QID3')}")
     record("Qualtrics: age is a plausible invented number", age.isdigit() and 18 <= int(age) <= 80, f"age={age!r}")
 
+# 11. a field whose element was detached by a re-render must be reported AND must
+#     not move the page. A detached node stays truthy with an all-zero rect, so
+#     the aim landed at (0,0) and the real-input scroll loop wheeled the page to
+#     the top before giving up, wrecking the scroll position for later fields.
+pb.goto("file:///data/test_form_complex.html"); time.sleep(0.7)
+f = ff.extract_fields()
+rad = next(x for x in f if x["type"] == "radio" and x.get("options"))
+tag = f"{rad['id']}|0"
+detached = pb.evaluate("(() => {const m = window[%s]; const e = m && m.get(%s);"
+                       " if (e) e.remove(); return !!e;})()"
+                       % (json.dumps(ff._FF_KEY), json.dumps(tag)))
+pb.evaluate("(() => {window.scrollTo(0, 300);})()")
+y_before = pb.evaluate("window.scrollY")
+res = ff.apply_answers(f, {rad["id"]: rad["options"][0]})
+y_after = pb.evaluate("window.scrollY")
+record("detached field is reported, not silently set",
+       bool(detached) and rad["id"] in res["errors"], f"errors={list(res['errors'])[:2]}")
+record("detached field does not scroll the page away",
+       y_after == y_before, f"scrollY {y_before} -> {y_after}")
+
 print(f"\n{sum(results)}/{len(results)} passed   input paths: {ff.STATS}")
 sys.exit(0 if all(results) else 1)

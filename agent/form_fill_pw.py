@@ -263,7 +263,16 @@ def batch_fill_verdict(fields: list, has_password: bool = None) -> tuple:
 # -- apply (real input, trusted events) -------------------------------------
 
 # Element lookup from the JS-side Map (no DOM attribute query).
-_FIND = f"const e=(window['{_FF_KEY}']||new Map()).get(t);"
+# A node left in the Map by an earlier extraction can be DETACHED after the page
+# re-renders. It stays truthy, and getBoundingClientRect() on a detached node
+# returns all zeros (standard CSSOM, verified against Chromium), so the aim
+# landed at (0,0): _scroll_into_view_real then read cy=0, computed a negative
+# delta and wheeled the page UP ~40 ticks to the top before giving up, wrecking
+# the scroll position for the remaining fields. isConnected is the DOM's own
+# answer, so treat a detached node as missing: every JS below then reports "not
+# found" and the caller hands that one field to the vision path, untouched.
+_FIND = (f"let e=(window['{_FF_KEY}']||new Map()).get(t);"
+         " if (e && !e.isConnected) e = null;")
 
 # Get an element handle from the Map for Playwright fallback operations.
 _GET_HANDLE_JS = f"(t) => (window['{_FF_KEY}']||new Map()).get(t)"
