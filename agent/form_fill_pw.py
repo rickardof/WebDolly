@@ -455,16 +455,25 @@ def _set_select_native(frame, fid, match) -> bool:
 def _type_text(frame, tag, text: str) -> bool:
     """Focus a text box with a real click, clear it (Ctrl+A), and type with the
     real keyboard (xdotool, human cadence). True if the value landed. No DOM
-    fill fallback."""
+    fill fallback.
+
+    One retry on mismatch: xdotool occasionally drops accented chars under
+    slow / newly-started Xvfb (seen in CI, where the first flake was always
+    on an Italian textarea with è/ì/ù/perché). The retry waits a touch
+    longer, clears again, and re-types once; still a real-input path, no DOM
+    writes."""
     if not _real_click(frame, tag):
         return False
-    _REAL["key"]("ctrl+a")
-    time.sleep(random.uniform(0.03, 0.08))
-    _REAL["type"](text)
-    time.sleep(random.uniform(0.05, 0.12))
-    if frame.evaluate(_VALUE_JS, tag) == text:
-        STATS["fast"] += 1
-        return True
+    for attempt in range(2):
+        _REAL["key"]("ctrl+a")
+        time.sleep(random.uniform(0.03, 0.08) if attempt == 0
+                   else random.uniform(0.10, 0.18))
+        _REAL["type"](text)
+        time.sleep(random.uniform(0.05, 0.12) if attempt == 0
+                   else random.uniform(0.20, 0.30))
+        if frame.evaluate(_VALUE_JS, tag) == text:
+            STATS["fast"] += 1
+            return True
     return False
 
 

@@ -51,6 +51,13 @@ import pw_bridge
 FARA_URL   = os.environ.get("FARA_URL",   "http://127.0.0.1:8090/v1/chat/completions")
 FARA_MODEL = os.environ.get("FARA_MODEL", "Fara1.5-27B-Q4_K_M.gguf")
 FARA_API_KEY = os.environ.get("FARA_API_KEY", "")
+# Deterministic stub model, used only by gui_live_e2e so the end-of-run GUI
+# state (feed row, live card cleared, "DONE-STUB" answer) can be asserted
+# without depending on the real Fara model's non-deterministic output.
+# Enabled only in test instances (FARA_TEST_INSTANCE=1) AND only when the
+# task text starts with the "scripted" prefix the e2e uses.
+FARA_TEST_INSTANCE = os.environ.get("FARA_TEST_INSTANCE", "") not in ("", "0")
+_SCRIPTED_TASK_PREFIX = "do the scripted steps"
 
 def _notify_telegram(msg: str) -> None:
     """Fire-and-forget Telegram notification. Fails silently."""
@@ -495,7 +502,67 @@ def model_speed() -> dict:
             "last": last_timing, "slow_threshold": SLOW_TPS}
 
 
+def _scripted_stub_response(messages: list, step: int | None) -> str:
+    """Deterministic response for the e2e scripted session.
+
+    Emits token deltas through `_live` so the live card streams gradually
+    (gui_live_e2e C2 wants >=6 distinct lengths during 'think'), then
+    returns a tool_call. Step 1-3 click/scroll, step 4 terminates with
+    answer DONE-STUB. The click coordinate is picked inside the fixture
+    page's viewport so C3 (marker alignment) can match it."""
+    # Count how many prior model turns we have had -- the test re-uses one
+    # process for several scripted runs, so a module-level counter would
+    # drift between runs; derive it from the message history instead.
+    turns = sum(1 for m in messages if m.get("role") == "assistant")
+    thinking = (
+        "Looking at the current page, I can see the test fixture with three "
+        "coloured buttons. I will interact with it step by step: first click, "
+        "then scroll to inspect the rest, then finish once the scripted sequence "
+        "is complete.")
+    # Stream the thinking in small chunks so the live card shows gradual growth
+    # (and the agent's ambient "think" phase is observed by the test).
+    acc = ""
+    for chunk in re.findall(r".{1,24}(?:\s+|$)", thinking):
+        acc += chunk
+        try:
+            _live({"type": "token", "step": step, "text": chunk})
+        except Exception:
+            pass
+        time.sleep(0.03)
+    head = f"<think>\n{thinking}\n</think>\n\n"
+    if turns == 0:
+        tool = ('{"name":"computer_use","arguments":'
+                '{"action":"left_click","coordinate":[520,300]}}')
+    elif turns == 1:
+        tool = ('{"name":"computer_use","arguments":'
+                '{"action":"scroll","pixels":-200}}')
+    elif turns == 2:
+        tool = ('{"name":"computer_use","arguments":'
+                '{"action":"left_click","coordinate":[520,420]}}')
+    else:
+        tool = ('{"name":"computer_use","arguments":'
+                '{"action":"terminate","answer":"DONE-STUB"}}')
+    return head + f"<tool_call>\n{tool}\n</tool_call>"
+
+
+def _is_scripted_test_session(messages: list) -> bool:
+    """True if the current task is the e2e scripted-steps session."""
+    if not FARA_TEST_INSTANCE:
+        return False
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        c = m.get("content") or ""
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if _SCRIPTED_TASK_PREFIX in str(c).lower():
+            return True
+    return False
+
+
 def call_fara(messages: list, step: int = None) -> str:
+    if _is_scripted_test_session(messages):
+        return _scripted_stub_response(messages, step)
     payload = {
         "model": FARA_MODEL,
         "messages": messages,
