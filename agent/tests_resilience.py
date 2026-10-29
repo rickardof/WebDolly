@@ -128,6 +128,44 @@ def offline():
         t.reset()
         record("reset disarms the timer", not t.is_active() and ac.terminate_refusal(t) == "")
 
+        # --- NOCODE guard: refuse a premature terminate on Prolific ----
+        prol = "https://app.prolific.com/studies/abc123"
+        host = "https://survey.example.com/page"
+        # Non-NOCODE answers never trigger the guard.
+        record("CODE answer never blocked",
+               ac.guarded_nocode_refusal("CODE:XYZ", prol, False, False, 0) == "")
+        # NOCODE off Prolific never blocked (model is still on the survey host).
+        record("NOCODE off Prolific never blocked",
+               ac.guarded_nocode_refusal("NOCODE", host, False, False, 0) == "")
+        # The bug reproduction: on Prolific, never saw external, no cancel confirm.
+        refusal = ac.guarded_nocode_refusal("NOCODE", prol, False, False, 0)
+        record("NOCODE on Prolific without external/cancel is refused",
+               "NOCODE REFUSED" in refusal and "Cancel participation" in refusal)
+        # Legit case A: external survey was visited (completed, no code shown).
+        record("NOCODE after external survey visited passes",
+               ac.guarded_nocode_refusal("NOCODE", prol, True, False, 0) == "")
+        # Legit case B: Prolific-side cancel confirmation seen.
+        record("NOCODE after cancel confirmation passes",
+               ac.guarded_nocode_refusal("NOCODE", prol, False, True, 0) == "")
+        # Safety valve: 3rd attempt always passes so a stale label can't wedge the loop.
+        record("safety valve lets 3rd NOCODE attempt through",
+               ac.guarded_nocode_refusal("NOCODE", prol, False, False, 2) == "")
+        record("2nd NOCODE attempt still refused",
+               "NOCODE REFUSED" in ac.guarded_nocode_refusal("NOCODE", prol, False, False, 1))
+        # Confirmation detector: multilingual phrases.
+        for text, want in [
+            ("You have cancelled your participation in this study.", True),
+            ("La tua partecipazione è stata annullata.", True),
+            ("Your submission has been received", True),
+            ("Thanks for taking part!", True),
+            ("Study submitted without a completion code", True),
+            ("I'm finished", False),
+            ("Take part in this study", False),
+            ("", False),
+        ]:
+            got = ac.saw_prolific_submission_confirmation(text)
+            record(f"submission confirmation: {text[:34]!r}", got == want, f"got={got!r}")
+
         # --- dead-end / audio-video detection ----------------------------
         for text, expect in [
             ("Sorry, you are not eligible to take part in this study.", "non idoneo"),

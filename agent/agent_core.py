@@ -1701,6 +1701,65 @@ def terminate_refusal(timer: "StudyTimer") -> str:
     return ""
 
 
+# Phrases shown by Prolific after a cancel-participation confirmation or after
+# clicking "I didn't receive a completion code". Multilingual, matched loosely
+# so a small layout change doesn't break detection.
+_PROLIFIC_SUBMITTED_RE = re.compile(
+    r"(?i)(you have cancelled your participation|participation (?:has been )?cancelled|"
+    r"partecipazione (?:è stata )?annullata|hai annullato la partecipazione|"
+    r"your (?:submission|response) (?:has been |was )?(?:received|recorded|submitted)|"
+    r"risposta (?:è stata )?(?:ricevuta|registrata)|"
+    r"thanks for taking part|grazie per (?:aver|la) partecipa|"
+    r"study submitted without a completion code|senza codice di completamento)")
+
+
+def saw_prolific_submission_confirmation(text: str) -> bool:
+    """True if the Prolific page shows a post-submit/post-cancel confirmation.
+
+    Used by the NOCODE guard: a legit NOCODE either comes AFTER having visited
+    the external survey, or AFTER the Prolific-side 'I didn't receive a code' /
+    'Cancel participation' flow landed on a confirmation screen. The guard
+    refuses NOCODE only when BOTH signals are absent -- i.e. the model is
+    still on the study-detail page, having done neither.
+    """
+    return bool(text) and bool(_PROLIFIC_SUBMITTED_RE.search(text))
+
+
+def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
+                           saw_cancel_confirm: bool, attempts: int) -> str:
+    """Refuse a NOCODE emitted on Prolific without having done the study.
+
+    Narrow conjunctive guard that reproduces exactly the bug in
+    run_20261029_184717: the agent is still on a Prolific study-detail page,
+    the external survey was never opened, and no Prolific-side submission /
+    cancel confirmation ever appeared -- yet the model calls terminate NOCODE.
+    That marks the study DONE on our side while Prolific still has it in
+    'awaiting submission', and the next cycle's _wait_for_studies sits forever
+    on an empty list.
+
+    Returns the refusal string, or "" to let the terminate through. A safety
+    valve lets the 3rd attempt pass regardless so a stale Prolific label can
+    never genuinely wedge the loop.
+    """
+    if answer != "NOCODE":
+        return ""
+    if not _on_guarded_site(url):
+        return ""
+    if saw_external or saw_cancel_confirm:
+        return ""
+    if attempts >= 2:
+        return ""                      # safety valve: 3rd try passes
+    return ("NOCODE REFUSED: you are still on the Prolific study detail page, "
+            "you never opened the external survey, and no 'cancelled' or "
+            "'submitted' confirmation has appeared. Clicking 'I'm finished' on "
+            "the detail page does NOT submit the study. To close it properly: "
+            "click the red 'Cancel participation' button, confirm in the modal, "
+            "and only after the confirmation page appears call terminate NOCODE. "
+            "If instead you did complete the survey and no code was shown, "
+            "switch to the Prolific tab, click 'I'm finished', then "
+            "'I didn't receive a completion code', confirm, and terminate.")
+
+
 # A forward control whose label matches this SUBMITS/FINISHES the whole survey,
 # as opposed to a "next page"/"continue" that only advances within it. Clicking
 # it redirects to Prolific with the completion code, which returns the study
@@ -2419,6 +2478,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # Completion guard: nudge a free-text "I'm done" that never got back to
         # Prolific / a code, at most once per study so a re-terminate is obeyed.
         _completion_pushed_back: bool = False
+        # NOCODE guard: refuse a terminate NOCODE emitted while still on the
+        # Prolific detail page without having visited the external survey or
+        # seen a Prolific-side cancel/submit confirmation. See
+        # guarded_nocode_refusal for the full rationale.
+        _saw_external_this_study: bool = False
+        _saw_cancel_confirm: bool = False
+        _nocode_guard_attempts: int = 0
         # Content-change signal: see _page_fingerprint / _page_change_hint.
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
@@ -2575,6 +2641,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # submitted before the timer ever started).
             here_guarded = _on_guarded_site(here)
             _timer_started_this_step = False
+            if _prev_was_guarded and not here_guarded:
+                _saw_external_this_study = True
             if _prev_was_guarded and not here_guarded and not study_timer.is_active():
                 effective_duration = _last_guarded_duration
                 if effective_duration is not None:
@@ -2621,6 +2689,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _current_study_title = ""
                 _seen_codes = []
                 _completion_pushed_back = False
+                _saw_external_this_study = False
+                _saw_cancel_confirm = False
+                _nocode_guard_attempts = 0
 
             # --- studies that lead nowhere (and, opt-in, audio/video ones) ---
             # A study that is listed but not doable gets opened again on every
@@ -2698,6 +2769,18 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 for c in codes_in_url(here) + codes_on_page(_end_page_text()):
                     if c not in _seen_codes:
                         _seen_codes.append(c)
+
+            # Flag Prolific-side submit/cancel confirmations so the NOCODE
+            # guard knows this terminate came after a legitimate close
+            # ("I didn't receive a code" confirmation OR Cancel participation
+            # confirmation), not from clicking "I'm finished" on the detail
+            # page without ever submitting.
+            if here_guarded and not _saw_cancel_confirm:
+                try:
+                    if saw_prolific_submission_confirmation(_end_page_text()):
+                        _saw_cancel_confirm = True
+                except Exception:
+                    pass
 
             skip_hint = study_cache.prompt_line() if on_list else ""
             nav_hint = ""
@@ -3061,6 +3144,19 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pending_user_response = refusal
                     continue
                 answer = args.get("answer", "")
+                # NOCODE emitted while still on Prolific without ever visiting
+                # the external survey or seeing a cancel/submit confirmation
+                # means the study is still "assigned" on Prolific. Letting
+                # that NOCODE through wedges the next cycle in
+                # _wait_for_studies (empty list, slot still held). Narrow
+                # conjunctive guard; see guarded_nocode_refusal.
+                nocode_block = guarded_nocode_refusal(
+                    answer, here, _saw_external_this_study,
+                    _saw_cancel_confirm, _nocode_guard_attempts)
+                if nocode_block:
+                    _nocode_guard_attempts += 1
+                    pending_user_response = nocode_block
+                    continue
                 # A free-text "I completed the study" that never got back to
                 # Prolific and shows no code is almost always a stop on the
                 # survey host's own thank-you/validation page, with the final
