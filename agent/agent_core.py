@@ -842,6 +842,70 @@ def _degrade_history_images(messages: list):
                 pass
 
 
+_COMPACT_RECAP_MARKER = "[CONTEXT COMPACTED]"
+
+
+def _collect_recent_actions(messages: list) -> list[str]:
+    """Pull short action signatures from assistant tool_calls across the
+    current history, oldest first. Returns a trimmed list suitable for a
+    recap line -- just the action types, no coordinates. Used by the hard
+    compact so the model knows WHAT was done, even once the full turns are
+    collapsed."""
+    out: list[str] = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        c = m.get("content") or ""
+        if not isinstance(c, str):
+            continue
+        # Tool call JSON lives inside <tool_call>...</tool_call>. Extract the
+        # action name only; coordinates/text are irrelevant for the recap.
+        mo = re.search(r'"action"\s*:\s*"([^"\\]+)"', c)
+        if mo:
+            out.append(mo.group(1))
+    return out
+
+
+def _hard_compact_context(messages: list, keep_recent: int = 2) -> int:
+    """Collapse mid-history turns into ONE short recap, preserving the
+    cache-stable prefix [system, persona] and the last `keep_recent` turns
+    byte-identical.
+
+    Why: `_trim_to_budget` used to `del messages[2]` iteratively, shifting
+    every later token and invalidating llama-server's prompt cache mid-step.
+    Measured in run_20261030_012624: cache_n crashed from 21212 to 1717
+    every ~6 steps, prompt_n jumped to 14-17K, gen_tps collapsed from 33
+    to 10. This replaces the iterative delete with a single, intentional
+    collapse: the cache invalidates ONCE, the new short prefix stays stable,
+    the next 10+ steps cache cheaply.
+
+    Returns the token count after compacting (same contract as
+    `_trim_to_budget`). A no-op if there's nothing worth collapsing
+    (len(messages) <= 2 + keep_recent + 1)."""
+    # Nothing to compact: just [sys, persona] + a few recent turns.
+    min_before_recent = 3  # need at least sys + persona + 1 turn to collapse
+    if len(messages) <= min_before_recent + keep_recent:
+        return _real_token_count(messages)
+    # Message to collapse: indices 2 .. len-keep_recent-1 inclusive.
+    cut_start = 2
+    cut_end = len(messages) - keep_recent     # exclusive
+    if cut_end <= cut_start:
+        return _real_token_count(messages)
+    # Mine recent action signatures from the slice we're about to drop so
+    # the model keeps a crude sense of what has already been tried.
+    collapsed_slice = messages[cut_start:cut_end]
+    actions = _collect_recent_actions(collapsed_slice)
+    # Keep the recap tiny: at most the last 12 actions, joined, no coords.
+    tail = actions[-12:] if len(actions) > 12 else actions
+    recap_text = (f"{_COMPACT_RECAP_MARKER} {len(collapsed_slice)} earlier turns "
+                  f"were collapsed to save tokens. Prior action sequence on this "
+                  f"task: {', '.join(tail) if tail else '(no actions yet)'}. "
+                  f"Continue from the current page shown below.")
+    recap_turn = {"role": "user", "content": recap_text}
+    messages[cut_start:cut_end] = [recap_turn]
+    return _real_token_count(messages)
+
+
 def _trim_to_budget(messages: list, budget: int | None = None,
                      max_images: int | None = None,
                      trim_to: int | None = None) -> int:
@@ -880,20 +944,22 @@ def _trim_to_budget(messages: list, budget: int | None = None,
         messages[i]["content"] = [c for c in messages[i]["content"] if c.get("type") != "image_url"]
         current -= MEASURED_IMAGE_TOKENS
 
-    # Still over budget: the bloat is coming from text, not images. Only
-    # removing whole old messages can fix this. Pin index 0 (system prompt)
-    # AND index 1 (the step-1 user turn: persona/profile + standing rules +
-    # identity hint). Dropping index 1 was evicting the persona on long
-    # studies -- the model then no longer knew demographics that ARE in the
-    # profile (age, nationality, Prolific ID) and invented them, e.g. typing
-    # age 34 when the profile says 25, which contradicts the Prolific
-    # prescreening and gets the submission flagged. Drop from index 2 instead,
-    # so the durable facts survive the whole study. If [system, persona, last
-    # turn] still exceed the budget we send slightly over rather than lose the
-    # persona -- a wrong demographic costs far more than a few tokens.
-    while current > budget and len(messages) > 3:
-        del messages[2]
-        current = _real_token_count(messages)
+    # Still over budget: the bloat is coming from text, not images. Pin
+    # index 0 (system prompt) AND index 1 (the step-1 user turn:
+    # persona/profile + standing rules + identity hint). Dropping index 1
+    # evicted the persona on long studies -- the model then no longer knew
+    # demographics that ARE in the profile (age, nationality, Prolific ID)
+    # and invented them, e.g. typing age 34 when the profile says 25,
+    # contradicting Prolific prescreening and getting the submission flagged.
+    #
+    # Instead of `del messages[2]` iteratively (which shifted every later
+    # token and invalidated llama-server's prompt cache on every call),
+    # collapse the mid-history into a single recap turn ONCE. The cache is
+    # invalidated once, the new prefix is stable, subsequent steps cache
+    # cheaply. If after that one compact we still exceed the budget we send
+    # slightly over rather than lose the persona or the latest page.
+    if current > budget:
+        current = _hard_compact_context(messages, keep_recent=2)
 
     return current
 
@@ -2708,6 +2774,15 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # submitted before the timer ever started).
             here_guarded = _on_guarded_site(here)
             _timer_started_this_step = False
+            # Proactive, cache-aware compaction at natural checkpoints: when
+            # we cross the Prolific/external boundary (either direction),
+            # most of the history for the OTHER side (list browsing, old
+            # studies, prior survey pages) is no longer useful. Collapse it
+            # once BEFORE this step grows the context further, so the model
+            # starts the new page with a small stable prefix and llama's
+            # prompt cache can warm cheaply for the next 10+ steps.
+            if _prev_was_guarded != here_guarded and len(messages) > 6:
+                _hard_compact_context(messages, keep_recent=2)
             if _prev_was_guarded and not here_guarded:
                 _saw_external_this_study = True
             if _prev_was_guarded and not here_guarded and not study_timer.is_active():
@@ -2759,6 +2834,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _saw_external_this_study = False
                 _saw_cancel_confirm = False
                 _nocode_guard_attempts = 0
+                # Back on the studies list: everything from the previous
+                # study is history that will never be relevant again --
+                # collapse it in one shot so the next cycle starts with a
+                # tiny cache-stable context.
+                if len(messages) > 6:
+                    _hard_compact_context(messages, keep_recent=1)
 
             # --- studies that lead nowhere (and, opt-in, audio/video ones) ---
             # A study that is listed but not doable gets opened again on every
