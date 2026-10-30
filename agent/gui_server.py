@@ -2002,6 +2002,7 @@ def _telegram_bot_loop():
             {"command": "start",   "description": "Avvia l'agente"},
             {"command": "stop",    "description": "Ferma l'agente"},
             {"command": "restart", "description": "Ferma, torna a studies, riavvia"},
+            {"command": "hardrestart", "description": "Riavvia TUTTO il server (torna vuoto, browser su studies)"},
             {"command": "status",  "description": "Stato + screenshot + studi recenti"},
             {"command": "inject",  "description": "Manda un'istruzione extra all'agente"},
             {"command": "normal",  "description": "Modalità normale (qualità massima)"},
@@ -2077,6 +2078,42 @@ def _telegram_bot_loop():
         except Exception:
             pass
         return _do_start(name)
+
+    def _do_hardrestart() -> str:
+        """Kill THIS gui_server process and relaunch it via scripts/restart.sh,
+        then navigate the browser to the Prolific studies list. The server
+        comes back EMPTY (no agent running). Done through a detached shell so
+        the script survives this very process being killed by its pkill step."""
+        script = str(HERE.parent / "scripts" / "restart.sh")
+        if not os.path.exists(script):
+            return f"❌ Script non trovato: {script}"
+        port = str(_PORT)
+        # Build a one-liner that: (1) sleeps so our ACK flushes to Telegram,
+        # (2) runs restart.sh (which kills us), (3) waits for the new server
+        # to respond, (4) navigates to the studies list. Each step tolerates
+        # transient failures -- we don't want the browser-nav step to abort
+        # the whole restart on a 1-second race.
+        studies_url = "https://app.prolific.com/studies"
+        oneliner = (
+            f"sleep 1 && "
+            f"bash {shlex.quote(script)} > /tmp/fara-hardrestart.log 2>&1; "
+            f"for i in $(seq 1 30); do "
+            f"  curl -sf -o /dev/null --max-time 2 http://127.0.0.1:{port}/agent/status && break; "
+            f"  sleep 1; "
+            f"done; "
+            f"curl -s -X POST http://127.0.0.1:{port}/navigate "
+            f"  -H 'Content-Type: application/json' "
+            f"  -d {shlex.quote(json.dumps({'url': studies_url}))} > /dev/null 2>&1 || true"
+        )
+        try:
+            subprocess.Popen(
+                ["bash", "-c", oneliner],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+            )
+        except Exception as e:
+            return f"❌ Non riesco a lanciare il restart: {e}"
+        return "🔄 Hard restart avviato: il server si ucciderà, ripartirà vuoto e il browser tornerà a app.prolific.com/studies."
 
     def _do_status() -> str:
         with state_lock:
@@ -2234,6 +2271,12 @@ def _telegram_bot_loop():
             elif text in ("/restart", "restart", "/riavvia", "riavvia"):
                 tg_send("🔄 Riavvio in corso...")
                 tg_send(_do_restart(arg))
+            elif text in ("/hardrestart", "hardrestart", "/riavvia_tutto", "riavvia_tutto"):
+                # Hard restart: kills THIS gui_server, relaunches via
+                # scripts/restart.sh, navigates browser to studies list,
+                # leaves the server empty (no agent).
+                tg_send("🧨 Hard restart: uccido il server e lo rilancio.")
+                tg_send(_do_hardrestart())
             elif text in ("/inject", "inject", "/istruzione", "istruzione", "/msg", "msg"):
                 if not arg:
                     tg_send("Scrivi anche il testo:\n/inject <istruzione per l'agente>")
@@ -2285,7 +2328,8 @@ def _telegram_bot_loop():
                     "/riepilogo — Riepilogo di oggi (arriva da solo alle 21)\n"
                     "/earnings — Guadagni: oggi, settimana, mese, totale\n"
                     "/stop — Ferma l'agente\n"
-                    "/restart — Ferma, torna a studies, riavvia\n"
+                    "/restart — Ferma, torna a studies, riavvia (soft)\n"
+                    "/hardrestart — Riavvia TUTTO il gui_server; server vuoto, browser su studies\n"
                     "/status — Stato + screenshot + studi recenti\n"
                     "/inject <testo> — Istruzione extra per la run in corso\n"
                     "\n⚙️ Velocità:\n"
@@ -2331,10 +2375,15 @@ def _submissions_auto_updater():
             pass
 
 
+_PORT = int(os.environ.get("FARA_PORT", "8766"))
+
+
 def main():
+    global _PORT
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--port", type=int, default=_PORT)
     args = parser.parse_args()
+    _PORT = args.port
     threading.Thread(target=_telegram_bot_loop, daemon=True, name="tg-bot").start()
     threading.Thread(target=_submissions_auto_updater, daemon=True, name="subs-updater").start()
     threading.Thread(target=_daily_summary_loop, daemon=True, name="daily-summary").start()
