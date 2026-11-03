@@ -169,8 +169,23 @@ return (function() {
     const id = PREFIX + lb.id;
     lb.els.forEach((el, i) => tag(el, id + '|' + i));
     const sel = lb.els.filter(e => e.getAttribute('aria-selected') === 'true').map(_optionLabel);
+    // Qualtrics (and some other builders) mark the FIRST option as
+    // aria-selected on page load just for focus/keyboard-navigation, without
+    // the user having answered. Trusting that marker caused batch_fill to
+    // skip age dropdowns as "already answered" and leave them empty, which
+    // Qualtrics then flagged with a red validation border the model got
+    // stuck on. Treat the listbox as answered only when (a) something is
+    // selected, (b) it's not just the first option, and (c) the container
+    // doesn't carry a validation-error marker.
+    const container = lb.els[0] && lb.els[0].closest('[role=listbox]');
+    const invalid = container && (container.getAttribute('aria-invalid') === 'true'
+                                  || /\b(has-error|is-invalid|error|invalid)\b/i.test(container.className || ''));
+    const onlyFirst = sel.length === 1
+                      && lb.els.length > 1
+                      && lb.els[0].getAttribute('aria-selected') === 'true';
+    const answered = sel.length > 0 && !invalid && !onlyFirst;
     fields.push({ id, type: 'select', text: lb.text, options: lb.els.map(_optionLabel),
-      multiple: false, current: sel[0] || null, answered: sel.length > 0, widget: 'listbox' });
+      multiple: false, current: answered ? sel[0] : null, answered: answered, widget: 'listbox' });
   });
 
   document.querySelectorAll('select').forEach(el => {
@@ -413,15 +428,48 @@ def _set_checked(frame, tag, want: bool) -> bool:
     return False
 
 
+_LISTBOX_COMMITTED_JS = "(t) => {" + _FIND + r"""
+  if (!e) return false;
+  if (e.getAttribute('aria-selected') !== 'true') return false;
+  const lb = e.closest('[role=listbox]');
+  if (lb && (lb.getAttribute('aria-invalid') === 'true'
+             || /\b(has-error|is-invalid|error|invalid)\b/i.test(lb.className || ''))) {
+    return false;
+  }
+  return true;
+}"""
+
+
 def _select_option_el(frame, tag) -> bool:
-    """Pick an ARIA listbox option with a real click. True on success."""
-    if frame.evaluate(_IS_ON_JS, tag):
+    """Pick an ARIA listbox option with a real click. True on success.
+
+    Uses _LISTBOX_COMMITTED_JS (not _IS_ON_JS) for the post-click verify:
+    on Qualtrics the first option can carry aria-selected=true just from
+    page-load focus, and the container keeps aria-invalid=true until a real
+    change event lands. We only trust the commit when aria-selected is on
+    AND the listbox has cleared its invalid marker. Each attempt also fires
+    a synthetic change event on the container so builders that gate the
+    required-field check on it will see one from the real click."""
+    if frame.evaluate(_LISTBOX_COMMITTED_JS, tag):
         return True
-    for _ in range(2):
+    for _ in range(3):
         if not _real_click(frame, tag):
             return False
-        time.sleep(random.uniform(0.05, 0.15))
-        if frame.evaluate(_IS_ON_JS, tag):
+        time.sleep(random.uniform(0.08, 0.18))
+        # Nudge builders that gate validation on a change/input event.
+        try:
+            frame.evaluate("(t) => {" + _FIND + r"""
+                if (!e) return;
+                const lb = e.closest('[role=listbox]');
+                if (lb) {
+                    lb.dispatchEvent(new Event('change', { bubbles: true }));
+                    lb.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            }""", tag)
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.05, 0.12))
+        if frame.evaluate(_LISTBOX_COMMITTED_JS, tag):
             STATS["fast"] += 1
             return True
     return False
