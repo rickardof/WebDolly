@@ -22,6 +22,10 @@ TTL_SECONDS = float(os.environ.get("FARA_STUDY_MEMORY_DAYS", "60")) * 86400
 MAX_ENTRIES = 200
 MAX_USER_HINTS_PER_DOMAIN = 5
 MIN_USER_HINT_LEN = 20  # Filters out "yes"/"no"/"ok" answers.
+# User hints age out faster than study entries overall: situational guidance
+# ("cancel this one and go back") becomes stale and starts to be mis-applied
+# to unrelated studies on the same domain. Keep them fresh.
+USER_HINT_TTL_SECONDS = float(os.environ.get("FARA_USER_HINT_DAYS", "14")) * 86400
 
 _lock = threading.Lock()
 
@@ -149,15 +153,26 @@ def hint_for(url: str) -> str:
             f'the same select-and-submit pattern repeating.]\n')
 
 
+def _fresh_hints(hints: list) -> list:
+    """Drop hints older than USER_HINT_TTL_SECONDS from the list."""
+    cutoff = time.time() - USER_HINT_TTL_SECONDS
+    return [h for h in hints if float(h.get("ts", 0)) >= cutoff]
+
+
 def user_hints_for(url: str) -> str:
     """Return the block of past user corrections for this domain, if any.
 
-    These are instructions the user had to give the agent mid-run last time
-    (e.g. "click the send arrow in the small chat window to reveal the answer
-    fields"). Surfaced on every step on the domain -- including Prolific study
-    pages -- so a correction given once is not forgotten, within a run (it
-    survives context trimming because it is re-injected fresh each step) or
-    across runs on a similar study.
+    These are instructions the user had to give the agent mid-run last time,
+    scoped to a SPECIFIC past situation (e.g. "the survey is in another tab,
+    use Ctrl+Shift+Tab" or "scroll down to find the submit button"). Framed
+    carefully so the model treats them as situational guidance, not standing
+    directives: an old hint like "cancel the study and go back" was given to
+    resolve one stuck run, and if re-read as a blanket rule it makes the model
+    cancel every future study on the domain (seen in run_20261103_194847,
+    where the model hallucinated every Prolific study as 'ruled-out').
+
+    Stale hints (> USER_HINT_TTL_SECONDS old) are dropped so situational
+    guidance doesn't linger into contexts where it no longer applies.
     """
     domain = domain_of(url)
     if not domain:
@@ -167,12 +182,25 @@ def user_hints_for(url: str) -> str:
     entry = data.get(domain)
     if not entry:
         return ""
-    hints = entry.get("user_hints") or []
+    hints = _fresh_hints(entry.get("user_hints") or [])
     if not hints:
         return ""
-    bullets = "\n".join(f"  - {h.get('text', '')}" for h in hints[-MAX_USER_HINTS_PER_DOMAIN:])
-    block = (f'[Things the user told you before on {domain} (apply when relevant, '
-             f'do not repeat past mistakes):\n{bullets}]\n')
+    now = time.time()
+    def _age(h):
+        secs = max(0.0, now - float(h.get("ts", now)))
+        days = int(secs // 86400)
+        hours = int((secs % 86400) // 3600)
+        if days: return f"{days}d ago"
+        if hours: return f"{hours}h ago"
+        return "recent"
+    bullets = "\n".join(f"  - [{_age(h)}] {h.get('text', '')}"
+                        for h in hints[-MAX_USER_HINTS_PER_DOMAIN:])
+    block = (f'[Past situational guidance from the user on {domain} — each note '
+             f'was given to resolve a SPECIFIC past problem and is NOT a standing '
+             f'directive. Apply ONLY if the current page clearly matches that same '
+             f'situation; otherwise ignore. Never use these as a reason to skip, '
+             f'cancel, or label a study as "ruled out" unless the current screen '
+             f'itself shows the problem the note was about:\n{bullets}]\n')
     # Imperative escalations: if the user has repeatedly asked for the same
     # pattern on this domain, prepend a stronger directive so the model actually
     # follows. Keyword sets are deliberately narrow (two hints with the same
@@ -230,6 +258,8 @@ def enter_hint_count(url: str) -> int:
     after a left_click: on domains where the user has repeatedly asked for
     the click-then-Enter pattern, we skip the extra model round-trip and
     press Enter ourselves. 0 when the domain or its hint list is empty.
+    Stale hints are dropped (same TTL as user_hints_for) so a one-time
+    Enter instruction from months ago doesn't keep auto-pressing today.
     """
     domain = domain_of(url)
     if not domain:
@@ -237,7 +267,7 @@ def enter_hint_count(url: str) -> int:
     with _lock:
         data = _fresh(_read())
     entry = data.get(domain) or {}
-    hints = entry.get("user_hints") or []
+    hints = _fresh_hints(entry.get("user_hints") or [])
     low = [h.get("text", "").lower() for h in hints]
     return sum(1 for t in low if any(k in t for k in _ENTER_KW))
 

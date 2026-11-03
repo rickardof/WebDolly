@@ -2686,6 +2686,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _saw_external_this_study: bool = False
         _saw_cancel_confirm: bool = False
         _nocode_guard_attempts: int = 0
+        # Reservation-loop guard: once a slot is reserved on Prolific the URL
+        # becomes /studies/{id} and stays there — the only legitimate exits
+        # are 'Start study' or 'Cancel participation'. The model sometimes
+        # tries to escape with history_back / visit_url instead (seen in
+        # run_20261103_194847 after an older user_hint was misread as a
+        # standing rule to cancel). Count those abort attempts on the same
+        # detail URL; after RESERVED_LOOP_THRESHOLD we inject a nudge that
+        # names the only two valid exits.
+        _reserved_loop_url: str = ""
+        _reserved_loop_count: int = 0
+        _reserved_loop_nudged: bool = False
         # Content-change signal: see _page_fingerprint / _page_change_hint.
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
@@ -2902,6 +2913,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _saw_external_this_study = False
                 _saw_cancel_confirm = False
                 _nocode_guard_attempts = 0
+                _reserved_loop_url = ""
+                _reserved_loop_count = 0
+                _reserved_loop_nudged = False
                 # Back on the studies list: everything from the previous
                 # study is history that will never be relevant again --
                 # collapse it in one shot so the next cycle starts with a
@@ -3320,6 +3334,54 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         "questions, unselected radio buttons, empty required fields, "
                         "or unchecked mandatory checkboxes. Fill them in first, then "
                         "try clicking the button again.")
+
+            # Reservation-loop guard: on a Prolific /studies/{id} detail page,
+            # count consecutive abort attempts (history_back / visit_url to the
+            # list / Studies-tab nav click) that leave the URL unchanged — the
+            # tell-tale sign that a slot is reserved and the browser keeps
+            # getting redirected back to the detail. After 3 such attempts,
+            # inject a one-shot nudge pointing to the only legitimate exits.
+            m_resv = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
+            if m_resv:
+                detail_id = m_resv.group(1)
+                is_abort_attempt = (
+                    action_type in ("history_back", "visit_url")
+                    or (action_type == "key"
+                        and any(k in ("Alt+Left", "BackSpace")
+                                for k in (args.get("keys") or [])))
+                )
+                if is_abort_attempt:
+                    if _reserved_loop_url == detail_id:
+                        _reserved_loop_count += 1
+                    else:
+                        _reserved_loop_url = detail_id
+                        _reserved_loop_count = 1
+                        _reserved_loop_nudged = False
+                    if _reserved_loop_count >= 3 and not _reserved_loop_nudged:
+                        _reserved_loop_nudged = True
+                        pending_user_response = (
+                            "RESERVATION LOOP: you have reserved a slot on this study "
+                            "(the URL /studies/{id} and the 'Your place is reserved for "
+                            "the next N mins' banner mean the slot is HELD). You cannot "
+                            "escape by navigating away — Prolific will keep redirecting "
+                            "you back here. There are only TWO legitimate exits: "
+                            "(a) click the blue 'Start study' button to open the external "
+                            "survey and complete it, OR (b) click 'Cancel participation' "
+                            "(a red/outlined button on the same detail panel) and confirm "
+                            "to release the slot. Do NOT invoke history_back or visit_url "
+                            "again; look at the right-hand study panel and pick one of "
+                            "those two buttons. Ignore any past 'cancel the study' hint "
+                            "unless THIS study actually has a reason to be cancelled."
+                        ).format(id=detail_id)
+                elif action_type == "left_click":
+                    # A click on this page is progress — the model is engaging
+                    # with Start/Cancel/some control, not trying to escape.
+                    _reserved_loop_count = 0
+            else:
+                # Off the detail page: counter resets.
+                _reserved_loop_url = ""
+                _reserved_loop_count = 0
+                _reserved_loop_nudged = False
 
             # Auto-chain Enter after left_click on domains where the user
             # repeatedly asked for the click-then-Enter pattern. Saves one
