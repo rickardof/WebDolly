@@ -1999,19 +1999,19 @@ def _telegram_bot_loop():
     # Register bot commands in Telegram's menu
     try:
         cmds = json.dumps({"commands": [
+            {"command": "status",  "description": "Stato + screenshot + studi recenti"},
             {"command": "start",   "description": "Avvia l'agente"},
             {"command": "stop",    "description": "Ferma l'agente"},
             {"command": "restart", "description": "Ferma, torna a studies, riavvia"},
-            {"command": "hardrestart", "description": "Riavvia TUTTO il server (torna vuoto, browser su studies)"},
-            {"command": "status",  "description": "Stato + screenshot + studi recenti"},
-            {"command": "inject",  "description": "Manda un'istruzione extra all'agente"},
             {"command": "normal",  "description": "Modalità normale (qualità massima)"},
             {"command": "hurry",   "description": "Modalità veloce (immagini ridotte)"},
             {"command": "superfast","description": "Modalità super-veloce (massima velocità)"},
+            {"command": "inject",  "description": "Manda un'istruzione extra all'agente"},
             {"command": "presets", "description": "Elenco dei preset (/start <nome>)"},
-            {"command": "riepilogo", "description": "Riepilogo della giornata"},
             {"command": "earnings", "description": "Guadagni: oggi, settimana, mese, totale"},
+            {"command": "riepilogo", "description": "Riepilogo della giornata"},
             {"command": "help",    "description": "Lista comandi"},
+            {"command": "hardrestart", "description": "⚠️ Riavvia TUTTO il server (distruttivo)"},
         ]}).encode()
         req = _ur.Request(f"{base}/setMyCommands", data=cmds,
                           headers={"Content-Type": "application/json"})
@@ -2323,19 +2323,19 @@ def _telegram_bot_loop():
             elif text in ("/help", "help", "/aiuto", "aiuto"):
                 tg_send(
                     "🤖 Comandi disponibili:\n"
-                    "/start [preset] — Avvia l'agente (il primo preset, o quello indicato)\n"
-                    "/presets — Elenco dei preset\n"
-                    "/riepilogo — Riepilogo di oggi (arriva da solo alle 21)\n"
-                    "/earnings — Guadagni: oggi, settimana, mese, totale\n"
+                    "/status — Stato + screenshot + studi recenti\n"
+                    "/start [preset] — Avvia l'agente (preset indicato o il primo)\n"
                     "/stop — Ferma l'agente\n"
                     "/restart — Ferma, torna a studies, riavvia (soft)\n"
-                    "/hardrestart — Riavvia TUTTO il gui_server; server vuoto, browser su studies\n"
-                    "/status — Stato + screenshot + studi recenti\n"
                     "/inject <testo> — Istruzione extra per la run in corso\n"
+                    "/presets — Elenco dei preset\n"
+                    "/earnings — Guadagni: oggi, settimana, mese, totale\n"
+                    "/riepilogo — Riepilogo di oggi (arriva da solo alle 21)\n"
                     "\n⚙️ Velocità:\n"
                     "/normal — Qualità massima (default)\n"
                     "/hurry — Veloce (immagini 75%, token ridotti)\n"
                     "/superfast — Super-veloce (img 50%, JPEG, contesto ridotto)\n"
+                    "\n⚠️ /hardrestart — Riavvia TUTTO il server (distruttivo)\n"
                     "\n/help — Questa lista"
                 )
 

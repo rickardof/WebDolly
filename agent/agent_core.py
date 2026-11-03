@@ -1858,6 +1858,21 @@ def saw_prolific_submission_confirmation(text: str) -> bool:
     return bool(text) and bool(_PROLIFIC_SUBMITTED_RE.search(text))
 
 
+def _is_nocode_answer(answer: str) -> bool:
+    """True if the model's terminate answer means 'no completion code'.
+
+    Catches both the plain "NOCODE" and the "CODE: NOCODE" variant the
+    model sometimes emits (treating the literal word NOCODE as a code).
+    """
+    if answer == "NOCODE":
+        return True
+    if answer.startswith("CODE:"):
+        payload = answer.split(":", 1)[1].strip().upper()
+        if payload == "NOCODE":
+            return True
+    return False
+
+
 def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
                            saw_cancel_confirm: bool, attempts: int) -> str:
     """Refuse a NOCODE emitted on Prolific without having done the study.
@@ -1870,11 +1885,14 @@ def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
     'awaiting submission', and the next cycle's _wait_for_studies sits forever
     on an empty list.
 
+    Also catches "CODE: NOCODE" (the model treating the word NOCODE as a
+    completion code): same root cause, same guard.
+
     Returns the refusal string, or "" to let the terminate through. A safety
     valve lets the 3rd attempt pass regardless so a stale Prolific label can
     never genuinely wedge the loop.
     """
-    if answer != "NOCODE":
+    if not _is_nocode_answer(answer):
         return ""
     if not _on_guarded_site(url):
         return ""
@@ -1904,10 +1922,60 @@ def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
 _SUBMIT_RE = re.compile(
     r"(?i)\b(submit|invia|finish|complet|finali[sz]|conclud|termin|done|end survey)")
 
+_NEXT_RE = re.compile(
+    r"(?i)(^>>$|^>$|^→$|\bnext\b|\bcontinue\b|\bavanti\b|\bcontinua\b|\bweiter\b"
+    r"|\bsuivant\b|\bproceed\b|\bforward\b)")
+
 
 def _is_terminal_submit(label: str) -> bool:
     """True if a forward-button label means 'submit/finish the whole survey'."""
     return bool(label and _SUBMIT_RE.search(label))
+
+
+def _is_nav_button(label: str) -> bool:
+    """True if a button label is a page-navigation control (Next/Continue/>>)."""
+    return bool(label and _NEXT_RE.search(label.strip()) and not _SUBMIT_RE.search(label))
+
+
+def _click_hits_nav(x: float, y: float) -> str:
+    """Return the label if the click target is a Next/Continue/>> button, else ""."""
+    _JS = r"""([x, y]) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el) return "";
+        let node = el;
+        for (let i = 0; i < 10 && node && node !== document.body; i++) {
+            const tag = node.tagName;
+            if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'A'
+                || node.getAttribute('role') === 'button') {
+                const t = (node.tagName === 'INPUT' ? node.value : node.textContent) || '';
+                const aria = node.getAttribute('aria-label') || '';
+                return (t.trim() || aria.trim()).replace(/\s+/g, ' ');
+            }
+            node = node.parentElement;
+        }
+        return "";
+    }"""
+    try:
+        label = pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y]))
+    except Exception:
+        return ""
+    return label if _is_nav_button(label) else ""
+
+
+def _reading_dwell(text: str) -> float:
+    """Seconds a human would spend reading `text` before clicking Next.
+
+    Uses ~180-280 WPM (randomized) which covers casual-to-careful survey
+    reading. Clamped to [1.5, 25] so very short pages still get a brief
+    pause and very long pages don't stall forever.
+    """
+    words = len(text.split())
+    if words < 8:
+        return 0.0
+    wpm = random.uniform(180, 280)
+    base = (words / wpm) * 60.0
+    jitter = random.uniform(0.8, 1.3)
+    return max(1.5, min(25.0, base * jitter))
 
 
 def completion_pushback(answer: str, url: str, seen_codes: list,
@@ -3190,6 +3258,27 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 pending_user_response = (study_timer.status_line() or
                                          "Do NOT submit yet; wait for the study minimum time.")
             else:
+                # Reading dwell: before clicking a Next/Continue/>> button on
+                # an external survey, pause proportionally to the visible text
+                # so the page isn't traversed at inhuman speed.
+                if (action_type == "left_click" and not here_guarded
+                        and study_timer.is_active()):
+                    coord = args.get("coordinate")
+                    if coord:
+                        nav_label = _click_hits_nav(coord[0], coord[1])
+                        if nav_label:
+                            try:
+                                page_text = _page_text(12000)
+                                dwell = _reading_dwell(page_text)
+                                if dwell > 0:
+                                    _live({"type": "notice",
+                                           "text": f"[dwell] reading pause {dwell:.1f}s before '{nav_label}'"})
+                                    cancel.sleep(dwell)
+                            except cancel.Cancelled:
+                                raise
+                            except Exception:
+                                pass
+
                 try:
                     result_desc = dispatch_action(action_type, args)
                 except Exception as e:
