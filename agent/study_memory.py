@@ -216,7 +216,7 @@ def user_hints_for(url: str) -> str:
     # rhythm instead, so the two no longer tell the model opposite things.
     if speed_hits >= 2:
         rhythm = ("click an option → press Enter → wait for next trial → repeat"
-                  if enter_hits >= 2 else
+                  if enter_hits >= 1 else
                   "select → scroll to submit → click submit → wait for next "
                   "trial → repeat")
         block = (f'[DIRECTIVE on {domain}: user has asked {speed_hits} times '
@@ -224,13 +224,16 @@ def user_hints_for(url: str) -> str:
                  f'select+submit surveys, develop a fast clicking rhythm: '
                  f'{rhythm}. Do NOT hesitate between trials. Vary '
                  f'your selections naturally — never straight-line.]\n' + block)
-    if enter_hits >= 2:
-        block = (f'[DIRECTIVE on {domain}: the user has told you {enter_hits} '
-                 f'times that after selecting an option on this survey you '
+    if enter_hits >= 1:
+        times = ("once" if enter_hits == 1
+                 else "twice" if enter_hits == 2
+                 else f"{enter_hits} times")
+        block = (f'[DIRECTIVE on {domain}: the user has told you {times} '
+                 f'that after selecting an option on this survey you '
                  f'MUST press Enter to proceed to the next trial. '
                  f'Do NOT scroll looking for a submit button. Do NOT click '
                  f'submit. IMPORTANT: the harness ALREADY presses Enter for '
-                 f'you right after each left_click on this domain — you must '
+                 f'you right after each left_click on this domain, you must '
                  f'NOT emit a key action with Return/Tab/Enter yourself '
                  f'(pressing Enter twice advances two trials and submits the '
                  f'next one with no selection). After left_click, your very '
@@ -243,10 +246,12 @@ def user_hints_for(url: str) -> str:
 # which auto-chains Enter after a click when the Enter DIRECTIVE is active)
 # and tests can reuse the exact same list that gates the DIRECTIVE text.
 _ENTER_KW = ("press enter", "press the enter", "just press", "just enter",
-             "hit enter", "use enter", "enter key", "enter to", "no submit",
-             "no scroll", "don't scroll", "dont scroll", "don't click submit",
-             "dont click submit", "no need to scroll", "no need to click",
-             "reach submit", "clicking submit")
+             "hit enter", "use enter", "enter key", "enter to",
+             "click enter", "enter on the keyboard", "enter on keyboard",
+             "keyboard to submit", "with enter", "submit with enter",
+             "no submit", "no scroll", "don't scroll", "dont scroll",
+             "don't click submit", "dont click submit", "no need to scroll",
+             "no need to click", "reach submit", "clicking submit")
 _SPEED_KW = ("veloce", "velocement", "fast", "faster", "quickly",
              "speed", "efficien", "ritmo", "rhythm")
 

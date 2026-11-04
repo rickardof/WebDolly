@@ -1504,15 +1504,15 @@ def _prescroll_to_controls() -> str:
 
 # -- auto-chain Enter after left_click when Enter DIRECTIVE is active --------
 #
-# On domains where the user has repeatedly told the agent "after you
-# select an option, just press Enter" (study_memory counts >= 2 Enter
-# hints -- same threshold that fires the Enter DIRECTIVE), we press
-# Enter ourselves right after the click. Saves the full ~16s model
-# round-trip that it would otherwise take for the model to look at the
-# post-click screenshot and emit `key Return`.
+# On domains where the user has told the agent "after you select an
+# option, just press Enter" (study_memory counts >= 1 Enter hints, same
+# threshold that fires the Enter DIRECTIVE), we press Enter ourselves
+# right after the click. Saves the full ~16s model round-trip that it
+# would otherwise take for the model to look at the post-click
+# screenshot and emit `key Return`.
 #
 # Gated hard so this never fires outside the intended pattern:
-#   - URL's domain has >= 2 Enter hints (user asked for it, repeatedly)
+#   - URL's domain has >= 1 Enter hint (user asked for it explicitly)
 #   - speed mode is not 'normal' (opt-in: 'normal' keeps old behaviour)
 #   - study_timer is active (we are inside a Prolific study)
 #   - click did not land on a disabled control (pending_user_response
@@ -1524,7 +1524,7 @@ def _should_auto_chain_enter(url: str) -> bool:
     if _speed_mode == "normal":
         return False
     try:
-        if not study_memory.enter_hint_count(url) >= 2:
+        if study_memory.enter_hint_count(url) < 1:
             return False
     except Exception:
         return False
