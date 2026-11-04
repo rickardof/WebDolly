@@ -1259,6 +1259,26 @@ def _page_text(limit: int = 20000) -> str:
         return ""
 
 
+# Prolific shows this banner at the top of every page while any slot is
+# reserved and still pending. The wording is stable across study types and
+# languages are not localised for the warning text. If the DOM contains it,
+# the account is in a 'held submission' state that must be resolved via
+# 'I'm finished' (with a real code) or 'Cancel participation'. Used by the
+# orphan-reservation guard so the model does not hallucinate a 'Take part'
+# button when it is really looking at 'I'm finished'.
+_ORPHAN_BANNER_RE = re.compile(
+    r"(?:please\s+)?either\s+finish\s+or\s+return\s+(?:this|your)\s+submission",
+    re.IGNORECASE,
+)
+
+
+def _orphan_reservation_visible() -> bool:
+    try:
+        return bool(_ORPHAN_BANNER_RE.search(_page_text(4000) or ""))
+    except Exception:
+        return False
+
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -2696,7 +2716,23 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # names the only two valid exits.
         _reserved_loop_url: str = ""
         _reserved_loop_count: int = 0
+        # Any step that ends still on /studies/{id} with no URL change from
+        # the previous step counts as 'stuck'. The model in run_20261104_073003
+        # wasted 13 steps tab-switching and pressing Win/Ctrl+L while the
+        # URL never moved -- none counted as abort attempts, so the original
+        # history_back-only guard never fired. Fallback threshold is lower
+        # than the abort-attempt one because 'stuck' already means no useful
+        # browser transition is happening.
+        _reserved_stuck_count: int = 0
         _reserved_loop_nudged: bool = False
+        # Orphan-reservation guard: see _orphan_reservation_visible. On the
+        # reserved detail page the model has been seen to hallucinate a
+        # 'Take part in this study' button that does not exist (the panel
+        # actually shows 'I'm finished' + 'Cancel participation'), then
+        # click into the Confirm-submission flow with no code to enter.
+        # Nudged once per visit to the detail page, reset on return to
+        # /studies so re-entry re-fires it after context compaction.
+        _orphan_nudged: bool = False
         # Content-change signal: see _page_fingerprint / _page_change_hint.
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
@@ -2915,7 +2951,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _nocode_guard_attempts = 0
                 _reserved_loop_url = ""
                 _reserved_loop_count = 0
+                _reserved_stuck_count = 0
                 _reserved_loop_nudged = False
+                _orphan_nudged = False
                 # Back on the studies list: everything from the previous
                 # study is history that will never be relevant again --
                 # collapse it in one shot so the next cycle starts with a
@@ -3335,53 +3373,116 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         "or unchecked mandatory checkboxes. Fill them in first, then "
                         "try clicking the button again.")
 
-            # Reservation-loop guard: on a Prolific /studies/{id} detail page,
-            # count consecutive abort attempts (history_back / visit_url to the
-            # list / Studies-tab nav click) that leave the URL unchanged — the
-            # tell-tale sign that a slot is reserved and the browser keeps
-            # getting redirected back to the detail. After 3 such attempts,
-            # inject a one-shot nudge pointing to the only legitimate exits.
+            # Reservation-loop guard: on a Prolific /studies/{id} detail page
+            # where the orphan banner is visible, the slot is held and the only
+            # way out is 'I'm finished' (with a real code) or 'Cancel
+            # participation'. Two independent signals feed one nudge:
+            #   (A) orphan-detector: on first entry with the banner visible,
+            #       inject a one-shot clarification of what the buttons mean
+            #       (the model was observed hallucinating a non-existent 'Take
+            #       part' button over the actual 'I'm finished' in
+            #       run_20261104_073003).
+            #   (B) loop-detector: count explicit abort attempts PLUS any step
+            #       that ends on the same detail URL without progress; fire the
+            #       nudge after 2 abort attempts or 6 stuck steps.
             m_resv = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
             if m_resv:
                 detail_id = m_resv.group(1)
+                # A visit to a different detail page resets everything for it.
+                if _reserved_loop_url != detail_id:
+                    _reserved_loop_url = detail_id
+                    _reserved_loop_count = 0
+                    _reserved_stuck_count = 0
+                    _reserved_loop_nudged = False
+                    _orphan_nudged = False
+
+                # (A) Orphan reservation one-shot informational nudge.
+                if not pending_user_response and not _orphan_nudged:
+                    if _orphan_reservation_visible():
+                        _orphan_nudged = True
+                        pending_user_response = (
+                            "RESERVED-SLOT STATE on this Prolific study: the "
+                            "'Please either finish or return this submission' "
+                            "banner is visible, which means the slot is HELD "
+                            "(possibly from a PREVIOUS run that did not clean "
+                            "up). The right-hand panel in this state shows:\n"
+                            "  - 'I'm finished' (blue): click ONLY if you "
+                            "personally completed the external survey this run "
+                            "and have a completion code to paste. Clicking it "
+                            "otherwise lands you on a dead Confirm-submission "
+                            "screen with no code to enter.\n"
+                            "  - 'Cancel participation' (red outline): releases "
+                            "the slot. Opens a modal; confirm with the red "
+                            "'Yes, cancel participation' button.\n"
+                            "  - 'Open study in new window' (link): reopens the "
+                            "external survey in a new tab, if there is one.\n"
+                            "There is NO 'Take part in this study' button in "
+                            "this state. If you did not open+complete the "
+                            "external survey this run, click 'Cancel "
+                            "participation' -> 'Yes, cancel participation', "
+                            "then terminate with NOCODE."
+                        )
+
+                # (B) Loop detector. Normalise keys to a lowered '+'-joined
+                # string so patterns like 'alt+left' match regardless of how
+                # the model spelt the modifiers.
+                keys_joined = "+".join(
+                    (k or "").lower() for k in (args.get("keys") or [])
+                )
                 is_abort_attempt = (
                     action_type in ("history_back", "visit_url")
-                    or (action_type == "key"
-                        and any(k in ("Alt+Left", "BackSpace")
-                                for k in (args.get("keys") or [])))
+                    or (action_type == "key" and keys_joined in (
+                        "backspace", "alt+left", "alt+right", "ctrl+l",
+                        "ctrl+tab", "ctrl+shift+tab", "ctrl+next",
+                        "ctrl+prior", "ctrl+pagedown", "ctrl+pageup",
+                    ))
                 )
+                # Clicks on the top Prolific nav header (the Studies /
+                # Submissions / About you / Messages tabs all sit within the
+                # first ~50px) are escape attempts too. The reserved banner is
+                # at y<=30 so the primary nav is roughly y 30..100 depending on
+                # layout; y<=110 keeps a safety margin without catching the
+                # right-hand panel buttons (which start at y>=550).
+                if action_type == "left_click":
+                    coord = args.get("coordinate") or ()
+                    if len(coord) >= 2 and coord[1] <= 110:
+                        is_abort_attempt = True
+
                 if is_abort_attempt:
-                    if _reserved_loop_url == detail_id:
-                        _reserved_loop_count += 1
-                    else:
-                        _reserved_loop_url = detail_id
-                        _reserved_loop_count = 1
-                        _reserved_loop_nudged = False
-                    if _reserved_loop_count >= 3 and not _reserved_loop_nudged:
-                        _reserved_loop_nudged = True
-                        pending_user_response = (
-                            "RESERVATION LOOP: you have reserved a slot on this study "
-                            "(the URL /studies/{id} and the 'Your place is reserved for "
-                            "the next N mins' banner mean the slot is HELD). You cannot "
-                            "escape by navigating away — Prolific will keep redirecting "
-                            "you back here. There are only TWO legitimate exits: "
-                            "(a) click the blue 'Start study' button to open the external "
-                            "survey and complete it, OR (b) click 'Cancel participation' "
-                            "(a red/outlined button on the same detail panel) and confirm "
-                            "to release the slot. Do NOT invoke history_back or visit_url "
-                            "again; look at the right-hand study panel and pick one of "
-                            "those two buttons. Ignore any past 'cancel the study' hint "
-                            "unless THIS study actually has a reason to be cancelled."
-                        ).format(id=detail_id)
-                elif action_type == "left_click":
-                    # A click on this page is progress — the model is engaging
-                    # with Start/Cancel/some control, not trying to escape.
-                    _reserved_loop_count = 0
+                    _reserved_loop_count += 1
+                # Stuck: current URL matches previous URL and both are this
+                # detail page. _prev_here is "" on the very first iteration,
+                # so no false positive at run start.
+                if (_prev_here
+                        and urlparse(_prev_here).path == urlparse(here).path):
+                    _reserved_stuck_count += 1
+
+                if (not _reserved_loop_nudged
+                        and not pending_user_response
+                        and (_reserved_loop_count >= 2
+                             or _reserved_stuck_count >= 6)):
+                    _reserved_loop_nudged = True
+                    pending_user_response = (
+                        "RESERVATION LOOP on /studies/{id}: you have been "
+                        "stuck on this reserved slot without progress. Prolific "
+                        "will keep redirecting you back to this detail page as "
+                        "long as the slot is held. The ONLY legitimate exits "
+                        "are: (a) 'I'm finished' AFTER you actually completed "
+                        "the external survey (with its completion code to "
+                        "paste), or (b) 'Cancel participation' (red outline "
+                        "button on the right panel) -> confirm 'Yes, cancel "
+                        "participation' in the modal. Do NOT press back / "
+                        "forward / address bar / Ctrl+Tab / click on the top "
+                        "Prolific nav tabs again -- those cannot release the "
+                        "slot. Pick one of the two panel buttons now."
+                    ).format(id=detail_id)
             else:
-                # Off the detail page: counter resets.
+                # Off the detail page: counters reset.
                 _reserved_loop_url = ""
                 _reserved_loop_count = 0
+                _reserved_stuck_count = 0
                 _reserved_loop_nudged = False
+                _orphan_nudged = False
 
             # Auto-chain Enter after left_click on domains where the user
             # repeatedly asked for the click-then-Enter pattern. Saves one
