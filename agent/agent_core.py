@@ -1542,6 +1542,14 @@ def _should_auto_chain_enter(url: str) -> bool:
 # switch) still looks like the same page. _stuck_warning emits a short
 # prefix line when the last STUCK_THRESHOLD recorded signatures all match.
 _STUCK_THRESHOLD = 3
+# Scrolls get a higher threshold: the signature folds the magnitude away
+# (see _action_signature) so a model hunting for an off-screen control by
+# scrolling the same direction with varied tick counts reads as one
+# repeated action. Measured: successful survey runs never exceed 2-3
+# consecutive same-direction scrolls, while a wedged run did 39 in a row,
+# so 5 catches the loop early without nagging normal long-page reading.
+_SCROLL_STUCK_THRESHOLD = 5
+_SCROLL_ACTIONS = ("scroll", "hscroll")
 
 
 def _action_signature(action_type: str, args: dict, url: str) -> str:
@@ -1553,8 +1561,15 @@ def _action_signature(action_type: str, args: dict, url: str) -> str:
     except Exception:
         path = ""
     parts = [path, action_type]
-    if action_type in ("scroll", "hscroll"):
-        parts.append(str(args.get("pixels")))
+    if action_type in _SCROLL_ACTIONS:
+        # Direction only, NOT magnitude: a stuck model varies the tick count
+        # each step (-590, -366, -120 ...) which used to make every scroll a
+        # fresh signature and let an endless scroll-hunt dodge the detector.
+        px = args.get("pixels")
+        try:
+            parts.append("up" if float(px) > 0 else "down")
+        except (TypeError, ValueError):
+            parts.append("?")
     elif action_type == "key":
         keys = args.get("keys")
         parts.append(",".join(str(k) for k in keys) if isinstance(keys, list) else str(keys))
@@ -1568,20 +1583,37 @@ def _action_signature(action_type: str, args: dict, url: str) -> str:
 
 def _stuck_warning(sigs: deque) -> str:
     """Prefix line for the model when it is clearly in a loop. Empty when
-    there are fewer than STUCK_THRESHOLD signatures or they are not all
-    equal. The warning names the repeated action so the model can tell
-    which loop to break (vs. a generic 'try something different'
-    nudge, which was ignored in prior runs)."""
-    if len(sigs) < _STUCK_THRESHOLD:
+    there are fewer than the applicable threshold of signatures or they are
+    not all equal. The warning names the repeated action so the model can
+    tell which loop to break (vs. a generic 'try something different'
+    nudge, which was ignored in prior runs).
+
+    Scrolls use the higher _SCROLL_STUCK_THRESHOLD; everything else uses
+    _STUCK_THRESHOLD."""
+    if not sigs:
         return ""
-    last = list(sigs)[-_STUCK_THRESHOLD:]
+    # Signature is path|action|arg. The threshold depends on the action of
+    # the most recent signature.
+    last_parts = sigs[-1].split("|")
+    action = last_parts[1] if len(last_parts) > 1 else ""
+    threshold = _SCROLL_STUCK_THRESHOLD if action in _SCROLL_ACTIONS else _STUCK_THRESHOLD
+    if len(sigs) < threshold:
+        return ""
+    last = list(sigs)[-threshold:]
     if len(set(last)) != 1:
         return ""
-    # Signature is path|action|arg; strip the path for the user-facing
-    # message (the model already sees the URL on its own line).
-    sig = last[0]
-    _, _, tail = sig.partition("|")
-    return (f"[STUCK WARNING: you have performed `{tail}` {_STUCK_THRESHOLD} "
+    # Strip the path for the user-facing message (the model already sees the
+    # URL on its own line).
+    _, _, tail = last[0].partition("|")
+    if action in _SCROLL_ACTIONS:
+        return (f"[STUCK WARNING: you have scrolled ({tail}) {threshold} times "
+                "in a row on this page without making progress. STOP "
+                "scrolling. The control you are looking for is likely NOT "
+                "reachable this way. Try: press End or Page Down to jump to "
+                "the bottom, look for a required field ABOVE that is blocking "
+                "submission, or if the page cannot be completed cancel/return "
+                "the study. Do NOT scroll again.]\n")
+    return (f"[STUCK WARNING: you have performed `{tail}` {threshold} "
             "times in a row on this page and nothing changed. STOP "
             "repeating it. Look at the screenshot and try a DIFFERENT "
             "approach: a different element, the opposite scroll direction, "
@@ -2684,6 +2716,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # this cycle's first request, not just after.
             _trim_to_budget(messages)
         pending_user_response = ""
+        # True while pending_user_response holds a USER inject (a mid-run
+        # steer), as opposed to harness/batch-fill continuation text. A user
+        # inject must reach the model, so while this is set the autonomous
+        # batch-fill is skipped for a step (it would otherwise auto-advance
+        # with no model turn and overwrite the inject with its own text). See
+        # the batch-fill branch and the two inject-capture sites below.
+        _user_inject_pending = False
         attempted_form_signatures = {}   # signature -> attempt count (see _MAX_BATCH_ATTEMPTS)
         survey_memory = []  # (question, answer) given so far in this run
         wander = WanderGuard(wander_seconds)
@@ -2738,11 +2777,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _last_page_fp: str = ""
         _last_action_type_for_signal: str = ""
         # Loop detector: last few action signatures with their URL path. When
-        # the SAME signature on the SAME path repeats STUCK_THRESHOLD times
-        # in a row, step N+1 gets a prepended STUCK WARNING in its prefix so
+        # the SAME signature on the SAME path repeats its threshold number of
+        # times in a row (STUCK_THRESHOLD, or SCROLL_STUCK_THRESHOLD for
+        # scrolls), step N+1 gets a prepended STUCK WARNING in its prefix so
         # the model is told explicitly to break the loop instead of
-        # continuing. Reset per run.
-        _recent_action_sigs: deque = deque(maxlen=4)
+        # continuing. maxlen must be >= the largest threshold. Reset per run.
+        _recent_action_sigs: deque = deque(maxlen=_SCROLL_STUCK_THRESHOLD + 1)
         # Identity (Prolific ID / email) the user put in identity.json or the
         # task, surfaced to the model so it can TYPE the exact value when a study
         # asks for it. The DOM identity-fill stays primary; this is the fallback
@@ -2919,7 +2959,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # dwell block below. _prev_here must be updated at the END of the
             # step, not here, or the check never sees a different value.
 
-            if batch_fill and not here_guarded:
+            if batch_fill and not here_guarded and not _user_inject_pending:
                 batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
                     task, attempted_form_signatures, survey_memory, timer=study_timer)
                 transcript.write(json.dumps(
@@ -2932,6 +2972,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     injected = yield batch_step_event
                     if injected:
                         pending_user_response = injected
+                        _user_inject_pending = True
                         _record_user_correction(injected)
                     continue
 
@@ -3171,6 +3212,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if pending_user_response:
                     text += f"\n\n[User (mid-run instruction)]: {pending_user_response}"
                     pending_user_response = ""
+                    _user_inject_pending = False
             else:
                 url = get_current_url()
                 prefix = f"Current URL: {url}\n" if url else ""
@@ -3197,6 +3239,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if pending_user_response:
                     inj = pending_user_response
                     pending_user_response = ""
+                    _user_inject_pending = False
                     text = (f"{prefix}[User (mid-run instruction)]: {inj}\n\n"
                             f"{fp.USER_MESSAGE}")
                 else:
@@ -3605,6 +3648,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             injected = yield step_event
             if injected:
                 pending_user_response = injected
+                _user_inject_pending = True
                 _record_user_correction(injected)
             # Snapshot `here` for the next step's just_landed check. Done at
             # the END of the step so the comparison at the top of the next
