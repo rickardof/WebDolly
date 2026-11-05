@@ -1010,6 +1010,36 @@ _LIST_PATH = re.compile(r"^/studies/?$", re.IGNORECASE)
 _STUDY_PATH = re.compile(r"^/studies/([0-9a-fA-F]{24})/?$", re.IGNORECASE)
 _COMPLETE_PATH = re.compile(r"^/submissions/complete/?$", re.IGNORECASE)
 
+# Prolific "chrome" prefixes: pages where no study TASK is running yet -- the
+# account/submissions surfaces (the studies list and the per-study reservation
+# page are handled separately via _LIST_PATH / _STUDY_PATH).
+_LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings")
+
+
+def _on_launch_surface(url: str) -> bool:
+    """True when `url` is a Prolific page where no study task is running yet:
+    the studies list, a per-study reservation/detail page, or account /
+    submissions chrome.
+
+    False for external survey domains AND for Prolific-hosted task tools such
+    as /data-collection-tool/... -- those ARE a running task. "Inside a task"
+    is defined as the negation of this (off the launch surface), so a
+    first-party Prolific survey gets the same study timer, abandonment
+    accounting and in-task framing as an external one. Keyed on the surface,
+    not on "left prolific.com", so the model stops mistaking a running
+    first-party task for the reservation page and cancelling a study it is
+    actually completing (run_20261105_111957, run_20261104_204916)."""
+    if not _on_guarded_site(url):
+        return False
+    path = urlparse(url).path or "/"
+    if _LIST_PATH.match(path) or _STUDY_PATH.match(path):
+        return True
+    norm = path.rstrip("/") or "/"
+    if norm == "/":
+        return True
+    return any(norm == p or norm.startswith(p + "/")
+               for p in _LAUNCH_CHROME_PREFIXES)
+
 
 _FILLER = r"(?:is|below|here|in|on|into|to|prolific|please|enter|paste|copy|the|your|following|this)"
 _PAGE_CODE = re.compile(
@@ -2729,6 +2759,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         study_timer = StudyTimer()
         _last_guarded_duration: float | None = None  # persists across clicks within a study entry
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
+        _prev_on_launch: bool = True  # prev step was on the Prolific launch surface (list/detail/chrome)
         _prev_here: str = ""  # URL at the previous step, for detecting navigation landings
         _current_study_id: str | None = None  # id of the study being looked at / taken
         _current_study_title: str = ""  # its name, read on Prolific while we can still see it
@@ -2938,9 +2969,19 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # prompt cache can warm cheaply for the next 10+ steps.
             if _prev_was_guarded != here_guarded and len(messages) > 6:
                 _hard_compact_context(messages, keep_recent=2)
+            here_on_launch = _on_launch_surface(here)
+            # "Inside a task" = off the launch surface: an external survey host
+            # OR a Prolific-hosted task tool (e.g. /data-collection-tool/...).
+            # The study timer and in-task framing key on THIS transition, not on
+            # "left prolific.com", so first-party Prolific surveys are treated as
+            # the running task they are instead of looking like the reservation
+            # page (which made the model cancel completable studies).
+            entered_task = _prev_on_launch and not here_on_launch
             if _prev_was_guarded and not here_guarded:
+                # NOCODE-guard signal: strictly "reached an EXTERNAL survey host"
+                # (unchanged on purpose -- see guarded_nocode_refusal).
                 _saw_external_this_study = True
-            if _prev_was_guarded and not here_guarded and not study_timer.is_active():
+            if entered_task and not study_timer.is_active():
                 effective_duration = _last_guarded_duration
                 if effective_duration is not None:
                     study_timer.start(effective_duration * 60)
@@ -2951,10 +2992,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
                 _timer_started_this_step = True
                 _survey_url = here
-                _live({"type": "notice", "text": f"[timer] transition detected: guarded→external | duration={effective_duration}min"})
+                dest = "external" if not here_guarded else "prolific-hosted task"
+                _live({"type": "notice", "text": f"[timer] transition detected: launch→{dest} | duration={effective_duration}min"})
                 dur_str = f" (~{effective_duration:.0f} min)" if effective_duration else ""
                 _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
             _prev_was_guarded = here_guarded
+            _prev_on_launch = here_on_launch
             # Keep the previous URL available for the just_landed check in the
             # dwell block below. _prev_here must be updated at the END of the
             # step, not here, or the check never sees a different value.
@@ -3052,6 +3095,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pw_bridge.goto(studies_url())
                     pw_bridge.wait_for_content()
                     _prev_was_guarded = True
+                    _prev_on_launch = True   # back on the studies list (a launch surface)
                 except Exception:
                     pass
                 pending_user_response = (
@@ -3219,6 +3263,21 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 prefix += page_signal
                 prefix += _stuck_warning(_recent_action_sigs)
                 prefix += skip_hint + nav_hint + mem_hint
+                # Prolific-hosted task surface (e.g. the data-collection-tool):
+                # it lives on app.prolific.com, so the model keeps mistaking a
+                # trial it is actively doing for the studies list / reservation
+                # page and cancels a study it is completing. State plainly where
+                # it is. (Guarded + off the launch surface == a first-party task.)
+                if here_guarded and not here_on_launch:
+                    prefix += (
+                        "[You are INSIDE the study task right now — this is a "
+                        "Prolific-hosted survey, NOT the studies list and NOT the "
+                        "reservation/detail page. A study is open and in progress. "
+                        "Keep answering the trials and advancing. Do NOT click "
+                        "'Cancel participation' or 'Back to studies', and do NOT "
+                        "terminate as if no study were open. Only leave if the task "
+                        "itself is genuinely impossible (needs a microphone/camera, "
+                        "or a CAPTCHA blocks you).]\n")
                 timer_line = study_timer.status_line()
                 if timer_line:
                     prefix += timer_line + "\n"
