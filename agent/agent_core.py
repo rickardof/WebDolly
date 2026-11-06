@@ -1876,12 +1876,23 @@ def _detect_av(text: str = "", check_text: bool = True) -> str:
 class WanderGuard:
     """Brings the agent back to the list of studies if it lingers elsewhere.
 
-    The clock runs while the active tab is on the guarded site (Prolific) but
-    NOT on the studies list: study detail pages, account pages, results...
-    It resets whenever the agent is on the list, or on any other site -- an
-    external survey tab means it is actually doing a study, and that must
-    never be cut short. After `seconds` outside the list, check() returns
-    True once and the caller sends it back to /studies."""
+    The clock runs only while the active tab LINGERS on the Prolific launch
+    surface without a task running: a study detail page, account pages,
+    results... It resets whenever the agent is on the list, or anywhere a
+    study is actually in progress -- that must never be cut short. "In
+    progress" is two cases, and both reset the clock:
+      * an external survey host (off prolific.com), and
+      * a Prolific-HOSTED task such as /data-collection-tool/..., which is
+        still on prolific.com and is NOT the list, so the old
+        `_on_guarded_site` test let the clock keep running straight through
+        it. Measured in run_20261106_084555: the clock started on the detail
+        page, never reset while the agent worked the data-collection-tool
+        trials, fired mid-task at wander_seconds=98 and yanked it to
+        /studies; the model then read the reserved slot as a finished study
+        and went for 'Cancel participation'. Same root cause as the
+        launch-surface timer fix, so it reuses that predicate.
+    After `seconds` lingering, check() returns True once and the caller sends
+    it back to /studies."""
 
     def __init__(self, seconds: float, clock=time.monotonic):
         self.seconds, self.clock, self.since = float(seconds or 0), clock, None
@@ -1889,7 +1900,7 @@ class WanderGuard:
     def check(self, url: str) -> bool:
         if self.seconds <= 0:
             return False
-        if not _on_guarded_site(url) or _LIST_PATH.match(urlparse(url).path or ""):
+        if not _on_launch_surface(url) or _LIST_PATH.match(urlparse(url).path or ""):
             self.since = None
             return False
         now = self.clock()
