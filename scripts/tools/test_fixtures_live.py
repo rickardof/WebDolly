@@ -170,18 +170,53 @@ def main():
             check("confirm link already on screen in this capture -> clickable",
                   raw is not None and on, f"{raw}")
 
-        # ---- end to end on the real markup ------------------------------
+        # ---- does the real cursor land on the real confirm link? --------
+        # Chromium refuses to navigate out of an MHTML archive, so a replay
+        # cannot show the survey actually opening (the launcher reports
+        # clicked-no-tab, correctly). What a replay CAN prove -- and what
+        # every geometry bug here was about -- is whether the coordinates the
+        # launcher computes put the real xdotool cursor on the real element.
+        # The listener below is our instrumentation; the click it records is
+        # a genuine trusted event from the real cursor.
+        # (Chromium disables a document's own JavaScript inside an MHTML
+        # archive, so a page-side click listener never fires -- and the same
+        # restriction is why the launcher reports clicked-no-tab here. So
+        # record where the REAL cursor was actually sent, and check it
+        # against the element's real rect.)
         close_extra_tabs()
         load("start_dialog", stub)
-        before = len(pw_bridge.page_ids())
-        res = ac._humanized_launch_reserved_study(include_take_part=False)
-        active = pw_bridge.run(lambda b: b.active_page().url)
+        sent = []
+        _real_move, _real_exec = ac._human_move, ac.docker_exec
+        def _spy_move(x, y):
+            sent.append(("move", x, y))
+            return _real_move(x, y)
+        def _spy_exec(*a):
+            if a[:2] == ("xdotool", "click"):
+                sent.append(("click",) + tuple(a))
+            return _real_exec(*a)
+        ac._human_move, ac.docker_exec = _spy_move, _spy_exec
+        try:
+            res = ac._humanized_launch_reserved_study(include_take_part=False)
+        finally:
+            ac._human_move, ac.docker_exec = _real_move, _real_exec
+        target = pw_bridge.element_box(pw_bridge._SEL_START, scroll=False)
+        moves = [m for m in sent if m[0] == "move"]
+        clicks = [m for m in sent if m[0] == "click"]
+        last = moves[-1] if moves else None
+        inside = bool(last and target
+                      and target["x"] <= last[1] <= target["x"] + target["width"]
+                      and target["y"] <= last[2] <= target["y"] + target["height"])
         print(f"   launcher on the real dialog -> {res}")
-        check("launcher reaches the (stubbed) survey from the REAL dialog",
-              (res or {}).get("status") == "launched" and "stub_survey" in active,
-              f"status={(res or {}).get('status')} active={active.rsplit('/', 1)[-1]}")
-        check("it opened a new tab", len(pw_bridge.page_ids()) > before,
-              f"{before} -> {len(pw_bridge.page_ids())}")
+        print(f"   cursor sent to {last and (last[1], last[2])}, "
+              f"real link rect x={round(target['x'])}..{round(target['x']+target['width'])} "
+              f"y={round(target['y'])}..{round(target['y']+target['height'])}")
+        check("the cursor was aimed INSIDE the real 'Start study' link", inside,
+              f"point={last and (last[1], last[2])}")
+        check("it clicked once, with the real xdotool button", len(clicks) >= 1,
+              f"{clicks}")
+        check("it never aimed outside the viewport",
+              all(0 <= m[1] <= 1439 and 0 <= m[2] <= 899 for m in moves),
+              f"{[m for m in moves if not (0 <= m[1] <= 1439 and 0 <= m[2] <= 899)]}")
         close_extra_tabs()
     else:
         skip("start_dialog geometry + end to end", "fixture not captured yet")
@@ -195,16 +230,22 @@ def main():
         check(f"{state}: launch_control_present == {expect}",
               ac._launch_control_visible() is expect)
 
-    # ---- the banner is NOT a dead-slot signal, proven on the real page ---
+    # ---- the banner does not track launchability ------------------------
+    # Captured evidence, both directions:
+    #   run_20261106_124620 screenshot_03: banner PRESENT on a reservation
+    #     that was never launched and still had 'Open study in new window';
+    #   study 6aec5848 (these fixtures): banner ABSENT on a reserved study
+    #     whose Start dialog was open.
+    # So the banner says nothing about whether the slot can still be
+    # launched, in either direction. Only the DOM control does.
     for state in ("detail_reserved", "start_dialog"):
         if state not in fx:
             continue
-        meta = fx[state]["meta"]
-        if "orphan_banner" in meta:
-            check(f"{state}: real page shows the 'finish or return' banner "
-                  f"while still launchable",
-                  meta["orphan_banner"] is True,
-                  f"banner={meta.get('orphan_banner')}")
+        load(state, stub)
+        banner = fx[state]["meta"].get("orphan_banner")
+        check(f"{state}: launchable is decided by the DOM, whatever the "
+              f"banner says (banner={banner})",
+              ac._launch_control_visible() is True)
 
     print()
     passed = sum(results); total = len(results)

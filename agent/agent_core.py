@@ -3839,14 +3839,16 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 # completable study (run_20261105_181001 lost a GBP 4 eval,
                 # run_20261106_124620 a GBP 2,60 one, exactly this way).
                 #
-                # The orphan BANNER cannot carry that distinction: Prolific
-                # shows "Please either finish or return this submission" the
-                # moment a slot is reserved, so it is on screen on a fresh
-                # never-launched reservation too (screenshots of
-                # run_20261106_124620). Keying off it made fresh_unlaunched
-                # permanently False, which silently disabled the auto-launcher
-                # and routed every stuck launch to the cancel steer. The DOM
-                # launch control is the honest signal; the banner only decides
+                # The orphan BANNER cannot carry that distinction, in either
+                # direction. Captured: PRESENT on a never-launched
+                # reservation that still offered 'Open study in new window'
+                # (run_20261106_124620 screenshot_03), ABSENT on a reserved
+                # study with its Start dialog open (fixture study 6aec5848,
+                # var/fixtures/prolific/). Keying fresh_unlaunched off it made
+                # the flag permanently False on the pages it was meant to
+                # protect, which silently disabled the auto-launcher and
+                # routed every stuck launch to the cancel steer. The DOM
+                # launch control is the honest signal; the banner only says
                 # whether the slot is already held.
                 orphan_visible = _orphan_reservation_visible()
                 fresh_unlaunched = (_launch_control_visible()

@@ -411,11 +411,13 @@ def launch_control_present() -> bool:
     dialog.
 
     THIS, not Prolific's "Please either finish or return this submission"
-    banner, tells a launchable study from a dead slot. That banner appears the
-    instant a slot is reserved -- it is on screen on a study reserved seconds
-    ago and never launched (verified in run_20261106_124620) -- so reading it
-    as "orphan reservation" steered the agent to cancel a GBP 2,60 study it
-    could still have started.
+    banner, tells a launchable study from a dead slot. Captured evidence says
+    the banner tracks neither: it was PRESENT on a reservation that had never
+    been launched and still offered 'Open study in new window'
+    (run_20261106_124620 screenshot_03, where reading it as "orphan" steered
+    the agent into cancelling a GBP 2,60 study), and ABSENT on a reserved
+    study with its Start dialog open (fixture study 6aec5848). Only the
+    presence of a control says whether there is still a way in.
     """
     def _p(b):
         page = b.active_page()
