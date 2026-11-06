@@ -321,6 +321,155 @@ def reload():
     return run(lambda b: b.active_page().reload(wait_until="domcontentloaded", timeout=30000))
 
 
+# Stable data-testid selectors captured from Prolific's live reserved-study
+# page + its "Start study" launch dialog (ds-dialog-panel). These are
+# first-party Prolific UI, identical across every external study, so the launch
+# is deterministic and does not depend on the vision model aiming a pixel click
+# at a small link that sits just above "Report study" and whose confirm control
+# can fall below the dialog fold. The CLICKS themselves are NOT done here: the
+# launcher in agent_core drives them with the same humanised xdotool cursor the
+# vision path uses, because CDP Input.dispatch* / DOM .click() are flagged by
+# Prolific's behavioural fraud scoring (see the input backend note in
+# agent_core). These helpers only READ the DOM to ground those real clicks.
+_SEL_RESERVE = '[data-testid="reserve"]'            # "Take part in this study"
+_SEL_OPEN_DIALOG = '[data-testid="open-study-in-new-window-button"]'
+_SEL_DIALOG = '[data-testid="start-study-dialog"]'
+_SEL_START = '[data-testid="dialog-start-study"]'   # <a href=<survey> target=_blank>
+
+
+def front() -> str:
+    """Bring the tracked active page to the foreground and return its URL.
+
+    scrot (the model's screenshot) and xdotool (its clicks) act on whatever
+    tab Chromium has in front, while every URL guard and DOM read uses this
+    bridge's `active_page()`. In this kiosk Playwright cannot tell which tab is
+    actually front (all report visible+focused), so without re-asserting it the
+    two can drift apart (measured: a survey opened in a new tab, the screenshot
+    showed one page while the guards read another, and the model cancelled the
+    wrong study). Called before every screenshot to pin front == active."""
+    def _f(b):
+        try:
+            b.active_page().bring_to_front()
+        except Exception:
+            pass
+        try:
+            return b.active_page().url
+        except Exception:
+            return ""
+    return run(_f)
+
+
+def has_selector(selector: str) -> bool:
+    return bool(run(lambda b: b.active_page().query_selector(selector) is not None))
+
+
+def wait_selector(selector: str, timeout_ms: int = 6000) -> bool:
+    def _w(b):
+        try:
+            b.active_page().wait_for_selector(selector, timeout=timeout_ms)
+            return True
+        except Exception:
+            return False
+    return bool(run(_w, timeout=timeout_ms / 1000 + 10))
+
+
+def element_box(selector: str, scroll: bool = True, timeout_ms: int = 4000):
+    """Viewport box {x,y,width,height} of the first match (scrolled into view),
+    or None. The kiosk browser fills the screen with no toolbar, so viewport
+    coordinates equal screenshot/xdotool screen coordinates."""
+    def _b(b):
+        el = b.active_page().query_selector(selector)
+        if el is None:
+            return None
+        if scroll:
+            try:
+                el.scroll_into_view_if_needed(timeout=timeout_ms)
+            except Exception:
+                pass
+        try:
+            return el.bounding_box()
+        except Exception:
+            return None
+    return run(_b, timeout=timeout_ms / 1000 + 10)
+
+
+def unchecked_checkbox_boxes(dialog_sel: str) -> list:
+    """For each UNCHECKED checkbox in the dialog, the viewport box of its
+    clickable target (the enclosing <label> if any, else the input itself),
+    scrolled into view. Empty list if the dialog or its boxes are gone."""
+    def _c(b):
+        page = b.active_page()
+        dlg = page.query_selector(dialog_sel)
+        if dlg is None:
+            return []
+        out = []
+        for inp in dlg.query_selector_all('input[type="checkbox"]'):
+            try:
+                if inp.is_checked():
+                    continue
+            except Exception:
+                pass
+            target = inp
+            try:
+                lbl = inp.evaluate_handle("el => el.closest('label')").as_element()
+                if lbl is not None:
+                    target = lbl
+            except Exception:
+                pass
+            try:
+                target.scroll_into_view_if_needed(timeout=2000)
+            except Exception:
+                pass
+            try:
+                box = target.bounding_box()
+            except Exception:
+                box = None
+            if box:
+                out.append(box)
+        return out
+    return run(_c, timeout=20)
+
+
+def page_ids() -> list:
+    """Identities of the currently-open pages, to detect ones opened later."""
+    return run(lambda b: [id(p) for p in b.pages()])
+
+
+def follow_new_tab(before_ids: list, timeout_ms: int = 9000):
+    """Poll for a page opened AFTER before_ids (a target=_blank survey tab),
+    make it the active+front page once it has a real URL, and return that URL.
+    None if no new tab appears in time."""
+    def _f(b):
+        before = set(before_ids)
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline and not cancel.is_cancelled():
+            for p in b.pages():
+                if id(p) in before:
+                    continue
+                try:
+                    p.wait_for_load_state("domcontentloaded", timeout=2500)
+                except Exception:
+                    pass
+                try:
+                    u = p.url
+                except Exception:
+                    u = ""
+                if u and u != "about:blank":
+                    b._active = p
+                    b._known = b.pages()
+                    try:
+                        p.bring_to_front()
+                    except Exception:
+                        pass
+                    return u
+            try:
+                b.active_page().wait_for_timeout(200)
+            except Exception:
+                time.sleep(0.2)
+        return None
+    return run(_f, timeout=timeout_ms / 1000 + 20)
+
+
 def switch_tab(delta: int) -> str:
     """Ctrl+Tab (delta=+1) / Ctrl+Shift+Tab (delta=-1), done through
     Playwright so the on-screen tab and the tracked active tab match."""

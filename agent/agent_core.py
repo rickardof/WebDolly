@@ -1309,6 +1309,126 @@ def _orphan_reservation_visible() -> bool:
         return False
 
 
+def _reservation_nudge(fresh_unlaunched: bool, detail_id: str) -> str:
+    """One-shot guidance when the agent has lingered on a reserved
+    /studies/<id> detail page without progress (see the reservation-loop
+    detector). Branches on launch state so a study that is merely *not yet
+    launched* is never steered toward abandonment:
+
+    - fresh_unlaunched: the slot was reserved THIS run and the external survey
+      was never opened (no orphan banner, never left prolific.com). The model
+      is still working through Prolific's launch flow, whose 'Start study'
+      dialog hides its confirm button below the fold -- push the LAUNCH and
+      forbid cancelling. Abandoning here returns a completable study
+      (run_20261105_181001 lost a GBP 4 eval exactly this way: it opened the
+      'Start study' dialog, could not reach the below-the-fold confirm button,
+      and cancelled).
+    - otherwise: an orphan/held slot, or a survey already attempted with no
+      code -- the legitimate exits are 'I'm finished' (with a code) or 'Cancel
+      participation'.
+    """
+    if fresh_unlaunched:
+        return (
+            "LAUNCH THIS STUDY -- do NOT cancel it. You reserved "
+            f"/studies/{detail_id} and have NOT opened the survey yet (you "
+            "never left prolific.com this run), so the study is completable "
+            "and simply not started.\n"
+            "To start it: click the button that opens the study -- 'Open study "
+            "in new window' (or 'Take part' / 'Start study'). A 'Start study' "
+            "dialog then appears with a confidentiality checkbox and a confirm "
+            "button. That confirm button is at the BOTTOM of the dialog and is "
+            "often BELOW the visible area: SCROLL DOWN INSIDE the dialog to "
+            "reach it, then click it. Do NOT click outside the dialog (that "
+            "only closes it) and do NOT click 'Report study'. Click 'Cancel "
+            "participation' ONLY if the task is genuinely impossible (it needs "
+            "a microphone or camera, or a CAPTCHA blocks you)."
+        )
+    return (
+        f"RESERVATION LOOP on /studies/{detail_id}: you have been stuck on "
+        "this reserved slot without progress. Prolific will keep redirecting "
+        "you back to this detail page as long as the slot is held. The ONLY "
+        "legitimate exits are: (a) 'I'm finished' AFTER you actually completed "
+        "the external survey (with its completion code to paste), or (b) "
+        "'Cancel participation' (red outline button on the right panel) -> "
+        "confirm 'Yes, cancel participation' in the modal. Do NOT press back / "
+        "forward / address bar / Ctrl+Tab / click on the top Prolific nav tabs "
+        "again -- those cannot release the slot. Pick one of the two panel "
+        "buttons now."
+    )
+
+
+def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> None:
+    """Human-like click at a random point inside a viewport box (as returned by
+    pw_bridge.element_box): dwell, Bezier cursor move with aim jitter, click.
+    Uses the same real xdotool cursor as the vision path -- never CDP
+    Input.dispatch* or DOM .click(), which behavioural fraud scoring flags."""
+    x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+    y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+    ax = round(x + random.gauss(0, 1.4))
+    ay = round(y + random.gauss(0, 1.4))
+    cancel.sleep(random.uniform(*pre))
+    _human_move(ax, ay)
+    cancel.sleep(random.uniform(*settle))
+    docker_exec("xdotool", "click", "1")
+
+
+def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
+    """Launch the external survey of a Prolific study the model has opened,
+    with humanised xdotool clicks grounded on stable data-testid selectors:
+    (optionally) 'Take part in this study' to reserve -> 'Open study in new
+    window' -> tick the dialog checkbox(es) -> 'Start study', then follow the
+    survey tab. The model chose the study; this only performs the mechanical
+    launch it keeps fumbling (the confirm link sits below the dialog fold).
+
+    Returns {'status': ...}. Never raises (except on cancellation). status:
+      launched           -- survey tab is open and now the active/front page
+      no-reserve-control -- un-reserved but no 'Take part' button found
+      no-launch-control  -- reserved but no 'Open study in new window'
+      no-dialog          -- 'Open' clicked but the Start dialog never appeared
+      no-start-control   -- dialog open but no 'Start study' link
+      clicked-no-tab     -- Start clicked but no survey tab appeared
+      error              -- unexpected failure (detail included)
+    """
+    try:
+        pw_bridge.front()   # pin the study tab to the foreground for xdotool
+        # 1. Reserve, if still on the un-reserved detail page.
+        if (include_take_part
+                and not pw_bridge.has_selector(pw_bridge._SEL_OPEN_DIALOG)
+                and not pw_bridge.has_selector(pw_bridge._SEL_DIALOG)):
+            rbox = pw_bridge.element_box(pw_bridge._SEL_RESERVE)
+            if rbox is None:
+                return {"status": "no-reserve-control"}
+            _humanized_click_box(rbox)
+            pw_bridge.wait_selector(pw_bridge._SEL_OPEN_DIALOG, 9000)
+        # 2. Open the 'Start study' dialog.
+        if not pw_bridge.has_selector(pw_bridge._SEL_DIALOG):
+            obox = pw_bridge.element_box(pw_bridge._SEL_OPEN_DIALOG)
+            if obox is None:
+                return {"status": "no-launch-control"}
+            _humanized_click_box(obox)
+            if not pw_bridge.wait_selector(pw_bridge._SEL_DIALOG, 6000):
+                return {"status": "no-dialog"}
+        # 3. Tick every unchecked checkbox (device + any confidentiality one);
+        #    the 'Start study' link stays disabled until they are ticked.
+        for cbox in pw_bridge.unchecked_checkbox_boxes(pw_bridge._SEL_DIALOG):
+            _humanized_click_box(cbox, pre=(0.2, 0.5))
+            cancel.sleep(random.uniform(0.15, 0.4))
+        # 4. Click 'Start study' and follow the survey tab it opens.
+        before = pw_bridge.page_ids()
+        sbox = pw_bridge.element_box(pw_bridge._SEL_START)
+        if sbox is None:
+            return {"status": "no-start-control"}
+        _humanized_click_box(sbox)
+        surl = pw_bridge.follow_new_tab(before, 9000)
+        if surl:
+            return {"status": "launched", "survey_url": surl}
+        return {"status": "clicked-no-tab"}
+    except cancel.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "detail": repr(e)}
+
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -2794,6 +2914,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # than the abort-attempt one because 'stuck' already means no useful
         # browser transition is happening.
         _reserved_stuck_count: int = 0
+        # One-shot per reservation. Gates BOTH the deterministic launcher (when
+        # the agent is stuck on a fresh, un-launched reservation the harness
+        # opens the external survey itself via pw_bridge.launch_reserved_study,
+        # using stable data-testid selectors, instead of leaving a fragile
+        # pixel-click + below-the-fold confirm to the vision model) AND the
+        # text nudge that is its fallback.
         _reserved_loop_nudged: bool = False
         # Orphan-reservation guard: see _orphan_reservation_visible. On the
         # reserved detail page the model has been seen to hallucinate a
@@ -3226,6 +3352,15 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         cancel.sleep(0.05)
                     except Exception:
                         pass
+            # Pin the tracked active tab to the foreground right before scrot,
+            # so what the model SEES (screenshot) and CLICKS (xdotool) is the
+            # same tab the URL guards and DOM reads use (active_page). Without
+            # this they drift after a survey opens in a new tab, and the model
+            # has been seen acting on, and cancelling, the wrong study.
+            try:
+                pw_bridge.front()
+            except Exception:
+                pass
             img = take_screenshot(run_dir, step)
             data_url = encode_for_model(img)
             # Fingerprint the page NOW so step N+1 can tell whether this
@@ -3498,9 +3633,21 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _reserved_loop_nudged = False
                     _orphan_nudged = False
 
+                # A reservation the agent made THIS run and has NOT launched --
+                # never left prolific.com (_saw_external_this_study is False)
+                # and no "finish or return this submission" orphan banner -- is
+                # still mid-launch, not a dead slot. Its loop nudge (B) must
+                # push the LAUNCH, never 'Cancel participation': Prolific's
+                # 'Start study' dialog hides its confirm button below the fold,
+                # so abandoning here returns a completable study (how
+                # run_20261105_181001 lost a GBP 4 eval). Read the banner once
+                # and reuse it for both nudges below.
+                orphan_visible = _orphan_reservation_visible()
+                fresh_unlaunched = not _saw_external_this_study and not orphan_visible
+
                 # (A) Orphan reservation one-shot informational nudge.
                 if not pending_user_response and not _orphan_nudged:
-                    if _orphan_reservation_visible():
+                    if orphan_visible:
                         _orphan_nudged = True
                         pending_user_response = (
                             "RESERVED-SLOT STATE on this Prolific study: the "
@@ -3559,25 +3706,45 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         and urlparse(_prev_here).path == urlparse(here).path):
                     _reserved_stuck_count += 1
 
+                # A fresh un-launched reservation gets a LOWER stuck threshold:
+                # the harness steps in to launch the survey before the vision
+                # model fumbles the dialog and drifts toward 'Cancel'
+                # (run_20261105_181001 clicked Cancel at step 12; stuck hit 4 at
+                # step 8). An orphan/held slot keeps the original 6.
+                stuck_limit = 4 if fresh_unlaunched else 6
                 if (not _reserved_loop_nudged
                         and not pending_user_response
                         and (_reserved_loop_count >= 2
-                             or _reserved_stuck_count >= 6)):
+                             or _reserved_stuck_count >= stuck_limit)):
                     _reserved_loop_nudged = True
-                    pending_user_response = (
-                        "RESERVATION LOOP on /studies/{id}: you have been "
-                        "stuck on this reserved slot without progress. Prolific "
-                        "will keep redirecting you back to this detail page as "
-                        "long as the slot is held. The ONLY legitimate exits "
-                        "are: (a) 'I'm finished' AFTER you actually completed "
-                        "the external survey (with its completion code to "
-                        "paste), or (b) 'Cancel participation' (red outline "
-                        "button on the right panel) -> confirm 'Yes, cancel "
-                        "participation' in the modal. Do NOT press back / "
-                        "forward / address bar / Ctrl+Tab / click on the top "
-                        "Prolific nav tabs again -- those cannot release the "
-                        "slot. Pick one of the two panel buttons now."
-                    ).format(id=detail_id)
+                    launched = False
+                    if fresh_unlaunched:
+                        # Deterministic humanised launch grounded on stable
+                        # data-testid selectors: (Take part ->) Open study in
+                        # new window -> tick checkbox(es) -> Start study, then
+                        # follow the survey tab. Real xdotool cursor, not the
+                        # fragile pixel-click + below-the-fold confirm that lost
+                        # the study.
+                        res = _humanized_launch_reserved_study(include_take_part=True)
+                        status = (res or {}).get("status")
+                        launched = status == "launched"
+                        _live({"type": "notice",
+                               "text": f"[launch] humanised launch: {status}"})
+                        if launched:
+                            _survey_url = (res or {}).get("survey_url") or _survey_url
+                            pending_user_response = (
+                                "The study's external survey has just been opened "
+                                "for you in the survey window (the 'Start study' "
+                                "dialog was confirmed automatically). You are now "
+                                "IN the survey: read the current page and answer "
+                                "the questions/trials, then proceed. Do NOT go back "
+                                "to the Prolific tab to cancel.")
+                            _notify_telegram("🚀 Survey aperta automaticamente\n" + str(_survey_url))
+                    if not launched:
+                        # Launch not possible (still un-reserved, control
+                        # missing, or click blocked): fall back to guidance.
+                        pending_user_response = _reservation_nudge(
+                            fresh_unlaunched, detail_id)
             else:
                 # Off the detail page: counters reset.
                 _reserved_loop_url = ""
