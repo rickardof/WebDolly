@@ -393,10 +393,68 @@ def element_box(selector: str, scroll: bool = True, timeout_ms: int = 4000):
     return run(_b, timeout=timeout_ms / 1000 + 10)
 
 
-def unchecked_checkbox_boxes(dialog_sel: str) -> list:
+def viewport_size():
+    """{'width','height'} of the active page's viewport, or None if unknown.
+    Used to reject a click whose target sits outside the visible area."""
+    def _v(b):
+        try:
+            return b.active_page().evaluate(
+                "() => ({width: window.innerWidth, height: window.innerHeight})")
+        except Exception:
+            return None
+    return run(_v)
+
+
+def launch_control_present() -> bool:
+    """True when the page still offers a way INTO the study: 'Take part in
+    this study', 'Open study in new window', or an already-open 'Start study'
+    dialog.
+
+    THIS, not Prolific's "Please either finish or return this submission"
+    banner, tells a launchable study from a dead slot. That banner appears the
+    instant a slot is reserved -- it is on screen on a study reserved seconds
+    ago and never launched (verified in run_20261106_124620) -- so reading it
+    as "orphan reservation" steered the agent to cancel a GBP 2,60 study it
+    could still have started.
+    """
+    def _p(b):
+        page = b.active_page()
+        for sel in (_SEL_DIALOG, _SEL_OPEN_DIALOG, _SEL_RESERVE):
+            el = page.query_selector(sel)
+            if el is None:
+                continue
+            try:
+                if el.is_visible():
+                    return True
+            except Exception:
+                return True
+        return False
+    return bool(run(_p))
+
+
+def focus_element(selector: str) -> bool:
+    """Give DOM focus to the first match so a REAL xdotool keystroke can
+    activate it. Only the focus is programmatic; the activating Enter is a
+    genuine keyboard event (isTrusted), unlike a dispatched click. Last-resort
+    path for a control that no amount of scrolling brings into view."""
+    def _f(b):
+        el = b.active_page().query_selector(selector)
+        if el is None:
+            return False
+        try:
+            el.focus()
+            return True
+        except Exception:
+            return False
+    return bool(run(_f))
+
+
+def unchecked_checkbox_boxes(dialog_sel: str, scroll: bool = True) -> list:
     """For each UNCHECKED checkbox in the dialog, the viewport box of its
-    clickable target (the enclosing <label> if any, else the input itself),
-    scrolled into view. Empty list if the dialog or its boxes are gone."""
+    clickable target (the enclosing <label> if any, else the input itself).
+    Empty list if the dialog or its boxes are gone. With scroll=False the
+    boxes are read as-is, leaving the caller to bring them into view on the
+    real wheel path instead of via JS scrollIntoView."""
     def _c(b):
         page = b.active_page()
         dlg = page.query_selector(dialog_sel)
@@ -416,10 +474,11 @@ def unchecked_checkbox_boxes(dialog_sel: str) -> list:
                     target = lbl
             except Exception:
                 pass
-            try:
-                target.scroll_into_view_if_needed(timeout=2000)
-            except Exception:
-                pass
+            if scroll:
+                try:
+                    target.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
             try:
                 box = target.bounding_box()
             except Exception:

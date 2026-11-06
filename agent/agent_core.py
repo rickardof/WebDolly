@@ -1337,8 +1337,10 @@ def _reservation_nudge(fresh_unlaunched: bool, detail_id: str) -> str:
             "in new window' (or 'Take part' / 'Start study'). A 'Start study' "
             "dialog then appears with a confidentiality checkbox and a confirm "
             "button. That confirm button is at the BOTTOM of the dialog and is "
-            "often BELOW the visible area: SCROLL DOWN INSIDE the dialog to "
-            "reach it, then click it. Do NOT click outside the dialog (that "
+            "often BELOW the visible area: SCROLL DOWN to bring it on screen "
+            "(the dialog moves with the page), then click it. If scrolling "
+            "does not move it at all, press Tab until the 'Start study' button "
+            "is focused and press Enter. Do NOT click outside the dialog (that "
             "only closes it) and do NOT click 'Report study'. Click 'Cancel "
             "participation' ONLY if the task is genuinely impossible (it needs "
             "a microphone or camera, or a CAPTCHA blocks you)."
@@ -1357,11 +1359,79 @@ def _reservation_nudge(fresh_unlaunched: bool, detail_id: str) -> str:
     )
 
 
-def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> None:
+def _launch_control_visible() -> bool:
+    """Is a way INTO the study still on the page? See
+    pw_bridge.launch_control_present. Safe-false so a bridge hiccup never
+    turns into a cancellation."""
+    try:
+        return bool(pw_bridge.launch_control_present())
+    except Exception:
+        return False
+
+
+def _viewport_wh() -> tuple[int, int]:
+    try:
+        vp = pw_bridge.viewport_size() or {}
+        return int(vp.get("width") or 0), int(vp.get("height") or 0)
+    except Exception:
+        return 0, 0
+
+
+def _box_on_screen(box, vw: int, vh: int) -> bool:
+    """Is the whole box inside the viewport? Unknown viewport => assume yes,
+    so a failed measurement never blocks an otherwise good click."""
+    if not box:
+        return False
+    if vw <= 0 or vh <= 0:
+        return True
+    return (box["x"] >= 0 and box["y"] >= 0
+            and box["x"] + box["width"] <= vw
+            and box["y"] + box["height"] <= vh)
+
+
+def _scroll_box_into_view(getter, max_rounds: int = 4):
+    """Box from `getter()`, wheel-scrolled into view with REAL xdotool ticks if
+    it starts off-screen. None if it cannot be brought in.
+
+    Prolific's 'Start study' dialog is taller than this 900px kiosk viewport,
+    so its confirm link routinely sits below the fold and its raw bounding box
+    points off-screen; clicking that blind is how run_20261106_124620 fumbled
+    a GBP 2,60 study. Scrolling uses the wheel, not JS scrollIntoView, to stay
+    on the same input path as the vision loop."""
+    vw, vh = _viewport_wh()
+    box = getter()
+    for _ in range(max_rounds):
+        if box is None:
+            return None
+        if _box_on_screen(box, vw, vh):
+            return box
+        down = box["y"] >= max(1, vh) / 2
+        ax = max(1, min((vw or 1440) - 2, int(box["x"] + box["width"] / 2)))
+        ay = max(1, min((vh or 900) - 2, int((vh or 900) / 2)))
+        _human_move(ax, ay)
+        _wheel_scroll(down, 2)
+        cancel.sleep(random.uniform(0.2, 0.45))
+        box = getter()
+    return box if _box_on_screen(box, _viewport_wh()[0], _viewport_wh()[1]) else None
+
+
+def _box_into_view(selector: str, max_rounds: int = 4):
+    return _scroll_box_into_view(
+        lambda: pw_bridge.element_box(selector, scroll=False), max_rounds)
+
+
+def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> bool:
     """Human-like click at a random point inside a viewport box (as returned by
     pw_bridge.element_box): dwell, Bezier cursor move with aim jitter, click.
     Uses the same real xdotool cursor as the vision path -- never CDP
-    Input.dispatch* or DOM .click(), which behavioural fraud scoring flags."""
+    Input.dispatch* or DOM .click(), which behavioural fraud scoring flags.
+
+    Returns False without clicking when the box lies outside the viewport: an
+    off-screen bounding box would send the cursor to a point the user cannot
+    see, which lands on whatever is at the clamped screen edge."""
+    vw, vh = _viewport_wh()
+    if not _box_on_screen(box, vw, vh):
+        return False
     x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
     y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
     ax = round(x + random.gauss(0, 1.4))
@@ -1370,6 +1440,7 @@ def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> None:
     _human_move(ax, ay)
     cancel.sleep(random.uniform(*settle))
     docker_exec("xdotool", "click", "1")
+    return True
 
 
 def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
@@ -1388,6 +1459,12 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
       no-start-control   -- dialog open but no 'Start study' link
       clicked-no-tab     -- Start clicked but no survey tab appeared
       error              -- unexpected failure (detail included)
+
+    Every control is wheel-scrolled into view before it is clicked
+    (_box_into_view); the dialog is taller than the kiosk viewport, so the
+    confirm link is usually below the fold. When even scrolling cannot reveal
+    it (the page behind is already at its scroll end, as in
+    run_20261106_124620), the link is focused and activated with a real Enter.
     """
     try:
         pw_bridge.front()   # pin the study tab to the foreground for xdotool
@@ -1395,30 +1472,45 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
         if (include_take_part
                 and not pw_bridge.has_selector(pw_bridge._SEL_OPEN_DIALOG)
                 and not pw_bridge.has_selector(pw_bridge._SEL_DIALOG)):
-            rbox = pw_bridge.element_box(pw_bridge._SEL_RESERVE)
-            if rbox is None:
+            rbox = _box_into_view(pw_bridge._SEL_RESERVE)
+            if rbox is None or not _humanized_click_box(rbox):
                 return {"status": "no-reserve-control"}
-            _humanized_click_box(rbox)
             pw_bridge.wait_selector(pw_bridge._SEL_OPEN_DIALOG, 9000)
         # 2. Open the 'Start study' dialog.
         if not pw_bridge.has_selector(pw_bridge._SEL_DIALOG):
-            obox = pw_bridge.element_box(pw_bridge._SEL_OPEN_DIALOG)
-            if obox is None:
+            obox = _box_into_view(pw_bridge._SEL_OPEN_DIALOG)
+            if obox is None or not _humanized_click_box(obox):
                 return {"status": "no-launch-control"}
-            _humanized_click_box(obox)
             if not pw_bridge.wait_selector(pw_bridge._SEL_DIALOG, 6000):
                 return {"status": "no-dialog"}
         # 3. Tick every unchecked checkbox (device + any confidentiality one);
-        #    the 'Start study' link stays disabled until they are ticked.
-        for cbox in pw_bridge.unchecked_checkbox_boxes(pw_bridge._SEL_DIALOG):
-            _humanized_click_box(cbox, pre=(0.2, 0.5))
+        #    the 'Start study' link stays disabled until they are ticked. Taken
+        #    one at a time and re-queried, because ticking one can reflow the
+        #    dialog and invalidate the boxes measured for the others.
+        def _first_unchecked():
+            boxes = pw_bridge.unchecked_checkbox_boxes(
+                pw_bridge._SEL_DIALOG, scroll=False)
+            return boxes[0] if boxes else None
+
+        for _ in range(6):
+            if _first_unchecked() is None:
+                break
+            cbox = _scroll_box_into_view(_first_unchecked)
+            if cbox is None or not _humanized_click_box(cbox, pre=(0.2, 0.5)):
+                break
             cancel.sleep(random.uniform(0.15, 0.4))
-        # 4. Click 'Start study' and follow the survey tab it opens.
+        # 4. Activate 'Start study' and follow the survey tab it opens.
         before = pw_bridge.page_ids()
-        sbox = pw_bridge.element_box(pw_bridge._SEL_START)
-        if sbox is None:
-            return {"status": "no-start-control"}
-        _humanized_click_box(sbox)
+        sbox = _box_into_view(pw_bridge._SEL_START)
+        clicked = bool(sbox) and _humanized_click_box(sbox)
+        if not clicked:
+            # Nothing scrolls and the confirm link stays off-screen. Focus it
+            # in the DOM and press Enter with a REAL xdotool keystroke: the
+            # activation event is genuine, only the focus is programmatic.
+            if not pw_bridge.focus_element(pw_bridge._SEL_START):
+                return {"status": "no-start-control"}
+            cancel.sleep(random.uniform(0.2, 0.5))
+            docker_exec("xdotool", "key", "--clearmodifiers", "Return")
         surl = pw_bridge.follow_new_tab(before, 9000)
         if surl:
             return {"status": "launched", "survey_url": surl}
@@ -3644,21 +3736,38 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _reserved_loop_nudged = False
                     _orphan_nudged = False
 
-                # A reservation the agent made THIS run and has NOT launched --
-                # never left prolific.com (_saw_external_this_study is False)
-                # and no "finish or return this submission" orphan banner -- is
-                # still mid-launch, not a dead slot. Its loop nudge (B) must
-                # push the LAUNCH, never 'Cancel participation': Prolific's
-                # 'Start study' dialog hides its confirm button below the fold,
-                # so abandoning here returns a completable study (how
-                # run_20261105_181001 lost a GBP 4 eval). Read the banner once
-                # and reuse it for both nudges below.
+                # Launch state of this reserved slot. A study whose survey was
+                # never opened this run (_saw_external_this_study False) and
+                # that STILL OFFERS a way in ('Take part', 'Open study in new
+                # window', or an open 'Start study' dialog) is mid-launch, not
+                # a dead slot: both nudges must push the LAUNCH, never 'Cancel
+                # participation', because Prolific's dialog hides its confirm
+                # link below the fold and abandoning there returns a
+                # completable study (run_20261105_181001 lost a GBP 4 eval,
+                # run_20261106_124620 a GBP 2,60 one, exactly this way).
+                #
+                # The orphan BANNER cannot carry that distinction: Prolific
+                # shows "Please either finish or return this submission" the
+                # moment a slot is reserved, so it is on screen on a fresh
+                # never-launched reservation too (screenshots of
+                # run_20261106_124620). Keying off it made fresh_unlaunched
+                # permanently False, which silently disabled the auto-launcher
+                # and routed every stuck launch to the cancel steer. The DOM
+                # launch control is the honest signal; the banner only decides
+                # whether the slot is already held.
                 orphan_visible = _orphan_reservation_visible()
-                fresh_unlaunched = not _saw_external_this_study and not orphan_visible
+                fresh_unlaunched = (_launch_control_visible()
+                                    and not _saw_external_this_study)
 
-                # (A) Orphan reservation one-shot informational nudge.
+                # (A) Held-slot one-shot informational nudge, branched on the
+                #     same launch state so a held-but-launchable study is told
+                #     to start, not to cancel.
                 if not pending_user_response and not _orphan_nudged:
-                    if orphan_visible:
+                    if orphan_visible and fresh_unlaunched:
+                        _orphan_nudged = True
+                        pending_user_response = _reservation_nudge(
+                            True, detail_id)
+                    elif orphan_visible:
                         _orphan_nudged = True
                         pending_user_response = (
                             "RESERVED-SLOT STATE on this Prolific study: the "
