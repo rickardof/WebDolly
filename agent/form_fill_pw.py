@@ -762,10 +762,20 @@ _PID_PARAMS = ("prolific_pid", "pid", "participant_id", "participantid", "prolif
 
 
 def _identity_kind(f: dict):
-    if f.get("type") not in ("text",):
+    # Both free-text widgets count. Qualtrics renders a single-line text entry
+    # as <input> (extracted as "text") but a multi-line one as <textarea>
+    # (extracted as "textarea"), and researchers use either for the Prolific
+    # ID. Accepting only "text" meant a textarea ID field was never recognised
+    # as identity, so it fell through to the model, got an INVENTED id, and
+    # batch-fill auto-advanced the page: measured in run_20261106_082719,
+    # where the survey recorded a bad id, showed no completion code, and the
+    # study had to be closed NOCODE. The rest of this module already treats
+    # ("text", "textarea") as the same free-text kind.
+    if f.get("type") not in ("text", "textarea"):
         return None
     hay = f"{f.get('text','')} {f.get('id','')}".lower()
-    if _re.search(r"prolific\s*[-_]?\s*(id|pid)|\bpid\b|participant\s*[-_]?\s*id", hay):
+    if _re.search(r"prolific\s*[-_]?\s*(id|pid|identifier)|\bpid\b"
+                  r"|participant\s*[-_]?\s*id", hay):
         return "prolific_id"
     if _re.search(r"e-?mail", hay):
         return "email"
