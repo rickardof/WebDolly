@@ -3324,7 +3324,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # dwell block below. _prev_here must be updated at the END of the
             # step, not here, or the check never sees a different value.
 
-            if batch_fill and not here_guarded and not _user_inject_pending:
+            # Gate on the LAUNCH SURFACE, not on the host. Batch-fill must
+            # never touch Prolific's own chrome (the studies list, a detail
+            # page, submissions/account) -- but a Prolific-HOSTED task
+            # (/data-collection-tool/...) is a running questionnaire like any
+            # other, and `here_guarded` locked it out of batch-fill purely
+            # because it shares the domain. run_20261106_154221 answered a
+            # 3-minute dropdown questionnaire with 139 separate vision clicks
+            # at 8.3s each, took 22m40s against Prolific's ~15m window, and
+            # the submission was auto-returned. Same confusion the wander
+            # guard had in 1ffb26d.
+            if batch_fill and not here_on_launch and not _user_inject_pending:
                 batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
                     task, attempted_form_signatures, survey_memory, timer=study_timer)
                 transcript.write(json.dumps(
