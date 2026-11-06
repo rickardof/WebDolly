@@ -1389,35 +1389,55 @@ def _box_on_screen(box, vw: int, vh: int) -> bool:
             and box["y"] + box["height"] <= vh)
 
 
-def _scroll_box_into_view(getter, max_rounds: int = 4):
+_SCROLL_TICKS_PER_ROUND = 3
+_SCROLL_TICK_BUDGET = 60
+
+
+def _scroll_box_into_view(getter, max_ticks: int = _SCROLL_TICK_BUDGET):
     """Box from `getter()`, wheel-scrolled into view with REAL xdotool ticks if
     it starts off-screen. None if it cannot be brought in.
 
     Prolific's 'Start study' dialog is taller than this 900px kiosk viewport,
-    so its confirm link routinely sits below the fold and its raw bounding box
-    points off-screen; clicking that blind is how run_20261106_124620 fumbled
-    a GBP 2,60 study. Scrolling uses the wheel, not JS scrollIntoView, to stay
-    on the same input path as the vision loop."""
+    so its confirm link sits below the fold. It DOES scroll -- but barely: in
+    run_20261106_124620 four wheel ticks moved it 36px (measured by diffing
+    that run's screenshot_06 against screenshot_07), so a fixed handful of
+    ticks falls hundreds of pixels short, which is why the model gave up and
+    cancelled a GBP 2,60 study. Hence progress-driven rather than round-
+    capped: keep scrolling while the box is still moving, stop after two
+    consecutive rounds that move it nothing (the caller's keyboard fallback
+    then takes over), and bound the total ticks.
+
+    The wheel, not JS scrollIntoView, so this stays on the same input path as
+    the vision loop."""
     vw, vh = _viewport_wh()
     box = getter()
-    for _ in range(max_rounds):
-        if box is None:
-            return None
+    spent = 0
+    stalled = 0
+    while box is not None and spent < max_ticks:
         if _box_on_screen(box, vw, vh):
             return box
         down = box["y"] >= max(1, vh) / 2
         ax = max(1, min((vw or 1440) - 2, int(box["x"] + box["width"] / 2)))
         ay = max(1, min((vh or 900) - 2, int((vh or 900) / 2)))
         _human_move(ax, ay)
-        _wheel_scroll(down, 2)
-        cancel.sleep(random.uniform(0.2, 0.45))
-        box = getter()
-    return box if _box_on_screen(box, _viewport_wh()[0], _viewport_wh()[1]) else None
+        _wheel_scroll(down, _SCROLL_TICKS_PER_ROUND)
+        spent += _SCROLL_TICKS_PER_ROUND
+        cancel.sleep(random.uniform(0.15, 0.35))
+        nxt = getter()
+        if nxt is None:
+            return None
+        # Moving at all (however little) means scrolling still has somewhere
+        # to go; two dead rounds mean it has not.
+        stalled = 0 if abs(nxt["y"] - box["y"]) >= 1 else stalled + 1
+        box = nxt
+        if stalled >= 2:
+            break
+    return box if _box_on_screen(box, vw, vh) else None
 
 
-def _box_into_view(selector: str, max_rounds: int = 4):
+def _box_into_view(selector: str, max_ticks: int = _SCROLL_TICK_BUDGET):
     return _scroll_box_into_view(
-        lambda: pw_bridge.element_box(selector, scroll=False), max_rounds)
+        lambda: pw_bridge.element_box(selector, scroll=False), max_ticks)
 
 
 def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> bool:
