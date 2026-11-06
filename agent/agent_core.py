@@ -34,7 +34,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse, urlunparse
 import urllib.request
 
 from PIL import Image
@@ -1004,6 +1004,42 @@ def is_forbidden_url(url: str) -> bool:
         return _on_guarded_site(url) and bool(_FORBIDDEN_PATH.match(urlparse(url).path or ""))
     except Exception:
         return False
+
+
+# The agent's workspace is the APP host. Other hosts on the same guarded
+# domain -- www.prolific.com and its marketing pages -- are a different site
+# with no studies on it, yet every guard here treats them as "on Prolific"
+# because they share the domain. Wandering onto one burns a whole cycle: in
+# run_20261106_142347 the model typed www instead of app at step 1, landed on
+# /ai-task-builder, and spent 23 steps there and on /login before finding its
+# way back. Learnt from start_url at run start, so a different deployment
+# does not need a code change.
+_APP_HOST = (os.environ.get("FARA_APP_HOST") or "app.prolific.com").lower()
+
+
+def _learn_app_host(url: str) -> None:
+    global _APP_HOST
+    host = (urlparse(url or "").hostname or "").lower()
+    if host and _on_guarded_site(url):
+        _APP_HOST = host
+
+
+def _off_app_host(url: str) -> bool:
+    """On the guarded domain but NOT on the app host (the marketing site)."""
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+        return bool(host) and _on_guarded_site(url) and host != _APP_HOST
+    except Exception:
+        return False
+
+
+def _to_app_host(url: str) -> str:
+    """Same path and query, moved onto the app host."""
+    try:
+        p = urlparse(url)
+        return urlunparse(p._replace(netloc=_APP_HOST))
+    except Exception:
+        return url
 
 
 _LIST_PATH = re.compile(r"^/studies/?$", re.IGNORECASE)
@@ -2557,6 +2593,15 @@ def dispatch_action(action_type: str, args: dict) -> str:
         if is_forbidden_url(target):
             return ("visit_url REFUSED: that page (About you / logout) is off limits. Your only job is to "
                     "take part in studies, or wait on the studies list for new ones.")
+        # www.prolific.com is the public marketing site, not the app: typing
+        # the wrong subdomain used to strand the agent there for a whole
+        # cycle. Same path, correct host.
+        if _off_app_host(target):
+            fixed = _to_app_host(target)
+            pw_bridge.goto(fixed)
+            return (f"visit_url {fixed} (CORRECTED: you asked for {target}, which is "
+                    f"Prolific's public marketing site. The studies only exist on "
+                    f"{_APP_HOST} -- always use that host.)")
         pw_bridge.goto(target)
         return f"visit_url {target}"
 
@@ -2977,6 +3022,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
 
     try:
         if start_url:
+            _learn_app_host(start_url)
             pw_bridge.goto(start_url)
             pw_bridge.wait_for_content()
 
@@ -3208,6 +3254,33 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # external page (a one-page fill-and-submit survey would otherwise be
             # submitted before the timer ever started).
             here_guarded = _on_guarded_site(here)
+            # Stranded on the marketing site (a click on its logo/nav, or a
+            # redirect, not just a mistyped visit_url): walk straight back to
+            # the app. Nothing on www.prolific.com can advance a study, and
+            # the model does not recognise it as the wrong site -- it treated
+            # /ai-task-builder as a broken studies list for 23 steps
+            # (run_20261106_142347). Never fires inside a study: an external
+            # survey is not on the guarded domain at all.
+            if _off_app_host(here):
+                back = f"https://{_APP_HOST}/studies"
+                _live({"type": "notice",
+                       "text": f"[guard] off the app host ({urlparse(here).hostname}) "
+                               f"-> back to {back}"})
+                try:
+                    pw_bridge.goto(back)
+                    pw_bridge.wait_for_content()
+                    here = pw_bridge.current_url() or back
+                except Exception:
+                    here = back
+                here_guarded = _on_guarded_site(here)
+                if not pending_user_response:
+                    pending_user_response = (
+                        f"You had navigated to Prolific's PUBLIC MARKETING SITE "
+                        f"(www.prolific.com), which is a different website: it "
+                        f"advertises Prolific to researchers and has no studies, no "
+                        f"study list and no account of yours on it. You have been "
+                        f"returned to {back}. The studies only ever live on "
+                        f"{_APP_HOST} -- stay on it.")
             _timer_started_this_step = False
             # Proactive, cache-aware compaction at natural checkpoints: when
             # we cross the Prolific/external boundary (either direction),
