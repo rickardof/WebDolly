@@ -36,7 +36,7 @@ SEL = {
 }
 
 # What the page looks like, in the vocabulary the harness uses.
-CLASSIFY = """(() => {
+CLASSIFY = r"""(() => {
   const q = s => document.querySelector(s);
   const vis = el => {
     if (!el) return false;
@@ -49,17 +49,22 @@ CLASSIFY = """(() => {
   const reserve = vis(q('%(reserve)s'));
   const open_dialog = vis(q('%(open_dialog)s'));
   let state = 'other';
-  if (dialog) state = 'start_dialog';
-  else if (/^\\/studies\\/[0-9a-f]{24}\\/?$/i.test(path)) {
+  // A Prolific-HOSTED task: on prolific.com but a running study, which is
+  // the distinction four separate bugs got wrong. Captured so batch-fill,
+  // the reading dwell and the audio/video check can be tested against its
+  // real markup instead of an imitation.
+  if (/^\/data-collection-tool\//i.test(path)) state = 'hosted_task';
+  else if (dialog) state = 'start_dialog';
+  else if (/^\/studies\/[0-9a-f]{24}\/?$/i.test(path)) {
     state = open_dialog ? 'detail_reserved' : (reserve ? 'detail_unreserved' : 'detail_other');
-  } else if (/^\\/studies\\/?$/.test(path)) state = 'studies_list';
+  } else if (/^\/studies\/?$/.test(path)) state = 'studies_list';
   return {state, path, url: location.href,
           banner: /either finish or return (this|your) submission/i.test(
                     document.body ? document.body.innerText : '')};
 })()""" % SEL
 
 # The measurements the geometry bugs turn on.
-MEASURE = """(() => {
+MEASURE = r"""(() => {
   const out = {viewport: {w: innerWidth, h: innerHeight},
                dpr: devicePixelRatio,
                doc_scroll: {top: scrollY,
@@ -164,7 +169,7 @@ def main():
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--poll", type=float, default=2.0)
     ap.add_argument("--want", default="start_dialog,detail_reserved,"
-                                      "detail_unreserved,studies_list")
+                                      "detail_unreserved,hosted_task,studies_list")
     ap.add_argument("--force", action="store_true",
                     help="re-capture states already on disk")
     a = ap.parse_args()

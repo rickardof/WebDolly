@@ -43,6 +43,73 @@ def skip(name, why):
     print(f"SKIP  {name:62s} {why}", flush=True)
 
 
+# --- synthetic dialog geometries ---------------------------------------
+# The captured Prolific dialogs vary per study: the one in
+# var/fixtures/prolific is 488px tall with its confirm link on screen and no
+# checkboxes, while the Text-to-Image one carried a "Confidential
+# information" section that pushed the link below the fold. Neither capture
+# exercises the hard case, so these three reproduce it exactly, in the real
+# browser with the real cursor. They are generated here rather than kept as
+# files because the previous copies lived in /tmp and were lost to a reboot.
+_REPRO = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>repro</title>
+<style>
+  html,body{margin:0;height:100%%;overflow:hidden}
+  .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45)}
+  .panel{position:fixed;left:50%%;top:14px;transform:translateX(-50%%);
+         width:540px;height:%(ph)dpx;background:#fff;border-radius:12px;
+         overflow:%(ov)s;font:16px system-ui;padding:24px;box-sizing:border-box}
+  .spacer{height:%(sp)dpx}
+  a.start{display:inline-block;background:#1d4ed8;color:#fff;text-decoration:none;
+          padding:14px 28px;border-radius:8px}
+  a.start[aria-disabled="true"]{background:#9ca3af;pointer-events:none}
+</style></head><body>
+<div class="backdrop"></div>
+<section class="panel" role="dialog" data-testid="start-study-dialog">
+  <h2>Start study</h2>
+  <label><input type="checkbox" data-testid="device-checkbox"> I am using a desktop.</label>
+  <label><input type="checkbox" data-testid="conf-checkbox"> I agree to keep this study confidential.</label>
+  <div class="spacer"></div>
+  <a class="start" href="stub_survey.html" target="_blank" aria-disabled="true"
+     data-testid="dialog-start-study">Start study</a>
+</section>
+<script>
+// Mirrors Prolific: the confirm link is inert until BOTH boxes are ticked.
+const boxes = [...document.querySelectorAll('input[type=checkbox]')];
+const link  = document.querySelector('[data-testid=dialog-start-study]');
+function sync(){ if (boxes.every(b => b.checked)) link.removeAttribute('aria-disabled');
+                 else link.setAttribute('aria-disabled','true'); }
+boxes.forEach(b => b.addEventListener('change', sync));
+sync();
+%(calib)s
+</script></body></html>"""
+
+_CALIBRATE = ("const panel=document.querySelector('.panel');"
+              "panel.style.height='auto';"
+              "panel.style.height=(panel.scrollHeight-40)+'px';")
+
+# name -> panel height, overflow, spacer, extra script
+_GEOMETRIES = {
+    # nothing scrolls at all
+    "repro_locked.html":   dict(ph=1400, ov="hidden", sp=1000, calib=""),
+    # scrolls, but its whole range is ~40px: the pessimistic reading of
+    # run_20261106_124620, where 4 wheel ticks moved the dialog 36px
+    "repro_creeping.html": dict(ph=940, ov="auto", sp=1000, calib=_CALIBRATE),
+    # scrolls hundreds of px: enough, if you keep going
+    "repro_long.html":     dict(ph=880, ov="auto", sp=1200, calib=""),
+}
+
+
+def write_repros(outdir):
+    os.makedirs(outdir, exist_ok=True)
+    paths = []
+    for name, kw in _GEOMETRIES.items():
+        f = os.path.join(outdir, name)
+        with open(f, "w") as fh:
+            fh.write(_REPRO % kw)
+        paths.append(f)
+    return paths
+
+
 def fixtures():
     if not os.path.isdir(FIXDIR):
         return {}
@@ -246,6 +313,72 @@ def main():
         check(f"{state}: launchable is decided by the DOM, whatever the "
               f"banner says (banner={banner})",
               ac._launch_control_visible() is True)
+
+    # ---- Prolific's deadline, read off the REAL captured page -----------
+    # The study that was auto-returned showed "Time remaining 13 Mins 49
+    # Secs". Parsing it from the real markup, through the same _page_text
+    # the harness uses, is the only way to know the scraper works on the
+    # page as Prolific actually ships it.
+    if "detail_reserved" in fx:
+        load("detail_reserved", stub)
+        secs = ac._extract_time_remaining()
+        print(f"   deadline scraped from the real page: {secs}s")
+        check("the countdown is parsed from the real Prolific markup",
+              secs is not None and 600 < secs < 1000, f"{secs}")
+        meta_secs = None
+        txt = fx["detail_reserved"]["meta"].get("url")
+        tm = ac.StudyTimer()
+        tm.start(180, deadline_seconds=secs or 0)
+        check("it reaches the timer and the model's status line",
+              "Deadline in" in (tm.status_line() or ""), tm.status_line()[-36:])
+        check("the estimated duration is still read separately",
+              ac._extract_study_duration() == 3.0, ac._extract_study_duration())
+    else:
+        skip("deadline scraped from the real page", "fixture not captured yet")
+
+    if "studies_list" in fx:
+        load("studies_list", stub)
+        check("no countdown on the studies list -> nothing invented",
+              ac._extract_time_remaining() is None)
+
+    # ---- the dialog geometry the captures do not contain ----------------
+    repro_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", "var", "fixtures", "repro")
+    repros = write_repros(os.path.abspath(repro_dir))
+    push_to_container(repros)
+    for name, scrolls in (("repro_locked.html", False),
+                          ("repro_creeping.html", False),
+                          ("repro_long.html", True)):
+        close_extra_tabs()
+        pw_bridge.goto(f"file:///tmp/fixtures/{name}")
+        time.sleep(1.1)
+        pw_bridge.front()
+        vw, vh = ac._viewport_wh()
+        raw = pw_bridge.element_box(pw_bridge._SEL_START, scroll=False)
+        rng = pw_bridge.run(lambda b: b.active_page().evaluate(
+            "() => {const p=document.querySelector('.panel');"
+            "return p.scrollHeight - p.clientHeight;}"))
+        check(f"{name}: confirm link starts below the fold",
+              raw is not None and raw["y"] + raw["height"] > vh,
+              f"y={raw and round(raw['y'])} vh={vh} range={rng}px")
+        check(f"{name}: the link is inert until both boxes are ticked",
+              pw_bridge.run(lambda b: b.active_page().evaluate(
+                  "() => document.querySelector('[data-testid=dialog-start-study]')"
+                  ".getAttribute('aria-disabled')")) == "true")
+        before = len(pw_bridge.page_ids())
+        res = ac._humanized_launch_reserved_study(include_take_part=False)
+        active = pw_bridge.run(lambda b: b.active_page().url)
+        check(f"{name}: launcher reaches the survey",
+              (res or {}).get("status") == "launched" and "stub_survey" in active,
+              f"status={(res or {}).get('status')}")
+        check(f"{name}: it opened a new tab", len(pw_bridge.page_ids()) > before)
+        ticked = pw_bridge.run(lambda b: next(
+            (p.evaluate("() => [...document.querySelectorAll('input[type=checkbox]')]"
+                        ".every(c => c.checked)")
+             for p in b.pages() if p.url.endswith(name)), None))
+        check(f"{name}: both boxes were ticked by the real cursor before confirming",
+              ticked is True)
+    close_extra_tabs()
 
     print()
     passed = sum(results); total = len(results)
