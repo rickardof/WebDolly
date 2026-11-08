@@ -424,6 +424,47 @@ else:
 
 
 # ===================================================================== 9
+section("harness notices survive the run")
+# The notices ARE the harness explaining itself, and they used to exist only
+# in the live SSE stream: the 404-as-a-study bug was caught only because a
+# monitor happened to be attached that minute.
+check("_live has a transcript sink", "_live_sink" in src and "def _write_notice" in src)
+check("it persists notices, timer starts and errors",
+      'msg.get("type") in ("notice", "timer_start", "error")' in src)
+check("the sink is installed when the transcript opens",
+      src.index("_live_sink = _write_notice") > src.index('transcript = (run_dir / "transcript.jsonl").open("w")')
+      and src.index("_live_sink = _write_notice") < src.index("for step in range(1, max_rounds + 1):"))
+check("and torn down with it", "_live_sink = None\n        transcript.close()" in src)
+check("notices carry the step they happened on", '_live_sink_step["n"] = step' in src)
+
+_captured = []
+_prev_sink, _prev_hook = ac._live_sink, ac.live_hook
+ac._live_sink = _captured.append
+ac.live_hook = None
+ac._live({"type": "notice", "text": "[guard] off the app host"})
+ac._live({"type": "timer_start", "min_seconds": 180})
+ac._live({"type": "phase", "phase": "think"})
+ac._live({"type": "error", "message": "boom"})
+ac._live_sink, ac.live_hook = _prev_sink, _prev_hook
+check("a notice reaches the sink", any(m.get("text", "").startswith("[guard]") for m in _captured))
+check("a timer start reaches it", any(m.get("type") == "timer_start" for m in _captured))
+check("an error reaches it", any(m.get("type") == "error" for m in _captured))
+check("per-step phase chatter does NOT (it would swamp the file)",
+      not any(m.get("type") == "phase" for m in _captured), f"{len(_captured)} records")
+
+def _boom(_): raise RuntimeError("sink died")
+_prev_sink, _prev_hook = ac._live_sink, ac.live_hook
+ac._live_sink, ac.live_hook = _boom, None
+try:
+    ac._live({"type": "notice", "text": "x"})
+    ok = True
+except Exception:
+    ok = False
+ac._live_sink, ac.live_hook = _prev_sink, _prev_hook
+check("a failing sink never breaks the run", ok)
+
+
+# ===================================================================== 10
 section("the remaining surface gates")
 check("skip_av gates on the launch surface",
       "elif skip_av and not here_on_launch and study_timer.is_active():" in src

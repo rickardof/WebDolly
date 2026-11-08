@@ -85,7 +85,23 @@ LOG_ROOT = Path(os.environ.get("FARA_LOG_ROOT", REPO_ROOT / "var" / "logs" / "pw
 live_hook = None
 
 
+# The run's open transcript, so notices survive the run instead of existing
+# only in the live SSE stream. The notices are the harness explaining itself
+# -- "[timer] transition detected", "[guard] off the app host", "[launch]
+# humanised launch: ..." -- and they were exactly what was needed to explain
+# a bad run afterwards, yet they were lost the moment nobody was watching
+# live. A 404 misread as a running study (run_20261108_154719) was caught
+# only because a monitor happened to be attached at that minute.
+_live_sink = None
+
+
 def _live(msg: dict):
+    sink = _live_sink
+    if sink is not None and msg.get("type") in ("notice", "timer_start", "error"):
+        try:
+            sink(msg)
+        except Exception:
+            pass
     h = live_hook
     if h is not None:
         try:
@@ -3160,6 +3176,17 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
     run_dir.mkdir(parents=True, exist_ok=True)
     transcript = (run_dir / "transcript.jsonl").open("w")
 
+    global _live_sink
+    _live_sink_step = {"n": 0}
+
+    def _write_notice(msg: dict):
+        rec = dict(msg)
+        rec.setdefault("step", _live_sink_step["n"])
+        transcript.write(json.dumps(rec) + "\n")
+        transcript.flush()
+
+    _live_sink = _write_notice
+
     try:
         if start_url:
             _learn_app_host(start_url)
@@ -3300,6 +3327,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 pass
 
         for step in range(1, max_rounds + 1):
+            _live_sink_step["n"] = step
             if stop_event is not None and stop_event.is_set():
                 yield {"type": "done", "answer": "STOPPED", "messages": messages}
                 return
@@ -4282,5 +4310,6 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         yield {"type": "done", "answer": f"max_rounds={max_rounds} reached without terminate",
                "messages": messages}
     finally:
+        _live_sink = None
         transcript.close()
         write_run_summary(run_dir)
