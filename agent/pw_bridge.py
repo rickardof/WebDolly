@@ -491,6 +491,14 @@ def unchecked_checkbox_boxes(dialog_sel: str, scroll: bool = True) -> list:
     return run(_c, timeout=20)
 
 
+def active_page_id():
+    """Identity of the tab Fara is actually looking at. The harness uses it
+    to tell "a task opened in its own window" from "we navigated in place",
+    which is what separates a Prolific-hosted study from account chrome at a
+    path we have not catalogued (see _reached_in_launch_tab)."""
+    return run(lambda b: id(b.active_page()))
+
+
 def page_ids() -> list:
     """Identities of the currently-open pages, to detect ones opened later."""
     return run(lambda b: [id(p) for p in b.pages()])

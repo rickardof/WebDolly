@@ -141,6 +141,53 @@ def push_to_container(paths):
     return stub
 
 
+# --- the pre-screenshot nudge vs an answered radio group ---------------
+# run_20261108_181732: the book survey's radio GROUPS were all answered, but
+# every group still has unchecked siblings, so the nudge's
+# 'input[type=radio]:not(:checked)' matched forever and re-centred an
+# answered question on every step. The model scrolled away to look for the
+# field it thought was blocking submission; the nudge dragged the viewport
+# straight back; the screenshot never changed. Twenty steps, five minutes,
+# then it cancelled a study it could have submitted. Shaped like that page.
+_NUDGE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>nudge repro</title><style>body{font:16px system-ui;margin:0}
+ .pad{height:1100px}</style></head><body>
+<h2>Perch&eacute; hai scelto questo libro?</h2>
+<textarea rows=4 cols=60>risposta</textarea>
+<h3>Qual &egrave; il tuo livello di interesse?</h3>
+<label><input type=radio name=interest value=a %(top_a)s> Bleah</label><br>
+<label><input type=radio name=interest value=b %(top_b)s> Neutrale</label><br>
+<label><input type=radio name=interest value=c> Wow</label>
+<div class=pad></div>
+<h3>Compri libri su Amazon?</h3>
+<label><input type=radio name=amazon value=si checked> S&igrave;</label><br>
+<label><input type=radio name=amazon value=no> No</label>
+<div class=pad></div>
+<button id=send disabled>Invia voto</button>
+</body></html>"""
+
+
+def nudge_repro(answered_top):
+    """Write + serve the page, scroll to the bottom, return the nudge's verdict."""
+    import subprocess, tempfile
+    html = _NUDGE_PAGE % ({"top_a": "", "top_b": "checked"} if answered_top
+                          else {"top_a": "", "top_b": ""})
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as fh:
+        fh.write(html)
+        local = fh.name
+    subprocess.run(["docker", "cp", local, f"{CONTAINER}:/tmp/fixtures/nudge.html"],
+                   check=True, capture_output=True)
+    pw_bridge.goto("file:///tmp/fixtures/nudge.html")
+    time.sleep(0.9)
+    pw_bridge.front()
+    pw_bridge.run(lambda b: b.active_page().evaluate(
+        "() => window.scrollTo(0, document.body.scrollHeight)"))
+    before = pw_bridge.run(lambda b: b.active_page().evaluate("() => window.scrollY"))
+    verdict = ac._prescroll_to_controls()
+    after = pw_bridge.run(lambda b: b.active_page().evaluate("() => window.scrollY"))
+    return verdict, before, after
+
+
 def load(state, stub):
     pw_bridge.goto(f"file:///tmp/fixtures/{state}.mhtml")
     time.sleep(2.2)
@@ -378,6 +425,19 @@ def main():
              for p in b.pages() if p.url.endswith(name)), None))
         check(f"{name}: both boxes were ticked by the real cursor before confirming",
               ticked is True)
+    close_extra_tabs()
+
+    # ---- the nudge must not fight the model -----------------------------
+    verdict, before, after = nudge_repro(answered_top=True)
+    check("every radio group answered -> the nudge stands down",
+          verdict == "nothing", f"verdict={verdict}")
+    check("and the viewport the model scrolled to is left alone",
+          before == after and before > 0, f"{before} -> {after}")
+    verdict, before, after = nudge_repro(answered_top=False)
+    check("an UNANSWERED group above still gets centred (the nudge works)",
+          verdict == "scrolled", f"verdict={verdict}")
+    check("and that one really does move the viewport", after < before,
+          f"{before} -> {after}")
     close_extra_tabs()
 
     print()

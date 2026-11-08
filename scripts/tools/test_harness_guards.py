@@ -478,6 +478,68 @@ check("Prolific-side confirmations still key on the host (correctly)",
       "if here_guarded and not _saw_cancel_confirm:" in src)
 
 
+
+# ===================================================================== 11
+section("account chrome is not a running study")
+# run_20261108_181732 step 42: the model clicked "About you" in Prolific's
+# own top nav, _on_launch_surface answered "unknown path => a task", and the
+# harness started a study timer on /about-you.
+_NAV = ["/", "/balance-hub", "/studies", "/submissions", "/about-you",
+        "/messages/unread", "/desktop-app", "/referrals",
+        "/account/general", "/account/preferences"]
+_missed = [n for n in _NAV
+           if not ac._on_launch_surface("https://app.prolific.com" + n)]
+check("every in-app nav link reads as launch surface", not _missed, _missed)
+check("/about-you specifically (the run's regression)",
+      ac._on_launch_surface("https://app.prolific.com/about-you"))
+check("a Prolific-hosted task still reads as a running task",
+      not ac._on_launch_surface(
+          "https://app.prolific.com/data-collection-tool/abc/task"))
+check("an external survey host still reads as a running task",
+      not ac._on_launch_surface("https://app.booktest.io/survey/x"))
+
+# The page-identity guard: an UNCATALOGUED app path reached without opening
+# a new window is chrome; the same path in a window of its own is a task.
+_SAME, _OTHER = 111, 222
+check("unknown app path in the launch tab is chrome",
+      ac._reached_in_launch_tab(
+          "https://app.prolific.com/some-new-page", _SAME, _SAME))
+check("the same path in a NEW window stays a task",
+      not ac._reached_in_launch_tab(
+          "https://app.prolific.com/some-new-page", _OTHER, _SAME))
+check("the known hosted-task tool is never reclassified",
+      not ac._reached_in_launch_tab(
+          "https://app.prolific.com/data-collection-tool/x", _SAME, _SAME))
+check("an external host is never reclassified",
+      not ac._reached_in_launch_tab(
+          "https://app.booktest.io/survey/x", _SAME, _SAME))
+check("inert until a launch surface has been seen",
+      not ac._reached_in_launch_tab(
+          "https://app.prolific.com/some-new-page", _SAME, None))
+check("the guard is wired into the step loop",
+      "if not here_on_launch and _reached_in_launch_tab(" in src
+      and "_launch_page_id = _cur_page_id" in src)
+check("pw_bridge exposes the active page identity",
+      "def active_page_id():" in
+      open(os.path.join(ROOT, "agent", "pw_bridge.py"),
+           encoding="utf-8").read())
+
+
+# ===================================================================== 12
+section("the pre-screenshot nudge does not fight the model")
+_js = ac._AUTOSCROLL_TO_CONTROLS_JS
+check("an answered radio group is excluded", "const answered = e =>" in _js
+      and ':checked\'' in _js.replace('"', "'"))
+check("aria radiogroups too", 'role="radiogroup"' in _js)
+check("the nudge is skipped right after the model scrolls",
+      "if _model_moved_viewport:" in src
+      and 'prescroll_result = "skipped-after-scroll"' in src)
+check("scroll and hscroll set the flag",
+      'action_type in ("scroll", "hscroll")' in src)
+check("so do the paging keys",
+      '"home", "end", "page_up", "page_down"' in src)
+
+
 print()
 passed, total = sum(RESULTS), len(RESULTS)
 print(f"== SUMMARY ==  {passed}/{total} passed", "ok" if passed == total else "FAILED")

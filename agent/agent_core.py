@@ -1095,7 +1095,18 @@ _COMPLETE_PATH = re.compile(r"^/submissions/complete/?$", re.IGNORECASE)
 # Prolific "chrome" prefixes: pages where no study TASK is running yet -- the
 # account/submissions surfaces (the studies list and the per-study reservation
 # page are handled separately via _LIST_PATH / _STUDY_PATH).
-_LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings")
+# Read off the live app's own navigation (2026-11-08): the in-app links are
+# / /balance-hub /studies /submissions /about-you /messages/unread
+# /desktop-app /referrals /account/general /account/preferences. Five of
+# those ten were missing here, so clicking any of them from the studies list
+# made _on_launch_surface answer "a task is running": run_20261108_181732
+# step 42 clicked "About you" in the top nav and the harness started a study
+# timer on /about-you, told the model it was inside a running survey and
+# pushed a "Studio iniziato" notification. The page-identity guard in
+# _reached_in_launch_tab covers the paths this tuple still does not name.
+_LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings",
+                           "/about-you", "/balance-hub", "/messages",
+                           "/desktop-app", "/referrals")
 
 # Prolific's own error pages. They need naming explicitly because
 # _on_launch_surface answers "unknown path => a task is running": that
@@ -1109,6 +1120,34 @@ _LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings")
 _ERROR_PATH = re.compile(
     r"^/(40[0-9]|41[0-9]|50[0-9]|error|errors|not[-_]?found|maintenance)(/|$)",
     re.IGNORECASE)
+
+
+# The only Prolific-HOSTED task surface we have ever seen. Named so the
+# page-identity guard below keeps an explicit escape hatch for it.
+_HOSTED_TASK_PATH = re.compile(r"^/data-collection-tool(/|$)", re.IGNORECASE)
+
+
+def _reached_in_launch_tab(url, cur_page_id, launch_page_id) -> bool:
+    """True when `url` is app-host chrome we have NOT catalogued, reached by
+    plain navigation in the very tab that was showing the launch surface.
+
+    _on_launch_surface answers "unknown path => a task is running" on
+    purpose (1ffb26d: it stops the wander guard cutting a first-party task
+    short at a path we have not catalogued). That default keeps producing
+    false positives -- /404 in run_20261108_154719, /about-you in
+    run_20261108_181732 -- so pair it with the invariant that actually
+    separates the two cases: a Prolific-hosted task is always opened in its
+    own window (the control is literally open-study-in-new-window-button),
+    so it never shares a page object with the studies list it was launched
+    from. Same-tab navigation off the launch surface into an unknown app
+    path is account chrome, not a study. A task that did navigate in place
+    would still be caught by _HOSTED_TASK_PATH."""
+    if not _on_guarded_site(url):
+        return False
+    if _HOSTED_TASK_PATH.match(urlparse(url).path or "/"):
+        return False
+    return (launch_page_id is not None and cur_page_id is not None
+            and cur_page_id == launch_page_id)
 
 
 def _on_launch_surface(url: str) -> bool:
@@ -1827,8 +1866,32 @@ _AUTOSCROLL_TO_CONTROLS_JS = r"""
       if (t && actionRe.test(t) && !previewRe.test(t)) cands.push(e);
     });
   } catch (e) { /* keep the CSS-selector candidates */ }
+  // An answered radio GROUP still leaves its other options unchecked, so
+  // ':not(:checked)' kept matching them forever: the nudge re-centred a
+  // question that was already answered on every single step, dragging the
+  // viewport back the moment the model scrolled anywhere else. The
+  // screenshot then never changed, the model read that as "the page will
+  // not scroll, a required field must be hidden above" and
+  // run_20261108_181732 burnt 20 steps (five minutes) on it before
+  // cancelling a study it could have submitted. An answered group is not a
+  // candidate.
+  const answered = e => {
+    try {
+      if (e.type === 'radio' && e.name) {
+        const esc = (window.CSS && CSS.escape) ? CSS.escape(e.name) : e.name;
+        const root = e.form || document;
+        return !!root.querySelector('input[type="radio"][name="' + esc + '"]:checked');
+      }
+      if (e.getAttribute && e.getAttribute('role') === 'radio') {
+        const grp = e.closest('[role="radiogroup"]');
+        return !!(grp && grp.querySelector('[role="radio"][aria-checked="true"]'));
+      }
+    } catch (err) { /* exotic name/selector: keep the candidate */ }
+    return false;
+  };
   cands = cands.filter(e => {
     if (!e.offsetParent || e.disabled) return false;
+    if (answered(e)) return false;
     const r = e.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   });
@@ -3218,7 +3281,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # before the launch click. See _extract_time_remaining.
         _last_guarded_deadline: float | None = None
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
+        _model_moved_viewport: bool = False  # last action was the model's own scroll/page key
         _prev_on_launch: bool = True  # prev step was on the Prolific launch surface (list/detail/chrome)
+        # Page object the launch surface was last seen in, and the chrome
+        # URLs we have already explained once (see _reached_in_launch_tab).
+        _launch_page_id = None
+        _cur_page_id = None
+        _chrome_guard_noticed: set = set()
         _prev_here: str = ""  # URL at the previous step, for detecting navigation landings
         _current_study_id: str | None = None  # id of the study being looked at / taken
         _current_study_title: str = ""  # its name, read on Prolific while we can still see it
@@ -3463,6 +3532,18 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if _prev_was_guarded != here_guarded and len(messages) > 6:
                 _hard_compact_context(messages, keep_recent=2)
             here_on_launch = _on_launch_surface(here)
+            try:
+                _cur_page_id = pw_bridge.active_page_id()
+            except Exception:
+                _cur_page_id = None
+            if not here_on_launch and _reached_in_launch_tab(
+                    here, _cur_page_id, _launch_page_id):
+                here_on_launch = True
+                if here not in _chrome_guard_noticed:
+                    _chrome_guard_noticed.add(here)
+                    _live({"type": "notice", "text":
+                           f"[guard] {here} is Prolific account chrome reached "
+                           f"in the launch tab, not a study: no timer started"})
             # "Inside a task" = off the launch surface: an external survey host
             # OR a Prolific-hosted task tool (e.g. /data-collection-tool/...).
             # The study timer and in-task framing key on THIS transition, not on
@@ -3492,6 +3573,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
             _prev_was_guarded = here_guarded
             _prev_on_launch = here_on_launch
+            if here_on_launch and _cur_page_id is not None:
+                _launch_page_id = _cur_page_id
             # Keep the previous URL available for the just_landed check in the
             # dwell block below. _prev_here must be updated at the END of the
             # step, not here, or the check never sees a different value.
@@ -3737,8 +3820,15 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # captures. Saves 1-3 model-driven scroll steps per trial on
             # long-content surveys. Safe no-op when nothing matches, when
             # a candidate is already in view, or when pw_bridge throws.
+            # ...and never on the step straight after the model scrolled or
+            # paged itself. The nudge and the model were pulling the viewport
+            # in opposite directions with no way for either to notice
+            # (run_20261108_181732). An explicit scroll is an explicit intent
+            # to look somewhere else: it wins for one step.
             prescroll_result = ""
-            if (_speed_mode != "normal" and study_timer.is_active()
+            if _model_moved_viewport:
+                prescroll_result = "skipped-after-scroll"
+            elif (_speed_mode != "normal" and study_timer.is_active()
                     and not here_guarded):
                 prescroll_result = _prescroll_to_controls()
                 if prescroll_result == "scrolled":
@@ -3853,6 +3943,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             thoughts, action = parse_thoughts_and_action(content)
             args = action.get("arguments", {})
             action_type = args.get("action", "unknown")
+            _model_moved_viewport = (
+                action_type in ("scroll", "hscroll")
+                or (action_type == "key"
+                    and any((k or "").lower() in
+                            ("home", "end", "page_up", "page_down",
+                             "pageup", "pagedown", "prior", "next")
+                            for k in (args.get("keys") or []))))
 
             if args.get("coordinate"):
                 args["coordinate"] = fp.scale_coordinate(args["coordinate"])
