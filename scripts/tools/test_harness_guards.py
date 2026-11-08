@@ -371,6 +371,59 @@ check("and cleared between studies", src.count("_last_guarded_deadline = None") 
 
 
 # ===================================================================== 8
+section("invented URLs and Prolific error pages (run_20261108_154719)")
+# The model composed /study/<uuid> from a study it had just been reading,
+# Prolific served /404, and because _on_launch_surface answers
+# "unknown path => a task is running", the harness started a study timer on
+# an error page and switched the wander guard off.
+for p_ in ("/404", "/403", "/500", "/error", "/not-found", "/maintenance"):
+    check(f"error page is NOT a running task: {p_}", ac._on_launch_surface(APP + p_))
+check("a real first-party task is still a running task",
+      not ac._on_launch_surface(TASK))
+check("...which is the exp303 behaviour that must not regress",
+      not ac._on_launch_surface(APP + "/data-collection-tool/collections/abc"))
+check("an uncatalogued path still counts as a task (deliberate default)",
+      not ac._on_launch_surface(APP + "/some-new-first-party-tool/x"))
+
+INVENTED = APP + "/study/85023784-7114-4869-b0a1-300084006977"
+check("the invented URL is refused before it loads", ac._unknown_app_path(INVENTED))
+for good in ("/studies", "/studies/" + "a" * 24, "/", "/submissions",
+             "/submissions/complete?cc=X", "/account", "/settings",
+             "/data-collection-tool/collections/abc"):
+    check(f"typed navigation still allowed: {good}",
+          not ac._unknown_app_path(APP + good))
+for u in EXTERNAL:
+    check(f"never blocks an external survey: {urlparse(u).hostname}",
+          not ac._unknown_app_path(u))
+check("the marketing site is left to its own guard",
+      not ac._unknown_app_path("https://www.prolific.com/ai-task-builder"))
+check("visit_url refuses it with navigation advice",
+      "visit_url REFUSED: there is no such page on Prolific." in src
+      and "_unknown_app_path(target)" in src)
+
+t = trail("run_20261108_154719")
+if t is None:
+    skip("replay run_20261108_154719", "transcript pruned")
+else:
+    typed = [s_["args"].get("url") for s_ in t
+             if s_["action_type"] == "visit_url" and s_["args"].get("url")]
+    # The address it typed was www.prolific.com/study/<uuid>: wrong host AND
+    # no such path. The host guard alone rewrote it to the app and produced a
+    # 404, so the check has to hold on the REWRITTEN target.
+    bad = [u for u in typed
+           if ac._unknown_app_path(u) or ac._unknown_app_path(ac._to_app_host(u))]
+    check("the real run typed an address that is now caught", bool(bad), f"{bad}")
+    check("correcting the host no longer launders a bogus path",
+          "if _unknown_app_path(fixed):" in src
+          and "wrong host AND no such path" in src)
+    err = [s_ for s_ in t if "/404" in s_["url"]]
+    if err:
+        check("and the 404 it landed on no longer reads as a running task",
+              all(ac._on_launch_surface(s_["url"]) for s_ in err),
+              f"{len(err)} steps")
+
+
+# ===================================================================== 9
 section("the remaining surface gates")
 check("skip_av gates on the launch surface",
       "elif skip_av and not here_on_launch and study_timer.is_active():" in src

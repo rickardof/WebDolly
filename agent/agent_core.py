@@ -1033,6 +1033,36 @@ def _off_app_host(url: str) -> bool:
         return False
 
 
+_APP_VISITABLE_PREFIXES = ("/submissions", "/account", "/settings",
+                           "/data-collection-tool")
+
+
+def _unknown_app_path(url: str) -> bool:
+    """A typed navigation to the app host that goes nowhere real.
+
+    Clicking is unaffected -- this only rejects addresses the model composes
+    itself. run_20261108_154719 invented /study/<uuid> from a study it had
+    just been looking at, landed on Prolific's 404, and spent the rest of the
+    cycle trying to work out where the list had gone. Prolific's study ids
+    are 24 hex characters under /studies/, never a UUID under /study/, so a
+    made-up address is recognisable before it is loaded.
+    """
+    try:
+        if not _on_guarded_site(url):
+            return False
+        host = (urlparse(url).hostname or "").lower()
+        if host != _APP_HOST:
+            return False          # handled by the marketing-site guard
+        path = urlparse(url).path or "/"
+        norm = path.rstrip("/") or "/"
+        if norm == "/" or _LIST_PATH.match(path) or _STUDY_PATH.match(path):
+            return False
+        return not any(norm == p or norm.startswith(p + "/")
+                       for p in _APP_VISITABLE_PREFIXES)
+    except Exception:
+        return False
+
+
 def _to_app_host(url: str) -> str:
     """Same path and query, moved onto the app host."""
     try:
@@ -1050,6 +1080,19 @@ _COMPLETE_PATH = re.compile(r"^/submissions/complete/?$", re.IGNORECASE)
 # account/submissions surfaces (the studies list and the per-study reservation
 # page are handled separately via _LIST_PATH / _STUDY_PATH).
 _LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings")
+
+# Prolific's own error pages. They need naming explicitly because
+# _on_launch_surface answers "unknown path => a task is running": that
+# default is deliberate (it is what stops the wander guard cutting short a
+# first-party task at a path we have not catalogued, 1ffb26d), but it also
+# made a 404 look like a running study. run_20261108_154719 step 19 invented
+# the URL /study/<uuid> (singular, UUID -- not Prolific's /studies/<24hex>),
+# got redirected to /404, and the harness started a study timer on it,
+# switched the wander guard off and turned batch-fill, reading dwell and the
+# audio/video check loose on an error page.
+_ERROR_PATH = re.compile(
+    r"^/(40[0-9]|41[0-9]|50[0-9]|error|errors|not[-_]?found|maintenance)(/|$)",
+    re.IGNORECASE)
 
 
 def _on_launch_surface(url: str) -> bool:
@@ -1072,6 +1115,8 @@ def _on_launch_surface(url: str) -> bool:
         return True
     norm = path.rstrip("/") or "/"
     if norm == "/":
+        return True
+    if _ERROR_PATH.match(norm):
         return True
     return any(norm == p or norm.startswith(p + "/")
                for p in _LAUNCH_CHROME_PREFIXES)
@@ -2672,8 +2717,27 @@ def dispatch_action(action_type: str, args: dict) -> str:
         # www.prolific.com is the public marketing site, not the app: typing
         # the wrong subdomain used to strand the agent there for a whole
         # cycle. Same path, correct host.
+        if _unknown_app_path(target):
+            return ("visit_url REFUSED: there is no such page on Prolific. "
+                    "Study pages are /studies/<id> with the id exactly as the "
+                    "list links it -- do NOT build a URL from a study's name or "
+                    "from an id you saw elsewhere. Go back to the studies list "
+                    "and click the study, rather than typing an address.")
         if _off_app_host(target):
             fixed = _to_app_host(target)
+            # Correcting the host must not launder a path that does not
+            # exist: run_20261108_154719 typed www.prolific.com/study/<uuid>,
+            # the host guard rewrote it faithfully, and the agent landed on
+            # the app's 404 instead of the marketing site's. Send it where it
+            # was actually trying to go.
+            if _unknown_app_path(fixed):
+                home = f"https://{_APP_HOST}/studies"
+                pw_bridge.goto(home)
+                return (f"visit_url {home} (CORRECTED: {target} is not a real "
+                        f"page -- wrong host AND no such path. Study pages are "
+                        f"{_APP_HOST}/studies/<id> with the id exactly as the "
+                        f"list links it; never build one from a name or a UUID. "
+                        f"You are back on the studies list: click the study.)")
             pw_bridge.goto(fixed)
             return (f"visit_url {fixed} (CORRECTED: you asked for {target}, which is "
                     f"Prolific's public marketing site. The studies only exist on "
