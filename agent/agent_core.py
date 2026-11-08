@@ -2133,6 +2133,36 @@ def _extract_study_duration(x: float | None = None, y: float | None = None) -> f
     return None
 
 
+_TIME_REMAINING_RE = re.compile(
+    r"time\s+remaining\W{0,12}"
+    r"(?:(\d+)\s*(?:hours?|hrs?|h)\W{0,4})?"
+    r"(?:(\d+)\s*(?:minutes?|mins?|m)\W{0,4})?"
+    r"(?:(\d+)\s*(?:seconds?|secs?|s)\b)?",
+    re.IGNORECASE)
+
+
+def _extract_time_remaining() -> float | None:
+    """Seconds left on Prolific's own countdown for the reserved slot, read
+    from the study detail page ("Time remaining  13 Mins 49 Secs"), or None.
+
+    This is the deadline that decides whether the work is paid: overrun it
+    and Prolific auto-returns the submission. Nothing used to read it -- the
+    harness tracked only the MINIMUM duration -- so a study answered
+    correctly but slowly was lost with no warning (run_20261106_154221,
+    22m40s against a ~15m window; the page text is kept in
+    var/fixtures/prolific/detail_reserved.mhtml).
+    """
+    try:
+        m = _TIME_REMAINING_RE.search(_page_text(6000) or "")
+        if not m or not any(m.groups()):
+            return None
+        h, mi, se = (float(g or 0) for g in m.groups())
+        total = h * 3600 + mi * 60 + se
+        return total if total > 0 else None
+    except Exception:
+        return None
+
+
 class StudyTimer:
     """Tracks minimum completion time for the current study.
 
@@ -2146,14 +2176,36 @@ class StudyTimer:
         self.clock = clock
         self.start_time: float | None = None
         self.min_seconds: float = 0
+        # Prolific's OWN countdown for the reserved slot ("Time remaining:
+        # 13 Mins 49 Secs" on the study detail page). Overrun it and the
+        # submission is auto-returned however well the study was answered:
+        # run_20261106_154221 answered a 3-minute questionnaire correctly in
+        # 22m40s against a ~15m window and lost GBP 0,45. 0 = unknown.
+        self.deadline_seconds: float = 0
 
-    def start(self, min_seconds: float):
+    def start(self, min_seconds: float, deadline_seconds: float = 0):
         self.start_time = self.clock()
         self.min_seconds = float(min_seconds)
+        self.deadline_seconds = float(deadline_seconds or 0)
 
     def reset(self):
         self.start_time = None
         self.min_seconds = 0
+        self.deadline_seconds = 0
+
+    def deadline_remaining(self) -> float | None:
+        """Seconds before Prolific takes the slot back, or None if unknown."""
+        if self.start_time is None or self.deadline_seconds <= 0:
+            return None
+        return self.deadline_seconds - self.elapsed()
+
+    def deadline_pressure(self) -> float | None:
+        """0.0 at the start of the window, 1.0 at the deadline, >1 past it.
+        None when Prolific showed no countdown."""
+        rem = self.deadline_remaining()
+        if rem is None:
+            return None
+        return 1.0 - (rem / self.deadline_seconds)
 
     def elapsed(self) -> float:
         if self.start_time is None:
@@ -2174,11 +2226,35 @@ class StudyTimer:
             return None
         rem = self.remaining()
         if rem <= 0:
-            return (f"Study timer: {self.elapsed():.0f}s elapsed / "
+            line = (f"Study timer: {self.elapsed():.0f}s elapsed / "
                     f"{self.min_seconds:.0f}s minimum — OK to submit now.")
-        return (f"Study timer: {self.elapsed():.0f}s elapsed, "
-                f"{rem:.0f}s still needed (minimum {self.min_seconds:.0f}s). "
-                "Do NOT submit yet — use the `wait` action on the last page.")
+        else:
+            line = (f"Study timer: {self.elapsed():.0f}s elapsed, "
+                    f"{rem:.0f}s still needed (minimum {self.min_seconds:.0f}s). "
+                    "Do NOT submit yet — use the `wait` action on the last page.")
+        return line + (self.deadline_line() or "")
+
+    def deadline_line(self) -> str | None:
+        """The hard half of the clock: how long before Prolific takes the slot
+        back. Appended to the status line so the model sees both bounds, not
+        only the minimum it must not undercut."""
+        left = self.deadline_remaining()
+        if left is None:
+            return None
+        if left <= 0:
+            return (f" DEADLINE PASSED: Prolific's countdown for this slot ran "
+                    f"out {abs(left) / 60:.0f} min ago. Submit whatever you can "
+                    f"right now; do not start new sections.")
+        mins = left / 60
+        if mins <= 3:
+            return (f" DEADLINE {mins:.1f} min away: Prolific returns this "
+                    f"submission automatically when its countdown ends, and the "
+                    f"work is lost. Finish and submit NOW -- answer the quickest "
+                    f"acceptable way, skip anything optional.")
+        if mins <= 8:
+            return (f" Deadline in {mins:.0f} min (Prolific auto-returns the "
+                    f"submission then). Keep moving and do not re-read pages.")
+        return f" Deadline in {mins:.0f} min."
 
 
 # Submitting a few seconds early is not worth another whole model step: past
@@ -3047,6 +3123,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         wander = WanderGuard(wander_seconds)
         study_timer = StudyTimer()
         _last_guarded_duration: float | None = None  # persists across clicks within a study entry
+        # Prolific's remaining-time countdown, read off the detail page
+        # before the launch click. See _extract_time_remaining.
+        _last_guarded_deadline: float | None = None
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
         _prev_on_launch: bool = True  # prev step was on the Prolific launch surface (list/detail/chrome)
         _prev_here: str = ""  # URL at the previous step, for detecting navigation landings
@@ -3306,11 +3385,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if entered_task and not study_timer.is_active():
                 effective_duration = _last_guarded_duration
                 if effective_duration is not None:
-                    study_timer.start(effective_duration * 60)
+                    study_timer.start(effective_duration * 60,
+                                      deadline_seconds=_last_guarded_deadline or 0)
                     _live({"type": "timer_start", "min_seconds": study_timer.min_seconds,
                            "min_minutes": effective_duration})
                 else:
-                    study_timer.start(0)
+                    study_timer.start(0, deadline_seconds=_last_guarded_deadline or 0)
                     _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
                 _timer_started_this_step = True
                 _survey_url = here
@@ -3357,6 +3437,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 study_timer.reset()
                 _restore_user_speed()
                 _last_guarded_duration = None
+                _last_guarded_deadline = None
                 _prev_was_guarded = False
                 _current_study_id = None
                 _current_study_title = ""
@@ -3408,7 +3489,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         av = _detect_av(page_text, check_text=True)
                         if av:
                             skip_reason = f"audio/video: {av}"
-            elif skip_av and not here_guarded and study_timer.is_active():
+            # Gated on the launch surface, not the host: a Prolific-HOSTED
+            # task (/data-collection-tool/...) that turns out to need a
+            # microphone or webcam has to be abandoned exactly like an
+            # external one. `here_guarded` excluded it for sharing the
+            # domain. Same confusion as 1ffb26d and 88c15c4.
+            elif skip_av and not here_on_launch and study_timer.is_active():
                 av = _detect_av(check_text=False)
                 if av:
                     skip_reason = f"audio/video: {av}"
@@ -3421,6 +3507,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 study_timer.reset()
                 _restore_user_speed()
                 _last_guarded_duration = None
+                _last_guarded_deadline = None
                 _current_study_id = None
                 _current_study_title = ""
                 try:
@@ -3483,7 +3570,19 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # where there is no question to "read") and only from step 2
             # onward (step 1 has its own resume delay). Proportional to
             # visible text length, capped at 8s.
-            if step > 1 and not on_list and not here_guarded:
+            # Gated on the launch surface, not the host. Skipping the dwell
+            # on a Prolific-HOSTED questionnaire made the agent answer real
+            # questions with no reading time at all -- the exact behavioural
+            # signature the humanised input path exists to avoid -- purely
+            # because the task shares Prolific's domain. `on_list` stays:
+            # there is nothing to read on the studies list.
+            # ...but never at the cost of the slot: reading dwell is the
+            # first thing to drop once Prolific's countdown is inside its
+            # last quarter. A page read like a human but submitted after the
+            # deadline is auto-returned and pays nothing.
+            _dl_pressure = study_timer.deadline_pressure()
+            _dwell_ok = _dl_pressure is None or _dl_pressure < 0.75
+            if step > 1 and not on_list and not here_on_launch and _dwell_ok:
                 # Landing behaviour: when the URL just changed (navigation
                 # landed, redirect finished, or a new survey page replaced
                 # the previous one), a human spends an extra ~1-2s orienting
@@ -3709,6 +3808,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 pre_click_duration = _extract_study_duration(cx, cy)
                 if pre_click_duration is not None:
                     _last_guarded_duration = pre_click_duration
+                # Prolific's countdown is only on the detail page, so it has
+                # to be read before the click that leaves it.
+                _pcd = _extract_time_remaining()
+                if _pcd is not None:
+                    _last_guarded_deadline = _pcd
             # Remember what we're about to do so step N+1's page-change hint
             # can name the action. Saved BEFORE dispatch because dispatch may
             # raise, and even on failure we want the next step to know what
