@@ -287,14 +287,34 @@ def _():
 
 @_t("stuck:fires_on_three_identical")
 def _():
+    # _STUCK_THRESHOLD (3) is for ordinary actions. Scrolls were split off
+    # into their own, higher threshold once the signature stopped carrying
+    # the tick count, so this case uses a click; the scroll case is below.
     from collections import deque
-    d = deque(maxlen=4)
+    d = deque(maxlen=6)
     for _ in range(3):
-        d.append("/survey|scroll|-200")
+        d.append("/survey|left_click|12,34")
     out = agent_core._stuck_warning(d)
     assert "STUCK WARNING" in out, out
-    assert "scroll|-200" in out
+    assert "left_click|12,34" in out
     assert "DIFFERENT" in out
+
+
+@_t("stuck:scroll_needs_five")
+def _():
+    # A model reading a long page legitimately scrolls the same direction
+    # two or three times, so scrolls only trip at _SCROLL_STUCK_THRESHOLD
+    # and get the scroll-specific advice (jump with End/Page Down, look for
+    # a required field above) rather than the generic one.
+    from collections import deque
+    d = deque(maxlen=6)
+    for _ in range(4):
+        d.append("/survey|scroll|up")
+    assert agent_core._stuck_warning(d) == "", "four in a row is still reading"
+    d.append("/survey|scroll|up")
+    out = agent_core._stuck_warning(d)
+    assert "STUCK WARNING" in out, out
+    assert "Page Down" in out, out
 
 
 @_t("stuck:silent_when_last_three_differ")
@@ -439,8 +459,12 @@ def _():
         study_memory._read = orig_read
 
 
-@_t("mem:enter_directive_silent_on_one_hint")
+@_t("mem:enter_directive_fires_on_one_hint")
 def _():
+    """One hint is enough. The threshold was two until 064894b ("trigger
+    Enter auto-chain on first user hint"): waiting for the user to repeat
+    themselves cost a trial every time they did not. Zero hints is still
+    silent."""
     import study_memory
     orig_fresh = study_memory._fresh
     orig_read = study_memory._read
@@ -452,8 +476,10 @@ def _():
     study_memory._fresh = lambda d: d
     try:
         out = study_memory.user_hints_for("https://example.com/")
-        assert "DIRECTIVE" not in out, out  # one hint is not enough
-        assert "Things the user told you before" in out  # plain block still there
+        assert "DIRECTIVE" in out, out
+        assert "MUST press Enter" in out, out
+        study_memory._read = lambda: {}
+        assert "DIRECTIVE" not in study_memory.user_hints_for("https://example.com/")
     finally:
         study_memory._fresh = orig_fresh
         study_memory._read = orig_read
@@ -702,11 +728,10 @@ def _():
         study_memory._read = orig_read
 
 
-@_t("autochain:silent_when_fewer_than_two_hints")
+@_t("autochain:fires_on_one_hint")
 def _():
-    """One Enter hint is NOT enough: the Enter DIRECTIVE itself only
-    fires at >=2 hints (deliberate low-pass filter against one-off
-    remarks), and auto-chain follows the same threshold."""
+    """Auto-chain follows the DIRECTIVE's threshold, which 064894b lowered
+    to a single hint. Zero hints is still silent."""
     import study_memory
     orig_fresh = study_memory._fresh
     orig_read = study_memory._read
@@ -719,7 +744,7 @@ def _():
     study_memory._fresh = lambda d: d
     try:
         agent_core._speed_mode = "super_fast"
-        assert agent_core._should_auto_chain_enter("https://eval.services/x") is False
+        assert agent_core._should_auto_chain_enter("https://eval.services/x") is True
         # Zero hints → False
         study_memory._read = lambda: {}
         assert agent_core._should_auto_chain_enter("https://eval.services/x") is False
