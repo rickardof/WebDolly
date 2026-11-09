@@ -976,10 +976,44 @@ def _():
     assert msg == "", "a CODE: answer is a real outcome, not a false stop"
 
 
-@_t("complete:accepts_nocode_answer")
+@_t("complete:nocode_on_the_survey_host_is_pushed_back")
+def _():
+    # This assertion used to be the opposite: NOCODE was exempt, on the
+    # grounds that "check_code handles it". check_code only compares codes;
+    # it has nothing to say about a study that was never submitted. The
+    # exemption is how run_20261109_102733 threw away a validated 45-trial
+    # submission by terminating NOCODE in front of a "Return to Prolific and
+    # collect your reward" button.
+    msg = agent_core.completion_pushback(
+        "NOCODE", "https://eval.services/x", [], [], False)
+    assert "NOT DONE YET" in msg, msg
+    assert "Return to" in msg, msg
+
+
+@_t("complete:nocode_still_accepted_once_back_on_prolific")
 def _():
     assert agent_core.completion_pushback(
-        "NOCODE", "https://eval.services/x", [], [], False) == ""
+        "NOCODE", "https://app.prolific.com/studies/abc", [], [], False) == ""
+
+
+@_t("complete:nocode_still_accepted_when_a_code_was_seen")
+def _():
+    assert agent_core.completion_pushback(
+        "NOCODE", "https://eval.services/x", ["ABC123"], [], False) == ""
+
+
+@_t("complete:nocode_pushback_is_one_shot")
+def _():
+    # A genuine dead end must still be able to end the run: the second
+    # terminate is obeyed.
+    assert agent_core.completion_pushback(
+        "NOCODE", "https://eval.services/x", [], [], True) == ""
+
+
+@_t("complete:code_answers_stay_exempt")
+def _():
+    assert agent_core.completion_pushback(
+        "CODE: ABC123", "https://eval.services/x", [], [], False) == ""
 
 
 @_t("complete:no_pushback_when_back_on_prolific")

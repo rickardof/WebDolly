@@ -540,6 +540,39 @@ check("so do the paging keys",
       '"home", "end", "page_up", "page_down"' in src)
 
 
+
+# ===================================================================== 13
+section("a validated study must not end unsubmitted")
+# run_20261109_102733: 45 trials, "Your submission has been validated",
+# then terminate NOCODE with the return button on screen. $3,00.
+check("NOCODE on the survey host is no longer exempt",
+      "NOT DONE YET" in ac.completion_pushback(
+          "NOCODE", "https://eval.services/x", [], [], False))
+check("but it is still accepted back on Prolific",
+      ac.completion_pushback(
+          "NOCODE", "https://app.prolific.com/studies/a", [], [], False) == "")
+check("and when a code was seen anywhere",
+      ac.completion_pushback(
+          "NOCODE", "https://eval.services/x", ["ABC123"], [], False) == "")
+check("and the nudge stays one-shot, so a dead end can still end",
+      ac.completion_pushback(
+          "NOCODE", "https://eval.services/x", [], [], True) == "")
+check("the finder keys on Prolific's completion endpoint",
+      "submissions" in ac._COMPLETION_RETURN_JS
+      and "complete" in ac._COMPLETION_RETURN_JS)
+check("and on a label, for buttons that navigate in JS",
+      "collect" in ac._COMPLETION_RETURN_JS
+      and "prolific" in ac._COMPLETION_RETURN_JS.lower())
+check("the harness clicks it itself before nudging in prose",
+      "_rbox = _scroll_box_into_view(_completion_return_box)" in src
+      and "_humanized_click_box(_rbox)" in src
+      and "_completion_return_tried" in src)
+check("one attempt per study, reset on the studies list",
+      "_completion_return_tried: bool = False" in src
+      and "_completion_return_tried = False\n" in src
+      and "_completion_return_tried = True" in src)
+
+
 print()
 passed, total = sum(RESULTS), len(RESULTS)
 print(f"== SUMMARY ==  {passed}/{total} passed", "ok" if passed == total else "FAILED")

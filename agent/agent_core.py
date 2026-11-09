@@ -2539,6 +2539,68 @@ def _reading_dwell(text: str) -> float:
     return max(1.5, min(25.0, base * jitter))
 
 
+# -- the control that actually submits the study ---------------------------
+#
+# run_20261109_102733 finished and PASSED a 45-trial evaluation on
+# eval.services -- "Your submission has been validated", every check green --
+# and then emitted `terminate NOCODE` while a black button reading "Return to
+# Prolific and collect your reward" sat in the middle of the screen. Nothing
+# was registered. $3,00.
+#
+# A prose nudge alone is not enough here (it is also one-shot, and the model
+# had already decided it was done), so the harness finds and clicks the
+# control itself. Two signals, generic on purpose:
+#   1. an href pointing at Prolific's own completion endpoint. That URL,
+#      app.prolific.com/submissions/complete?cc=..., is Prolific's documented
+#      contract with every researcher, so it identifies the control on any
+#      survey platform without knowing anything about the platform.
+#   2. failing that, a label that says it goes back to Prolific -- needed
+#      because a button that navigates in JS carries no href.
+_COMPLETION_RETURN_JS = r"""
+(() => {
+  const vis = el => {
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return null;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none') return null;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+    return r;
+  };
+  const box = (el, why) => {
+    const r = vis(el);
+    return r ? {x: r.x, y: r.y, width: r.width, height: r.height, why: why,
+                text: (el.innerText || el.value || '').trim().slice(0, 80)} : null;
+  };
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (/prolific\.(com|co\.uk)\/submissions\/complete/i.test(
+          a.getAttribute('href') || '')) {
+      const b = box(a, 'completion-url');
+      if (b) return b;
+    }
+  }
+  const re = /(return|back|continue|go)\s+to\s+prolific|collect\s+your\s+reward/i;
+  for (const el of document.querySelectorAll(
+         'a, button, [role="button"], input[type="submit"]')) {
+    const t = (el.innerText || el.value || '').trim();
+    if (t && re.test(t)) {
+      const b = box(el, 'label');
+      if (b) return b;
+    }
+  }
+  return null;
+})()
+"""
+
+
+def _completion_return_box():
+    """Viewport box of the control that returns this survey to Prolific, or
+    None. Read-only: finding it never clicks anything."""
+    try:
+        return pw_bridge.evaluate(_COMPLETION_RETURN_JS) or None
+    except Exception:
+        return None
+
+
 def completion_pushback(answer: str, url: str, seen_codes: list,
                         page_codes: list, already_pushed: bool) -> str:
     """One-shot nudge when a free-text `terminate` has not actually reached
@@ -2557,8 +2619,14 @@ def completion_pushback(answer: str, url: str, seen_codes: list,
     """
     if already_pushed:
         return ""
-    if answer.startswith("CODE:") or answer == "NOCODE":
-        return ""                      # a code outcome: check_code handles it
+    if answer.startswith("CODE:"):
+        return ""                      # a code was found: check_code handles it
+    # NOCODE used to be exempt here ("a code outcome: check_code handles it"),
+    # but check_code only compares codes -- it has nothing to say about a
+    # study that was never submitted. NOCODE on the survey host with no code
+    # anywhere is exactly the miss this guard exists for, and it is how
+    # run_20261109_102733 threw away a validated submission. Still one-shot:
+    # a model that genuinely faces a dead end terminates again and is obeyed.
     if _on_guarded_site(url):
         return ""                      # already back on Prolific
     if seen_codes or page_codes:
@@ -3297,6 +3365,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # Completion guard: nudge a free-text "I'm done" that never got back to
         # Prolific / a code, at most once per study so a re-terminate is obeyed.
         _completion_pushed_back: bool = False
+        # One shot per study at clicking the survey's own return-to-Prolific
+        # control ourselves (see _COMPLETION_RETURN_JS).
+        _completion_return_tried: bool = False
         # NOCODE guard: refuse a terminate NOCODE emitted while still on the
         # Prolific detail page without having visited the external survey or
         # seen a Prolific-side cancel/submit confirmation. See
@@ -3618,6 +3689,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _current_study_title = ""
                 _seen_codes = []
                 _completion_pushed_back = False
+                _completion_return_tried = False
                 _saw_external_this_study = False
                 _saw_cancel_confirm = False
                 _nocode_guard_attempts = 0
@@ -4344,13 +4416,46 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _nocode_guard_attempts += 1
                     pending_user_response = nocode_block
                     continue
-                # A free-text "I completed the study" that never got back to
-                # Prolific and shows no code is almost always a stop on the
-                # survey host's own thank-you/validation page, with the final
-                # "submit & return to Prolific" control skipped. Nudge once.
+                # Ending on the survey host's own thank-you/validation page
+                # with the final "submit & return to Prolific" control
+                # skipped. Before saying anything to the model, try to finish
+                # the job: find that control and click it with the real
+                # cursor. See _COMPLETION_RETURN_JS for why prose alone was
+                # not enough.
+                _page_codes_now = codes_on_page(_end_page_text())
+                if (not _completion_return_tried
+                        and not answer.startswith("CODE:")
+                        and not _on_guarded_site(here)
+                        and not _seen_codes and not _page_codes_now):
+                    _rbox = _scroll_box_into_view(_completion_return_box)
+                    if _rbox:
+                        _completion_return_tried = True
+                        if _humanized_click_box(_rbox):
+                            cancel.sleep(random.uniform(1.2, 2.2))
+                            try:
+                                _after = pw_bridge.current_url()
+                            except Exception:
+                                _after = here
+                            _live({"type": "notice", "text":
+                                   "[completion] the study was not submitted: clicked "
+                                   f"the survey's return control ({_rbox.get('why')}, "
+                                   f"{_rbox.get('text')!r}) -> {_after}"})
+                            pending_user_response = (
+                                "HARNESS ACTION: you were ending the task on the survey "
+                                "site without ever submitting the study. The control "
+                                "that returns it to Prolific "
+                                f"({_rbox.get('text')!r}) has been clicked for you and "
+                                f"the page is now {_after}. Look at the screenshot: if "
+                                "a completion code is shown, terminate with it; if you "
+                                "are back on Prolific with the submission registered, "
+                                "terminate NOCODE; if the click went nowhere, find and "
+                                "click the right control yourself.")
+                            continue
+                # Prose fallback: no such control was found, or clicking it
+                # failed. Nudge once.
                 nudge = completion_pushback(
                     answer, here, _seen_codes,
-                    codes_on_page(_end_page_text()), _completion_pushed_back)
+                    _page_codes_now, _completion_pushed_back)
                 if nudge:
                     _completion_pushed_back = True
                     pending_user_response = nudge

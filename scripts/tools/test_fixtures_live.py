@@ -188,6 +188,36 @@ def nudge_repro(answered_top):
     return verdict, before, after
 
 
+# --- the survey's own "return to Prolific" control ----------------------
+# run_20261109_102733 passed a 45-trial evaluation, got "Your submission has
+# been validated", and terminated NOCODE with a black "Return to Prolific and
+# collect your reward" button in the middle of the screen. These pages are
+# that screen: one where the control is a real link to Prolific's completion
+# endpoint, one where it is a JS button (no href to match on) sitting below
+# the fold, which is the case the real cursor has to scroll to.
+_THANKYOU = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>thank you</title><style>body{font:16px system-ui;text-align:center}
+ .pad{height:%(pad)dpx} .cta{background:#000;color:#fff;border:0;padding:14px 22px;
+ font-size:16px;text-decoration:none;display:inline-block}</style></head><body>
+<h1>Thank you for your participation!</h1>
+<p>Your submission has been validated. Thank you for your time and effort!</p>
+<div class=pad></div>
+%(cta)s
+</body></html>"""
+
+
+def thankyou_page(cta, pad=0):
+    import subprocess, tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as fh:
+        fh.write(_THANKYOU % {"cta": cta, "pad": pad})
+        local = fh.name
+    subprocess.run(["docker", "cp", local, f"{CONTAINER}:/tmp/fixtures/thanks.html"],
+                   check=True, capture_output=True)
+    pw_bridge.goto("file:///tmp/fixtures/thanks.html")
+    time.sleep(0.9)
+    pw_bridge.front()
+
+
 def load(state, stub):
     pw_bridge.goto(f"file:///tmp/fixtures/{state}.mhtml")
     time.sleep(2.2)
@@ -438,6 +468,44 @@ def main():
           verdict == "scrolled", f"verdict={verdict}")
     check("and that one really does move the viewport", after < before,
           f"{before} -> {after}")
+    close_extra_tabs()
+
+    # ---- the control that actually submits the study --------------------
+    # 1. A real link to Prolific's completion endpoint: the unambiguous case.
+    #    Found by href, so the label is deliberately unhelpful.
+    thankyou_page('<a class=cta href="https://app.prolific.com/submissions/'
+                  'complete?cc=ABC123">Continue</a>')
+    box = ac._completion_return_box()
+    check("the completion-URL link is found by its href",
+          box is not None and box.get("why") == "completion-url",
+          f"{box and box.get('why')} {box and box.get('text')!r}")
+
+    # 2. A JS button with no href, below the fold: found by label, and the
+    #    real cursor has to be scrolled to it before it can be clicked.
+    thankyou_page('<button class=cta onclick="location.href=\'%s\'">'
+                  'Return to Prolific and collect your reward</button>' % stub,
+                  pad=1400)
+    raw = ac._completion_return_box()
+    vw, vh = ac._viewport_wh()
+    check("a JS button is found by its label",
+          raw is not None and raw.get("why") == "label", raw and raw.get("text"))
+    check("and it starts below the fold",
+          raw is not None and raw["y"] + raw["height"] > vh,
+          f"y={raw and round(raw['y'])} vh={vh}")
+    box = ac._scroll_box_into_view(ac._completion_return_box)
+    check("scrolling brings it on screen", ac._box_on_screen(box, vw, vh),
+          f"y={box and round(box['y'])}")
+    check("and the real cursor reaches it",
+          ac._humanized_click_box(box) is True)
+    time.sleep(1.4)
+    check("clicking it actually leaves the thank-you page",
+          "stub_survey" in pw_bridge.run(lambda b: b.active_page().url),
+          pw_bridge.run(lambda b: b.active_page().url))
+
+    # 3. A page with no such control must not invent one.
+    thankyou_page('<button class=cta>Close window</button>')
+    check("a page with no return control yields nothing",
+          ac._completion_return_box() is None)
     close_extra_tabs()
 
     print()
