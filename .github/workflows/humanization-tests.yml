@@ -21,6 +21,7 @@ on:
       - "tests/humanization_e2e.py"
       - "tests/submissions_parse_test.py"
       - "tests/context_trim_test.py"
+      - "tests/run_counting_test.py"
       - ".github/workflows/humanization-tests.yml"
   push:
     branches: [main]
@@ -50,6 +51,8 @@ jobs:
         run: python tests/submissions_parse_test.py
       - name: Context trim + page-change signal tests
         run: python tests/context_trim_test.py
+      - name: Study-counting tests (completed vs re-read vs code-less)
+        run: python tests/run_counting_test.py
 
   humanization-e2e:
     runs-on: ubuntu-latest

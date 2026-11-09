@@ -1291,6 +1291,31 @@ def completion_code(url: str) -> str:
         return ""
 
 
+# What the model writes in the code slot when it means "this study has no
+# code". It is told to answer plain NOCODE, and it mostly does, but in a month
+# of runs 15 cycles answered "CODE: NOCODE" instead.
+_NOT_A_CODE_RE = re.compile(r"(no.?code|none|n/?a|nessun\w*|-+)\Z", re.IGNORECASE)
+
+
+def completion_code_of(answer: str) -> str:
+    """The real completion code in a terminate answer, or "".
+
+    Taking the "CODE:" prefix as proof of a completion files a "CODE: NOCODE"
+    answer as a successful submission carrying a copyable code that reads
+    NOCODE, so the prefix is not enough: what follows it has to look like a
+    code. Kept here, next to completion_code(), because the dashboard, the
+    daily summary and the per-cycle Telegram ping must all agree on what
+    counts as a completed study.
+    """
+    a = (answer or "").strip()
+    if not a.upper().startswith("CODE:"):
+        return ""
+    code = a.split(":", 1)[1].strip()
+    if not code or _NOT_A_CODE_RE.match(code):
+        return ""
+    return code
+
+
 _EMPTY_LIST_MARKERS = ("waiting for studies",)
 # "showing: 0/0 studies" (or "0 / 0") — Prolific's counter when the list is empty.
 _EMPTY_LIST_RE = re.compile(r"showing\s*:?\s*0\s*/\s*0\s*stud", re.IGNORECASE)
@@ -2422,16 +2447,17 @@ def saw_prolific_submission_confirmation(text: str) -> bool:
 def _is_nocode_answer(answer: str) -> bool:
     """True if the model's terminate answer means 'no completion code'.
 
-    Catches both the plain "NOCODE" and the "CODE: NOCODE" variant the
-    model sometimes emits (treating the literal word NOCODE as a code).
+    Catches the plain "NOCODE" and every answer that announces a code and
+    then carries none ("CODE: NOCODE", "CODE: N/A", a bare "CODE:"). Defined
+    as the complement of completion_code_of() over those answers rather than
+    as its own list of words: the two used to decide "CODE: NOCODE"
+    separately, and the statistics drifted into counting 15 such cycles as
+    completed studies while this guard treated them as no-code.
     """
-    if answer == "NOCODE":
+    a = (answer or "").strip()
+    if a == "NOCODE":
         return True
-    if answer.startswith("CODE:"):
-        payload = answer.split(":", 1)[1].strip().upper()
-        if payload == "NOCODE":
-            return True
-    return False
+    return a.upper().startswith("CODE:") and not completion_code_of(a)
 
 
 def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
@@ -3263,6 +3289,13 @@ def _identity_hint_text(idv: dict) -> str:
             "missing and never refuse, cancel, or return a study over a Prolific ID / email field.")
 
 
+# Bumped whenever summarize_transcript classifies a run differently, so the
+# summaries already on disk are recomputed instead of keeping a verdict this
+# version of the code would no longer reach. v2: a "CODE:" answer whose code
+# slot holds the model's own no-code word is NOCODE, not a completion.
+SUMMARY_V = 2
+
+
 def summarize_transcript(lines: list, started: datetime = None, ended: datetime = None) -> dict:
     """One run, reduced to what the dashboard and the daily summary need.
 
@@ -3300,13 +3333,20 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
             tps = (d.get("model") or {}).get("gen_tps")
             if tps:
                 gen.append(tps)
-    if answer.startswith("CODE:"):
+    code = completion_code_of(answer)
+    if code:
         outcome = "CODE"
-    elif answer in ("NOCODE", "NONE", "STOPPED"):
+    elif _is_nocode_answer(answer):
+        # Plain NOCODE, and "CODE: NOCODE" and friends: a run that banked
+        # nothing, not a completion. Same predicate the NOCODE guard uses.
+        outcome = "NOCODE"
+    elif answer in ("NONE", "STOPPED"):
         outcome = answer
     else:
         outcome = "INCOMPLETE" if not answer else "TERMINATE"
-    out = {"steps": steps, "outcome": outcome, "answer": answer[:80],
+    out = {"v": SUMMARY_V,
+           "steps": steps, "outcome": outcome, "answer": answer[:80],
+           "code": code,
            "code_source": source if outcome in ("CODE", "NOCODE") else None,
            "steps_where": where, "studies": studies,
            "gen_tps_median": sorted(gen)[len(gen) // 2] if gen else None}

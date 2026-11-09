@@ -330,26 +330,18 @@ def _fetch_submissions() -> list[dict]:
 
 def _agent_submissions() -> list[dict]:
     """Return cached submissions (updated by background thread). Never blocks."""
-    from agent_core import LOG_ROOT
-    import json as _json
-
     with _submissions_lock:
         all_subs = list(_submissions_cache["data"])
 
-    # Count runs where the agent actually submitted something (CODE or NOCODE)
+    # How many of the recent cycles actually banked a completion code. Only
+    # used to size the fallback list below, but it uses the same rule as the
+    # statistics page so the two can never disagree.
     completed = 0
     try:
-        for p in list(reversed(_transcript_files()))[:200]:
-            try:
-                for line in _read_transcript(p).splitlines():
-                    d = _json.loads(line)
-                    if d.get("action_type") == "terminate":
-                        ans = d.get("args", {}).get("answer", "")
-                        if ans.startswith("CODE:") or ans == "NOCODE":
-                            completed += 1
-                            break
-            except Exception:
-                pass
+        for tf in list(reversed(_transcript_files()))[:200]:
+            r = _run_record_cached(tf)
+            if r and r.get("outcome") == "CODE":
+                completed += 1
     except Exception:
         pass
 
@@ -1065,9 +1057,9 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
             _ca = (cycle_answer or "").strip()
             if _ca and _ca not in ("NONE", "STOPPED") and "max_rounds=" not in _ca:
                 head = _ca.split("\n", 1)[0][:300]
-                if _ca.startswith("CODE:"):
+                if agent_core.completion_code_of(_ca):
                     emoji = "✅"
-                elif _ca == "NOCODE":
+                elif _ca == "NOCODE" or _ca.upper().startswith("CODE:"):
                     emoji = "⚠️"; head = "Completato senza codice"
                 else:
                     emoji = "ℹ️"
@@ -1128,6 +1120,83 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
         _publish_state()
 
 
+def _reclassify(s: dict) -> dict:
+    """Bring a summary written by an older classifier up to date.
+
+    The verdict that moved in SUMMARY_V 2 depends only on the terminate
+    answer, which every summary already stores, so the statistics correct
+    themselves on read instead of re-parsing a few thousand transcripts.
+    Nothing is rewritten: the file keeps its old verdict and is reclassified
+    again next time, which costs one string test per run.
+    """
+    if s.get("v") == agent_core.SUMMARY_V:
+        return s
+    answer = s.get("answer") or ""
+    code = agent_core.completion_code_of(answer)
+    if code:
+        s["outcome"], s["code"] = "CODE", code
+    elif answer.upper().startswith("CODE:") or answer == "NOCODE":
+        s["outcome"], s["code"] = "NOCODE", ""
+    else:
+        s["code"] = ""
+    s["v"] = agent_core.SUMMARY_V
+    return s
+
+
+def _mark_repeats(records: list) -> list:
+    """Re-label the cycles that reported a completion already banked.
+
+    A cycle that begins while the browser still sits on the previous study's
+    submissions/complete?cc= URL -- or that walks back onto it with
+    history_back -- reads that code again and ends in a handful of steps. The
+    submission was made once, so counting it again overstates the studies
+    done: run_20261109_183807 re-banked CODE: CBBD09819 nineteen seconds
+    after run_20261109_175856 earned it.
+
+    A study can be taken only once on Prolific, so the same study id twice is
+    always the same submission. A repeated code alone is not: one
+    researcher's recurring series reuses a single code across different study
+    ids (C3YV0TJP came back under four of them), so a code counts as a repeat
+    only for a cycle that never reached a study page of its own.
+
+    `records` must be in chronological order; the first cycle to report a
+    completion keeps it and the later ones are flagged. The flag is written to
+    a key of its own rather than over `outcome`, so running this again on the
+    same (cached) records recomputes the same answer instead of building on
+    its own previous verdict.
+    """
+    seen_studies, seen_codes = set(), set()
+    for r in records:
+        r["repeat"] = False
+        if r.get("outcome") != "CODE":
+            continue
+        # The last study page the cycle was on, not the first: a cycle that
+        # looks at one study, skips it and completes another must be judged on
+        # the one it finished. A study only ever enters the set below from a
+        # cycle that banked a code, so a page merely looked at and skipped
+        # cannot make a later completion read as a repeat.
+        sid = (r.get("studies") or [None])[-1]
+        code = r.get("code") or ""
+        if (sid in seen_studies) if sid else (code in seen_codes):
+            r["repeat"] = True
+            continue
+        if sid:
+            seen_studies.add(sid)
+        if code:
+            seen_codes.add(code)
+    return records
+
+
+def _outcome_of(record: dict) -> str:
+    """The run's outcome as every surface should report it: REPEAT for a cycle
+    that re-banked a completion, TERMINATE for a user stop (STOPPED is an
+    internal name the page never showed)."""
+    if record.get("repeat"):
+        return "REPEAT"
+    o = record.get("outcome")
+    return "TERMINATE" if o == "STOPPED" else o
+
+
 def _run_record(tf) -> dict | None:
     """One run for the dashboard, from its summary.json when there is one.
 
@@ -1149,6 +1218,8 @@ def _run_record(tf) -> dict | None:
             s = json.loads(summ_file.read_text())
         except Exception:
             s = None
+    if s is not None:
+        s = _reclassify(s)
     if s is None:
         screens = list(run_dir.glob("screenshot_*.png"))
         ended = (datetime.fromtimestamp(max(x.stat().st_mtime for x in screens))
@@ -1164,6 +1235,7 @@ def _run_record(tf) -> dict | None:
     outcome = "TERMINATE" if s["outcome"] == "STOPPED" else s["outcome"]
     return {"started": started, "ended": ended, "duration_s": s.get("duration_s", 0),
             "steps": s.get("steps", 0), "outcome": outcome, "answer": s.get("answer", ""),
+            "code": s.get("code") or "", "studies": s.get("studies") or [],
             "code_source": s.get("code_source"), "where": s.get("steps_where") or {},
             "gen_tps": s.get("gen_tps_median")}
 
@@ -1203,13 +1275,13 @@ def _dashboard_data() -> dict:
     """
     from datetime import datetime as _dt
     runs = []
-    for tf in _transcript_files():
-        r = _run_record_cached(tf)
-        if not r:
-            continue
+    records = [r for r in (_run_record_cached(tf) for tf in _transcript_files()) if r]
+    # _transcript_files() is sorted by run directory, i.e. by start time, which
+    # is the order _mark_repeats needs.
+    for r in _mark_repeats(records):
         w = r.get("where") or {}
         runs.append([int(r["started"].timestamp()), int(r["ended"].timestamp()),
-                     int(r.get("duration_s") or 0), int(r.get("steps") or 0), r.get("outcome"),
+                     int(r.get("duration_s") or 0), int(r.get("steps") or 0), _outcome_of(r),
                      (r.get("answer") or "")[:80], r.get("code_source"),
                      int(w.get("list", 0)), int(w.get("study", 0)), int(w.get("elsewhere", 0)),
                      r.get("gen_tps")])
@@ -1789,28 +1861,30 @@ def _daily_summary_text(day=None) -> str:
     from datetime import date, datetime as _dt
     day = day or date.today()
     tag = day.strftime("%Y%m%d")
-    runs = [f for f in _transcript_files() if f.parent.name.startswith(f"run_{tag}")]
-    done, none, other = [], 0, 0
-    for f in runs:
-        outcome = None
-        for line in _read_transcript(f).splitlines():
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("action_type") == "terminate":
-                outcome = (d.get("args") or {}).get("answer", "")
-                src = d.get("code_source", "modello")
-        if outcome and (outcome.startswith("CODE:") or outcome == "NOCODE"):
-            done.append(f"{outcome}" + (" (da URL)" if src == "url" else ""))
+    # Repeats can only be told apart from the whole history (a cycle re-banks
+    # a code earned on an earlier day), so every run is read and the day is
+    # selected afterwards. The records are cached per run, so this costs no
+    # transcript parsing after the first call.
+    allrecs = _mark_repeats([r for r in (_run_record_cached(tf)
+                                         for tf in _transcript_files()) if r])
+    runs = [r for r in allrecs if r["started"].date() == day]
+    done, none, other, repeat = [], 0, 0, 0
+    for r in runs:
+        outcome = _outcome_of(r)
+        if outcome == "CODE":
+            src = r.get("code_source")
+            done.append(f"CODE: {r['code']}" + (" (da URL)" if src == "url" else ""))
         elif outcome == "NONE":
             none += 1
+        elif outcome == "REPEAT":
+            repeat += 1
         else:
             other += 1
     skipped = [v for v in study_cache.entries().values()
                if _dt.fromtimestamp(v.get("ts", 0)).date() == day]
     lines = [f"📊 Riepilogo {day.strftime('%d/%m')}",
-             f"🔄 Cicli: {len(runs)} (elenco vuoto {none}, interrotti {other})",
+             f"🔄 Cicli: {len(runs)} (elenco vuoto {none}, interrotti {other}"
+             + (f", codice già registrato {repeat}" if repeat else "") + ")",
              f"✅ Studi completati: {len(done)}"]
     lines += [f"   • {d}" for d in done]
     lines.append(f"⏭ Studi scartati: {len(skipped)}")

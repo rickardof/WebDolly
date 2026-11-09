@@ -391,7 +391,15 @@ function svgEl(tag, attrs, parent) {
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
 /* ============================================================ outcome model */
-const kind = o => (o === 'CODE' || o === 'NOCODE') ? 'done' : o === 'NONE' ? 'empty' : 'fail';
+/* Only CODE is a completed study. NOCODE is a cycle that ended WITHOUT a
+   completion code (the server now also files a "CODE: NOCODE" answer there),
+   and REPEAT is a cycle that re-read a code already banked by an earlier one,
+   so neither is a study done: both belong with the interrupted cycles. */
+const kind = o => o === 'CODE' ? 'done' : o === 'NONE' ? 'empty' : 'fail';
+/* Read instead of the raw answer in the interrupted table. TERMINATE is left
+   out on purpose: there the model's own words are the useful detail. */
+const OUT_LABEL = {REPEAT: 'codice già registrato', NOCODE: 'finito senza codice',
+                   INCOMPLETE: 'interrotto'};
 const KINDS = [
   {k: 'done', label: 'Studi completati', short: 'Completati', c: '--c-done', ic: 'check'},
   {k: 'fail', label: 'Cicli interrotti', short: 'Interrotti', c: '--c-fail', ic: 'alert'},
@@ -903,7 +911,7 @@ function renderTables(runs) {
   } else if (tblTab === 'fail') {
     html = fail.length ? `<table><thead><tr><th>Inizio</th><th class="num">Durata</th><th class="num">Passi</th><th class="num">Nello studio</th><th>Finito con</th></tr></thead><tbody>` +
       cut(fail).map(r => `<tr><td>${esc(dt(r[S]))}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
-        `<td class="num">${fmtN(r[WS])}</td><td class="dim mono">${esc(r[ANS] || (r[OUT] === 'INCOMPLETE' ? 'interrotto' : r[OUT]))}</td></tr>`).join('') + `</tbody></table>` + more(fail) : '';
+        `<td class="num">${fmtN(r[WS])}</td><td class="dim mono">${esc(OUT_LABEL[r[OUT]] || r[ANS] || r[OUT])}</td></tr>`).join('') + `</tbody></table>` + more(fail) : '';
     if (!fail.length) html = `<div class="empty-chart">${icon('check', 22)}<div>Nessun ciclo interrotto in questo periodo</div></div>`;
   } else {
     html = skipped.length ? `<table><thead><tr><th>Studio</th><th>Motivo</th><th>Ultima volta</th><th class="num">Visto</th></tr></thead><tbody>` +
