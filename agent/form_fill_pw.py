@@ -137,7 +137,9 @@ return (function() {
     // scale_anchors so the model knows which end means what (seen in a
     // real Qualtrics survey, where vision needed 16 steps for one such
     // question).
-    const raw = g.els.map(_optionLabel).map(l => (l || '').trim());
+    // optionLabels: set for a form-less option set, where the options carry
+    // no text of their own and their labels come from the matrix header.
+    const raw = (g.optionLabels || g.els.map(_optionLabel)).map(l => (l || '').trim());
     const unlabeled = raw.every(l => !l || /^-?\d+$/.test(l));
     const options = unlabeled ? raw.map((l, i) => l || String(i + 1)) : raw;
     let anchors;
@@ -152,7 +154,9 @@ return (function() {
     const checked = checkedIdx.map(i => options[i]);
     const f = { id, type: g.kind, text: g.text, options,
       current: g.kind === 'radio' ? (checked[0] || null) : checked,
-      answered: checked.length > 0, widget: g.els[0].tagName === 'INPUT' ? 'native' : 'aria' };
+      answered: checked.length > 0,
+      widget: g.custom ? 'custom'
+                       : (g.els[0].tagName === 'INPUT' ? 'native' : 'aria') };
     if (anchors && anchors.length) f.scale_anchors = anchors;
     fields.push(f);
   });
@@ -319,7 +323,11 @@ _AIM_JS = "(t) => {" + _FIND + r"""
   return { x, y, cy: y, vh, ok: !!related && !stray };
 }"""
 
-_IS_ON_JS = "(t) => {" + _FIND + r"""
+# Carries the shared helpers so the post-click verify reads a form-less
+# option set the same way extraction did: _customChecked recomputes the
+# group from the live DOM, which is all this has (one element, after a
+# click that may have re-rendered the row).
+_IS_ON_JS = "(t) => {" + base._SHARED_JS + _FIND + r"""
   if (!e) return null;
   if (e.tagName === 'INPUT') return e.checked;
   if (e.getAttribute('aria-checked') === 'true') return true;
@@ -327,7 +335,9 @@ _IS_ON_JS = "(t) => {" + _FIND + r"""
   if (e.getAttribute('aria-selected') === 'true') return true;
   if (e.getAttribute('data-selected') === 'true') return true;
   if (e.getAttribute('data-checked') === 'true') return true;
-  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(e.className || '');
+  const custom = _customChecked(e);
+  if (custom !== null) return custom;
+  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(_classOf(e));
 }"""
 
 _IS_NATIVE_JS = "(t) => {" + _FIND + " return !!e && e.tagName === 'INPUT'; }"

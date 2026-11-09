@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>custom matrix</title>
+<!-- Reproduces the shape of a real SurveyCake Likert matrix
+     (var/fixtures/prolific/survey_matrix.mhtml, captured live from
+     run_20261109_165350): no <input>, no role, no label text on the
+     options, class names that are meaningless hashes, and the chosen
+     option distinguishable only as the odd one out among its row.
+     Detection is proven against the real capture; this fixture exists to
+     exercise the CLICK path, which an inert MHTML replay cannot.         -->
+<style>
+ body { font: 15px system-ui; padding: 20px; }
+ table { border-collapse: collapse; margin-bottom: 28px; }
+ th, td { padding: 8px 14px; text-align: center; }
+ th:first-child, td:first-child { text-align: left; max-width: 320px; }
+ .css-a1, .css-b2 { width: 22px; height: 22px; border-radius: 50%;
+                    border: 2px solid #888; margin: 0 auto; cursor: pointer; }
+ .css-b2 { border-color: #0a7; background: #0a7; }
+ .nope { width: 22px; height: 22px; border: 2px solid #888; cursor: default; }
+</style></head>
+<body>
+
+<h3 id="q1">1. Please indicate how much you agree with each statement.</h3>
+<table id="matrix"><tbody>
+ <tr><th></th><th>Strongly disagree</th><th>Disagree</th><th>Neutral</th>
+     <th>Agree</th><th>Strongly agree</th></tr>
+ <tr data-subject-id="r1">
+   <td>My supervisor can change their level of leadership ability.</td>
+   <td><div><div class="css-a1" data-subject-option-id="1a"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="1b"></div></div></td>
+   <td><div><div class="css-b2" data-subject-option-id="1c"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="1d"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="1e"></div></div></td>
+ </tr>
+ <tr data-subject-id="r2">
+   <td>I am confident in designing new procedures for my work area.</td>
+   <td><div><div class="css-a1" data-subject-option-id="2a"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="2b"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="2c"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="2d"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="2e"></div></div></td>
+ </tr>
+ <tr data-subject-id="r3">
+   <td>I depend on my supervisor to do my work properly.</td>
+   <td><div><div class="css-a1" data-subject-option-id="3a"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="3b"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="3c"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="3d"></div></div></td>
+   <td><div><div class="css-a1" data-subject-option-id="3e"></div></div></td>
+ </tr>
+</tbody></table>
+
+<!-- NEGATIVE 1: two members differ, so which one is chosen cannot be read.
+     Must be dropped, not guessed: filling it would overwrite an answer. -->
+<h3>2. Unreadable state</h3>
+<div id="ambiguous">
+  <div class="css-a1" data-subject-option-id="4a"></div>
+  <div class="css-b2" data-subject-option-id="4b"></div>
+  <div class="css-c3" data-subject-option-id="4c"></div>
+  <div class="css-a1" data-subject-option-id="4d"></div>
+</div>
+
+<!-- NEGATIVE 2: right attribute, but not clickable. Not an option set. -->
+<h3>3. Not clickable</h3>
+<div id="notclickable">
+  <div class="nope" data-subject-option-id="5a"></div>
+  <div class="nope" data-subject-option-id="5b"></div>
+  <div class="nope" data-subject-option-id="5c"></div>
+</div>
+
+<!-- NEGATIVE 3: only two options: below the floor, left to vision. -->
+<h3>4. Too few</h3>
+<div id="twoonly">
+  <div class="css-a1" data-subject-option-id="6a"></div>
+  <div class="css-a1" data-subject-option-id="6b"></div>
+</div>
+
+<!-- NEGATIVE 4: a data attribute that does not claim to identify a choice.
+     A carousel, a grid, a list of rows: must never be filled. -->
+<h3>5. Not an option attribute</h3>
+<div id="carousel">
+  <div class="css-a1" data-slide-index="0"></div>
+  <div class="css-a1" data-slide-index="1"></div>
+  <div class="css-a1" data-slide-index="2"></div>
+  <div class="css-a1" data-slide-index="3"></div>
+</div>
+
+<!-- A native group alongside, to prove the new pass claims nothing that
+     the native pass already owns. -->
+<h3>6. Native radios</h3>
+<fieldset id="native"><legend>How often do you report?</legend>
+  <label><input type="radio" name="freq" value="Daily"> Daily</label>
+  <label><input type="radio" name="freq" value="Weekly"> Weekly</label>
+  <label><input type="radio" name="freq" value="Monthly"> Monthly</label>
+</fieldset>
+
+<script>
+// One chosen option per row, exactly as the real widget behaves.
+document.querySelectorAll('#matrix [data-subject-option-id]').forEach(el => {
+  el.addEventListener('click', () => {
+    el.closest('tr').querySelectorAll('[data-subject-option-id]')
+      .forEach(o => o.className = 'css-a1');
+    el.className = 'css-b2';
+  });
+});
+</script>
+</body></html>

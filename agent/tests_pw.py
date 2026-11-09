@@ -176,5 +176,74 @@ def _focus_probe(b):
 bg_focus = pb.run(_focus_probe)
 record("background tab does not fake focus", bg_focus is False, f"hasFocus={bg_focus}")
 
+# 13. A choice widget with NO form semantics at all: no <input>, no role, no
+#     text on the options, and the chosen one distinguishable only as the odd
+#     one out among its row. Detection is proven against the real capture
+#     (var/fixtures/prolific/survey_matrix.mhtml, replayed by
+#     scripts/tools/test_fixtures_live.py); this page has working JS, which an
+#     MHTML replay does not, so it is what exercises the click path.
+pb.goto("file:///data/test_custom_matrix.html"); time.sleep(0.7)
+f = ff.extract_fields()
+custom = [x for x in f if x.get("widget") == "custom"]
+record("form-less matrix: one field per statement row", len(custom) == 3,
+       f"{len(custom)} custom of {len(f)} fields: {[x['id'] for x in custom]}")
+SCALE = ["Strongly disagree", "Disagree", "Neutral", "Agree", "Strongly agree"]
+record("options come from the table header",
+       all(x["options"] == SCALE for x in custom),
+       custom and custom[0]["options"])
+record("the question is the row's own statement",
+       all("supervisor" in x["text"] or "procedures" in x["text"] for x in custom),
+       custom and custom[0]["text"][:50])
+record("the pre-answered row reads its answer, the others read as empty",
+       [x["answered"] for x in custom] == [True, False, False]
+       and custom[0]["current"] == "Neutral",
+       f"{[x['answered'] for x in custom]} current={custom[0].get('current')!r}")
+
+# Everything the signature must refuse. Each of these is a set of divs with
+# the right attribute; none is a readable option set.
+ids = {x["id"] for x in f}
+dropped = pb.evaluate("""JSON.stringify({
+  ambiguous: document.querySelectorAll('#ambiguous [data-subject-option-id]').length,
+  notclickable: document.querySelectorAll('#notclickable [data-subject-option-id]').length,
+  twoonly: document.querySelectorAll('#twoonly [data-subject-option-id]').length,
+  carousel: document.querySelectorAll('#carousel [data-slide-index]').length})""")
+record("the refused sets are really on the page", 
+       json.loads(dropped) == {"ambiguous": 4, "notclickable": 3, "twoonly": 2,
+                               "carousel": 4}, dropped)
+record("unreadable, unclickable, too-few and non-option sets are all dropped",
+       len(custom) == 3, f"custom ids: {sorted(x['id'] for x in custom)}")
+record("the native group alongside is still claimed natively",
+       any(x["id"] == "fs:0:radio" and x.get("widget") == "native" for x in f),
+       sorted(ids))
+
+# Apply, then read the DOM back: the right circle in the right row, and
+# nothing touched in the rows we did not answer.
+ans = {custom[1]["id"]: "Strongly agree", custom[2]["id"]: "Disagree"}
+res = ff.apply_answers(f, ans)
+state = json.loads(pb.evaluate("""JSON.stringify(
+  [...document.querySelectorAll('#matrix tr[data-subject-id]')].map(tr => {
+    const o = [...tr.querySelectorAll('[data-subject-option-id]')];
+    const sel = o.map((e, i) => e.className === 'css-b2' ? i : -1).filter(i => i >= 0);
+    return {row: tr.getAttribute('data-subject-id'), sel};
+  }))"""))
+record("the real cursor selected the asked-for option in each row",
+       state == [{"row": "r1", "sel": [2]}, {"row": "r2", "sel": [4]},
+                 {"row": "r3", "sel": [1]}],
+       f"{state} errors={res['errors']}")
+record("no apply errors on the form-less matrix", not res["errors"], res["errors"])
+
+# Changing an existing answer: the odd one out has to move, not accumulate.
+f2 = ff.extract_fields()
+c2 = [x for x in f2 if x.get("widget") == "custom"]
+record("after filling, every row reads back as answered",
+       all(x["answered"] for x in c2) and [x["current"] for x in c2]
+           == ["Neutral", "Strongly agree", "Disagree"],
+       [x.get("current") for x in c2])
+ff.apply_answers(f2, {c2[0]["id"]: "Strongly disagree"})
+moved = json.loads(pb.evaluate("""JSON.stringify(
+  [...document.querySelectorAll('#matrix tr[data-subject-id="r1"] [data-subject-option-id]')]
+    .map((e, i) => e.className === 'css-b2' ? i : -1).filter(i => i >= 0))"""))
+record("changing an answer moves the selection, never adds one", moved == [0], moved)
+
 print(f"\n{sum(results)}/{len(results)} passed   input paths: {ff.STATS}")
 sys.exit(0 if all(results) else 1)

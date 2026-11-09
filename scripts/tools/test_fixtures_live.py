@@ -581,6 +581,60 @@ def main():
              "no survey_complete fixture yet -- run capture_fixture.py "
              "while a study finishes")
 
+    # 6. The form-less choice widget, on the researcher's own markup.
+    #    var/fixtures/prolific/survey_matrix.mhtml is a SurveyCake Likert
+    #    matrix captured live during run_20261109_165350, where batch-fill
+    #    found nothing 91 times in a row. The page has 0 <input>, 0
+    #    [role=radio] and 0 <fieldset>: everything here has to come out of
+    #    divs, hashed class names and a table header.
+    if "survey_matrix" in fx:
+        import form_fill_pw as ff
+        pw_bridge.goto("file:///tmp/fixtures/survey_matrix.mhtml")
+        time.sleep(2.5)
+        pw_bridge.front()
+        shape = pw_bridge.run(lambda b: b.active_page().evaluate("""() => ({
+            inputs: document.querySelectorAll('input').length,
+            aria: document.querySelectorAll('[role=radio]').length,
+            fieldsets: document.querySelectorAll('fieldset').length,
+            opts: document.querySelectorAll('[data-subject-option-id]').length})"""))
+        check("REAL matrix: the page really has no form elements",
+              shape["inputs"] == 0 and shape["aria"] == 0
+              and shape["fieldsets"] == 0 and shape["opts"] > 50, json.dumps(shape))
+        fields = ff.extract_fields()
+        custom = [f for f in fields if f.get("widget") == "custom"]
+        check("one field per statement row is recovered",
+              len(custom) == 19, f"{len(custom)} custom of {len(fields)}")
+        scale = ["Strongly disagree", "Disagree", "Neutral", "Agree",
+                 "Strongly agree"]
+        check("the scale labels come out of the table header",
+              all(f["options"] == scale for f in custom),
+              custom and custom[0]["options"])
+        check("each question is the row's own statement",
+              all(len(f["text"]) > 20 and not f["text"].startswith("co:")
+                  for f in custom), custom and custom[0]["text"][:60])
+        # The capture recorded, per row, which option differed from its
+        # siblings. The extractor must agree with that, row for row.
+        rows = (fx["survey_matrix"]["meta"].get("measurements") or {}).get("rows") or {}
+        nest = [v for v in rows.values() if v.get("type") == "NESTCHILD"]
+        want_answered = sum(1 for v in nest if v.get("odd_one_out") is not None)
+        got_answered = sum(1 for f in custom if f["answered"])
+        check("answered rows match what the live capture measured",
+              got_answered == want_answered and len(nest) == len(custom),
+              f"{got_answered}/{len(custom)} vs {want_answered}/{len(nest)}")
+        want_idx = [v["odd_one_out"] for v in nest]
+        got_idx = [scale.index(f["current"]) if f["current"] in scale else None
+                   for f in custom]
+        check("and so does the chosen option, row by row",
+              got_idx == want_idx, f"{got_idx} vs {want_idx}")
+        check("the one unanswered row is seen as unanswered",
+              got_idx.count(None) == 1, got_idx)
+        ok, why = ff.batch_fill_verdict(fields)
+        check("so the page now batch-fills instead of being clicked one by one",
+              ok, why)
+        close_extra_tabs()
+    else:
+        skip("REAL form-less matrix", "no survey_matrix fixture")
+
     print()
     passed = sum(results); total = len(results)
     print(f"== FIXTURE SUMMARY ==  {passed}/{total} passed",

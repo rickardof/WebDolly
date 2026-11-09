@@ -149,11 +149,179 @@ function _isChecked(el) {
   if (el.getAttribute('aria-selected') === 'true') return true;
   if (el.getAttribute('data-selected') === 'true') return true;
   if (el.getAttribute('data-checked') === 'true') return true;
+  // A form-less option whose group says which one is chosen (see
+  // _customChecked): asked before the class-name guess below, because these
+  // widgets spell their state with a hashed class that means nothing.
+  const custom = _customChecked(el);
+  if (custom !== null) return custom;
   // Custom-widget selected markers: "selected", "is-selected", "chosen",
   // "checked", "is-active". `active` alone deliberately excluded -- too
   // many unrelated navs use it. Only applied to non-input elements, which
   // are already group members (verified by _getChoiceGroups/_getButtonGroups).
-  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(el.className || '');
+  return /\b(selected|is-selected|is-active|chosen|checked)\b/i.test(_classOf(el));
+}
+
+// -- choice groups with no form semantics whatsoever ----------------------
+//
+// Modern survey builders render a Likert scale as styled <div>s: no input,
+// no role, no label text, and a chosen state expressed only by a hashed CSS
+// class (emotion / styled-components). run_20261109_165350 is the page this
+// was built on: www.surveycake.com, 1031 nodes, 0 <input>, 0 [role=radio],
+// 0 <fieldset>, and 91 consecutive batch-fill peeks that found nothing while
+// the model clicked one circle per step at ~12s each.
+//
+// _getButtonGroups cannot see these: it wants a button/role/tabindex,
+// non-empty text, and a chosen marker spelled in words. All three absent.
+//
+// The signature below is deliberately narrow. Anything it cannot read for
+// certain is dropped and left to the vision path, because the cost of
+// silence is a slow page while the cost of a wrong read is overwriting an
+// answer the participant already gave.
+// var, not const: this shared block is evaluated as a TOP-LEVEL script on
+// every cdp_eval (_EXTRACT_JS, _APPLY_JS_TEMPLATE, ...), and a top-level
+// const throws "has already been declared" the second time round. Every
+// other constant in here lives inside a function for the same reason.
+var _CUSTOM_OPT_ATTR_RE = /^data-[a-z0-9-]*(option|choice|answer|radio|checkbox)/i;
+var _MIN_CUSTOM_OPTIONS = 3;
+
+// className is a string on HTML elements and an SVGAnimatedString on SVG ones.
+function _classOf(el) {
+  return typeof el.className === 'string' ? el.className.trim() : '';
+}
+
+// The data-* attribute by which this element identifies itself as one
+// choice among several, or null. Native and ARIA widgets are excluded:
+// they are already covered, and better, above.
+function _customOptionAttr(el) {
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'OPTION') return null;
+  const role = el.getAttribute('role');
+  if (role && /^(radio|checkbox|option|switch|slider)$/i.test(role)) return null;
+  for (const a of el.attributes) {
+    if (_CUSTOM_OPT_ATTR_RE.test(a.name) && (a.value || '').trim()) return a.name;
+  }
+  return null;
+}
+
+// The nearest ancestor holding a whole option set. In a matrix that is the
+// <tr> of one statement, never the <table> (which holds every statement's
+// options at once), because the walk stops at the FIRST ancestor that has
+// enough of them.
+function _customGroupAnchor(el, attr) {
+  const sel = '[' + CSS.escape(attr) + ']';
+  for (let p = el.parentElement, i = 0; p && i < 12; p = p.parentElement, i++) {
+    if (p.querySelectorAll(sel).length >= _MIN_CUSTOM_OPTIONS) return p;
+  }
+  return null;
+}
+
+// Index of the one member whose class differs from all the others; -1 when
+// they are all alike (nothing chosen); null when the state cannot be read
+// (two or more differ), which drops the group.
+function _customSelectedIndex(els) {
+  const cls = els.map(_classOf);
+  const freq = {};
+  cls.forEach(c => freq[c] = (freq[c] || 0) + 1);
+  const distinct = Object.keys(freq);
+  if (distinct.length === 1) return -1;
+  if (distinct.length !== 2) return null;
+  const minority = distinct.filter(c => freq[c] === 1);
+  if (minority.length !== 1) return null;
+  return cls.indexOf(minority[0]);
+}
+
+function _customMembers(anchor, attr, consumed) {
+  return Array.from(anchor.querySelectorAll('[' + CSS.escape(attr) + ']'))
+    .filter(e => _visible(e) && !(consumed && consumed.has(e)));
+}
+
+// Recomputed from the live DOM so it also answers AFTER a click, when all
+// the verify step has is the element itself. null means "not one of these
+// widgets, or unreadable" -- never a guess.
+function _customChecked(el) {
+  const attr = _customOptionAttr(el);
+  if (!attr) return null;
+  const anchor = _customGroupAnchor(el, attr);
+  if (!anchor) return null;
+  const members = _customMembers(anchor, attr, null);
+  if (members.length < _MIN_CUSTOM_OPTIONS) return null;
+  const sel = _customSelectedIndex(members);
+  if (sel === null) return null;
+  return sel >= 0 && members[sel] === el;
+}
+
+// Option labels from the table header, by ordinary HTML table semantics:
+// the column index of an option's cell, looked up in the header row. This
+// is what gives "Strongly disagree".."Strongly agree" to options whose own
+// markup carries no text at all.
+function _matrixOptionLabels(els) {
+  const tr = els[0].closest('tr');
+  if (!tr) return null;
+  const table = tr.closest('table');
+  if (!table) return null;
+  const head = table.querySelector('tr');
+  if (!head || head === tr) return null;
+  const heads = Array.from(head.children).map(c => c.textContent.trim());
+  const cells = Array.from(tr.children);
+  const out = els.map(e => {
+    const cell = e.closest('td, th');
+    const i = cell ? cells.indexOf(cell) : -1;
+    return (i >= 0 && heads[i]) ? heads[i] : '';
+  });
+  return out.every(t => t) ? out : null;
+}
+
+// The statement a matrix row is asking about: its first cell, as long as
+// that cell is not itself one of the option cells.
+function _matrixRowLabel(els) {
+  const tr = els[0].closest('tr');
+  if (!tr || !tr.children.length) return null;
+  const first = tr.children[0];
+  if (els.some(e => first.contains(e))) return null;
+  const t = first.textContent.trim();
+  return (t && t.length < 300) ? t : null;
+}
+
+function _getCustomOptionGroups(consumed) {
+  const byAttr = new Map();
+  for (const el of document.querySelectorAll('*')) {
+    const attr = _customOptionAttr(el);
+    if (!attr || !_visible(el) || consumed.has(el)) continue;
+    if (!byAttr.has(attr)) byAttr.set(attr, []);
+    byAttr.get(attr).push(el);
+  }
+  const groups = [];
+  let idx = 0;
+  byAttr.forEach((els, attr) => {
+    if (els.length < _MIN_CUSTOM_OPTIONS) return;
+    const seen = new Set();
+    els.forEach(el => {
+      if (seen.has(el)) return;
+      const anchor = _customGroupAnchor(el, attr);
+      if (!anchor) return;
+      const members = _customMembers(anchor, attr, consumed);
+      if (members.length < _MIN_CUSTOM_OPTIONS) return;
+      if (members.some(e => seen.has(e))) { members.forEach(e => seen.add(e)); return; }
+      members.forEach(e => seen.add(e));
+      // Structurally alike and actually clickable, or it is not an option set.
+      const tag = members[0].tagName;
+      if (!members.every(e => e.tagName === tag)) return;
+      if (!members.every(e => getComputedStyle(e).cursor === 'pointer')) return;
+      // Unreadable state: drop it. Filling a group whose current answer we
+      // cannot see would overwrite that answer.
+      const sel = _customSelectedIndex(members);
+      if (sel === null) return;
+      members.forEach(e => consumed.add(e));
+      const id = 'co:' + (idx++);
+      groups.push({
+        id: id, kind: 'radio', els: members, custom: true,
+        optionLabels: _matrixOptionLabels(members),
+        text: _matrixRowLabel(members) || _groupLegend(anchor)
+              || _precedingHeadingText(members[0]) || id,
+      });
+    });
+  });
+  return groups;
 }
 function _optionLabel(el) {
   if (el.tagName === 'INPUT') return _labelFor(el) || el.value;
@@ -239,6 +407,10 @@ function _getChoiceGroups() {
   // them exactly like a radio group thanks to _isChecked's class-marker
   // branch.
   _getButtonGroups(consumed).forEach(g => groups.push(g));
+  // Very last: option sets with no form semantics at all, identified by a
+  // data-* attribute and read by odd-one-out. Last so that anything with a
+  // real input, an ARIA role or a worded class marker is claimed first.
+  _getCustomOptionGroups(consumed).forEach(g => groups.push(g));
   return groups;
 }
 
@@ -334,8 +506,9 @@ _EXTRACT_JS = _SHARED_JS + r"""
   const fields = [];
 
   _getChoiceGroups().forEach(g => {
-    const options = g.els.map(_optionLabel);
-    const checked = g.els.filter(_isChecked).map(_optionLabel);
+    const options = g.optionLabels || g.els.map(_optionLabel);
+    const checked = g.els.map((e, i) => _isChecked(e) ? options[i] : null)
+                         .filter(o => o !== null);
     fields.push({
       id: g.id, type: g.kind, text: g.text, options,
       current: g.kind === 'radio' ? (checked[0] || null) : checked,
