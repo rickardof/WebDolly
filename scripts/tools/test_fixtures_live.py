@@ -549,6 +549,38 @@ def main():
               box["x"] + 2, box["y"] + box["height"] + gap / 2) is not None)
     close_extra_tabs()
 
+    # 5. The same checks against the REAL completion screen, once
+    #    capture_fixture.py has seen one. Everything above this point is a
+    #    hand-written page whose geometry was measured off a screenshot; this
+    #    is the researcher's own markup, replayed.
+    if "survey_complete" in fx:
+        meta = fx["survey_complete"]["meta"]
+        pw_bridge.goto("file:///tmp/fixtures/survey_complete.mhtml")
+        time.sleep(2.0)
+        pw_bridge.front()
+        box = ac._completion_return_box()
+        check("REAL completion screen: the finder still matches its markup",
+              box is not None,
+              box and f"{box.get('why')} {box.get('text')!r}")
+        if box:
+            captured = (meta.get("measurements") or {}).get("return_control") or {}
+            check("and the replay keeps the geometry the live page had",
+                  abs(box["height"] - captured.get("height", box["height"])) <= 2,
+                  f"h {round(box['height'])} vs {captured.get('height')}")
+            bx = box["x"] + box["width"] / 2
+            bottom = box["y"] + box["height"]
+            check("an 8px miss under the real button is caught",
+                  ac._completion_return_near_miss(bx, bottom + 8) is not None,
+                  f"box y {round(box['y'])}..{round(bottom)}")
+            check("a click on the real button is left alone",
+                  ac._completion_return_near_miss(
+                      bx, box["y"] + box["height"] / 2) is None)
+        close_extra_tabs()
+    else:
+        skip("REAL completion screen",
+             "no survey_complete fixture yet -- run capture_fixture.py "
+             "while a study finishes")
+
     print()
     passed = sum(results); total = len(results)
     print(f"== FIXTURE SUMMARY ==  {passed}/{total} passed",

@@ -9,6 +9,12 @@ walks up to the live browser, waits for each state of the launch flow to
 appear, and saves it as MHTML (self-contained: markup + CSS + images) next to
 a JSON record of the exact measurements.
 
+It watches every open page, not only prolific.com: the screen that actually
+ends a study ("Return to Prolific and collect your reward") is served by the
+researcher's own host, and leaving it out is what left the completion guards
+tested against hand-written markup -- an 8px aiming miss on that button
+(run_20261109_120846) cost six steps and nearly a submission.
+
 Strictly READ-ONLY: it only ever runs Page.captureSnapshot and reading
 Runtime.evaluate expressions, so it is safe to leave running against the
 production browser while the agent works.
@@ -35,6 +41,45 @@ SEL = {
     "start": '[data-testid="dialog-start-study"]',
 }
 
+# The control that returns a finished survey to Prolific, found exactly the
+# way agent_core._COMPLETION_RETURN_JS finds it: an href pointing at
+# Prolific's completion endpoint, else a label that says it goes back. Shared
+# by CLASSIFY and MEASURE so the fixture records the geometry the harness
+# actually aims at.
+RETURN_JS = r"""(() => {
+  const vis = el => {
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return null;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none') return null;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+    return r;
+  };
+  const box = (el, why) => {
+    const r = vis(el);
+    return r ? {x: r.x, y: r.y, width: r.width, height: r.height, why: why,
+                below_fold: r.bottom > innerHeight,
+                text: (el.innerText || el.value || '').trim().slice(0, 80)} : null;
+  };
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (/prolific\.(com|co\.uk)\/submissions\/complete/i.test(
+          a.getAttribute('href') || '')) {
+      const b = box(a, 'completion-url');
+      if (b) return b;
+    }
+  }
+  const re = /(return|back|continue|go)\s+to\s+prolific|collect\s+your\s+reward/i;
+  for (const el of document.querySelectorAll(
+         'a, button, [role="button"], input[type="submit"]')) {
+    const t = (el.innerText || el.value || '').trim();
+    if (t && re.test(t)) {
+      const b = box(el, 'label');
+      if (b) return b;
+    }
+  }
+  return null;
+})()"""
+
 # What the page looks like, in the vocabulary the harness uses.
 CLASSIFY = r"""(() => {
   const q = s => document.querySelector(s);
@@ -45,6 +90,17 @@ CLASSIFY = r"""(() => {
     return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
   };
   const path = location.pathname;
+  const onProlific = /(^|\.)prolific\.(com|co\.uk)$/i.test(location.hostname);
+  // The survey host, once its return-to-Prolific control is up: the page
+  // where run_20261109_120846 missed the button by 8px and where every
+  // completion guard has to work. It is NOT on prolific.com, which is why
+  // this capture used to skip it and its tests ran on hand-written markup.
+  if (!onProlific) {
+    const rc = %(ret)s;
+    return rc ? {state: 'survey_complete', path: path, url: location.href,
+                 banner: false, return_control: rc}
+              : {state: 'other', path: path, url: location.href, banner: false};
+  }
   const dialog = vis(q('%(dialog)s'));
   const reserve = vis(q('%(reserve)s'));
   const open_dialog = vis(q('%(open_dialog)s'));
@@ -61,7 +117,7 @@ CLASSIFY = r"""(() => {
   return {state, path, url: location.href,
           banner: /either finish or return (this|your) submission/i.test(
                     document.body ? document.body.innerText : '')};
-})()""" % SEL
+})()""" % dict(SEL, ret=RETURN_JS)
 
 # The measurements the geometry bugs turn on.
 MEASURE = r"""(() => {
@@ -96,6 +152,7 @@ MEASURE = r"""(() => {
                                 range: sc.scrollHeight - sc.clientHeight,
                                 top: sc.scrollTop} : null;
   }
+  out.return_control = %(ret)s;
   const dlg = document.querySelector('%(dialog)s');
   if (dlg) {
     out.dialog = {scrollHeight: dlg.scrollHeight, clientHeight: dlg.clientHeight,
@@ -111,7 +168,7 @@ MEASURE = r"""(() => {
     });
   }
   return out;
-})()""" % {"sels": json.dumps(SEL), "dialog": SEL["dialog"]}
+})()""" % {"sels": json.dumps(SEL), "dialog": SEL["dialog"], "ret": RETURN_JS}
 
 
 class Target:
@@ -148,8 +205,13 @@ def page_targets():
         data = json.loads(urlopen(CDP.rstrip("/") + "/json/list", timeout=8).read())
     except Exception:
         return []
+    # Every real page, not just prolific.com: the completion screen that
+    # ends a study lives on the researcher's own host.
+    skip = ("about:", "chrome:", "chrome-extension:", "devtools:", "edge:")
     return [t for t in data
-            if t.get("type") == "page" and "prolific.com" in (t.get("url") or "")]
+            if t.get("type") == "page"
+            and (t.get("url") or "about:blank").strip()
+            and not (t.get("url") or "about:blank").startswith(skip)]
 
 
 def save(state, snapshot_mhtml, meta, outdir):
@@ -169,7 +231,8 @@ def main():
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--poll", type=float, default=2.0)
     ap.add_argument("--want", default="start_dialog,detail_reserved,"
-                                      "detail_unreserved,hosted_task,studies_list")
+                                      "detail_unreserved,hosted_task,"
+                                      "studies_list,survey_complete")
     ap.add_argument("--force", action="store_true",
                     help="re-capture states already on disk")
     a = ap.parse_args()
