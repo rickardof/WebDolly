@@ -573,6 +573,37 @@ check("one attempt per study, reset on the studies list",
       and "_completion_return_tried = True" in src)
 
 
+
+
+# ===================================================================== 14
+section("a near-miss on the return control is re-aimed, not wasted")
+# run_20261109_120846 step 50: button y 566..601, clicked at y 609. Eight
+# pixels. The model then spent six steps deciding the button was broken.
+_njs = ac._COMPLETION_NEAR_MISS_JS
+check("the near-miss test reuses the same finder",
+      "submissions" in _njs and "collect" in _njs)
+check("a point already inside the control is not 'corrected'",
+      "return null;   // already on it" in _njs)
+check("the margin is distance to the box, not to its centre",
+      "Math.hypot(dx, dy) > margin" in _njs)
+check("a click that landed on another control is never hijacked",
+      "elementFromPoint" in _njs
+      and "'BUTTON'" in _njs and "'LABEL'" in _njs
+      and "tabIndex >= 0" in _njs)
+check("the margin leaves room for a worse estimate than 8px",
+      20 <= ac._RETURN_NEAR_MISS_PX <= 60, ac._RETURN_NEAR_MISS_PX)
+check("the snap only rewrites the coordinate, so dispatch stays humanised",
+      'args["coordinate"] = [_nx, _ny]' in src)
+check("it runs before the minimum-time hold, which can still refuse it",
+      src.index("_sbox = _completion_return_near_miss(")
+      < src.index('submit_held = ""'))
+check("it never fires on Prolific's own pages",
+      'if action_type == "left_click" and not here_guarded:\n'
+      '                _coord = args.get("coordinate")' in src)
+check("and the correction is written into the step result",
+      "dispatch_action(action_type, args) + snap_note" in src)
+
+
 print()
 passed, total = sum(RESULTS), len(RESULTS)
 print(f"== SUMMARY ==  {passed}/{total} passed", "ok" if passed == total else "FAILED")

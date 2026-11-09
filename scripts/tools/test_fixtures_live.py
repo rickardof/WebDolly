@@ -508,6 +508,47 @@ def main():
           ac._completion_return_box() is None)
     close_extra_tabs()
 
+    # 4. The near-miss. run_20261109_120846 step 50 clicked 8px under a
+    #    36px-tall "Return to Prolific" button, hit the background, and lost
+    #    six steps to the detour that followed. The snap re-aims that click,
+    #    and must keep its hands off every other one.
+    thankyou_page('<a class=cta id=ret href="https://app.prolific.com/'
+                  'submissions/complete?cc=ABC123">Return to Prolific and '
+                  'collect your reward</a>')
+    box = ac._completion_return_box()
+    bx = box["x"] + box["width"] / 2
+    bottom = box["y"] + box["height"]
+    check("the run_20261109_120846 miss (8px under the button) is caught",
+          (ac._completion_return_near_miss(bx, bottom + 8) or {}).get("miss") == 8,
+          f"box y {round(box['y'])}..{round(bottom)}, clicked {round(bottom)+8}")
+    check("a click inside the button is left alone (nothing to correct)",
+          ac._completion_return_near_miss(bx, box["y"] + box["height"] / 2) is None)
+    check("a click far from it is left alone",
+          ac._completion_return_near_miss(bx, bottom + 200) is None)
+    check("and so is one just past the margin",
+          ac._completion_return_near_miss(bx, bottom + 45) is None)
+
+    #    A second control right under the button: a click that really lands
+    #    on it must never be hijacked, however close the return button is.
+    thankyou_page('<a class=cta id=ret href="https://app.prolific.com/'
+                  'submissions/complete?cc=ABC123">Return to Prolific and '
+                  'collect your reward</a><div style="height:6px"></div>'
+                  '<button id=other class=cta>Report a problem</button>')
+    box = ac._completion_return_box()
+    other = pw_bridge.run(lambda b: b.active_page().evaluate(
+        "() => {const r = document.getElementById('other')"
+        ".getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height};}"))
+    gap = other["y"] - (box["y"] + box["height"])
+    check("the neighbouring control is inside the snap margin",
+          0 < gap < ac._RETURN_NEAR_MISS_PX, f"gap {round(gap)}px")
+    check("but a click ON it is not hijacked",
+          ac._completion_return_near_miss(
+              other["x"] + other["w"] / 2, other["y"] + other["h"] / 2) is None)
+    check("while the inert gap between the two still snaps back",
+          ac._completion_return_near_miss(
+              box["x"] + 2, box["y"] + box["height"] + gap / 2) is not None)
+    close_extra_tabs()
+
     print()
     passed = sum(results); total = len(results)
     print(f"== FIXTURE SUMMARY ==  {passed}/{total} passed",

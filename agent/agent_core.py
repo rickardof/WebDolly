@@ -2601,6 +2601,66 @@ def _completion_return_box():
         return None
 
 
+# How far outside the control a click may land and still count as aimed at it.
+# run_20261109_120846 missed by 8px on a 36px-tall button; 40 leaves room for a
+# worse estimate without reaching a neighbouring control (and the inert-point
+# test below is what actually makes the snap safe, not this number).
+_RETURN_NEAR_MISS_PX = 40
+
+_COMPLETION_NEAR_MISS_JS = r"""([x, y, margin]) => {
+  const box = """ + _COMPLETION_RETURN_JS.strip() + r""";
+  if (!box) return null;
+  const x0 = box.x, y0 = box.y, x1 = box.x + box.width, y1 = box.y + box.height;
+  if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return null;   // already on it
+  const dx = x < x0 ? x0 - x : (x > x1 ? x - x1 : 0);
+  const dy = y < y0 ? y0 - y : (y > y1 ? y - y1 : 0);
+  if (Math.hypot(dx, dy) > margin) return null;
+  // Never hijack a click that really did land on some other control: only a
+  // point on inert background is a miss. Walk up from the hit element because
+  // the label/icon inside a button is what elementFromPoint returns.
+  const ROLES = {button: 1, link: 1, checkbox: 1, radio: 1, tab: 1,
+                 menuitem: 1, option: 1, switch: 1};
+  let n = document.elementFromPoint(x, y);
+  for (let i = 0; n && i < 10 && n !== document.body; i++, n = n.parentElement) {
+    const tag = n.tagName;
+    if (tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT'
+        || tag === 'TEXTAREA' || tag === 'LABEL' || tag === 'SUMMARY'
+        || ROLES[n.getAttribute('role')] || n.hasAttribute('onclick')
+        || n.tabIndex >= 0) return null;
+  }
+  box.miss = Math.round(Math.hypot(dx, dy));
+  return box;
+}"""
+
+
+def _completion_return_near_miss(x: float, y: float,
+                                 margin: int = _RETURN_NEAR_MISS_PX):
+    """Box of the return-to-Prolific control when the click at (x, y) was
+    plainly aimed at it and missed, else None.
+
+    run_20261109_120846 step 50: a 36px-tall "Return to Prolific and collect
+    your reward" button (y 566..601), clicked at y=609 -- eight pixels under
+    its bottom edge. The click hit the page background, nothing happened, and
+    the model concluded the button was broken: it waited, switched tab back to
+    Prolific, pressed "I'm finished" with no code in hand, read the resulting
+    spinner as a disabled button, and sat one click away from "I didn't
+    receive a completion code" before coming back and hitting the same button
+    correctly (same screenshot, y=584). Six wasted steps at the one moment of
+    a run where a wrong click costs the whole study.
+
+    Same remedy as the checkbox retry in dispatch_action: trust the DOM box
+    over the pixel estimate and re-aim. The snap fires only when the point is
+    on inert background, so a click that did land on some other control is
+    never hijacked -- and because it only rewrites the coordinate, the
+    minimum-time hold still sees (and can still refuse) the corrected click.
+    """
+    try:
+        return pw_bridge.run(lambda b: b.active_page().evaluate(
+            _COMPLETION_NEAR_MISS_JS, [x, y, margin])) or None
+    except Exception:
+        return None
+
+
 def completion_pushback(answer: str, url: str, seen_codes: list,
                         page_codes: list, already_pushed: bool) -> str:
     """One-shot nudge when a free-text `terminate` has not actually reached
@@ -4094,6 +4154,26 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # (and every click off a submit control) are not affected. Setting
             # pending_user_response also suppresses the auto-chain-Enter below,
             # which would otherwise submit the page the click did not.
+            # Near-miss on the control that ends the study: re-aim, don't
+            # waste the click. Runs BEFORE the minimum-time guard below so the
+            # corrected coordinate is what that guard judges -- a re-aimed
+            # click can still be held back if the study minimum is not up.
+            snap_note = ""
+            if action_type == "left_click" and not here_guarded:
+                _coord = args.get("coordinate")
+                if _coord:
+                    _sbox = _completion_return_near_miss(_coord[0], _coord[1])
+                    if _sbox:
+                        _nx = _sbox["x"] + _sbox["width"] * random.uniform(0.3, 0.7)
+                        _ny = _sbox["y"] + _sbox["height"] * random.uniform(0.35, 0.65)
+                        snap_note = (f" [re-aimed {_coord[1]:.0f}->{_ny:.0f}y onto "
+                                     f"the return control]")
+                        args["coordinate"] = [_nx, _ny]
+                        _live({"type": "notice", "text":
+                               "[completion] click missed the survey's return control "
+                               f"({_sbox.get('text')!r}) by {_sbox.get('miss')}px: "
+                               "re-aimed onto it"})
+
             submit_held = ""
             if (action_type == "left_click"
                     and not here_guarded
@@ -4140,7 +4220,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                                 pass
 
                 try:
-                    result_desc = dispatch_action(action_type, args)
+                    result_desc = dispatch_action(action_type, args) + snap_note
                 except Exception as e:
                     # One failed browser action (timeout, element gone, tab
                     # closed) must not end a 24/7 run -- it used to: a
