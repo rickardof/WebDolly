@@ -4114,7 +4114,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # step's action moved the page. Done after screenshot so the
             # action-settle delay has already run.
             curr_page_fp = _page_fingerprint()
-            qc_hit = "" if _qc_flag else qc_failure_in(curr_page_fp)
+            # Prolific's own pages list past rejections with their reasons; reading
+            # one there would stamp this run with someone else's verdict. The
+            # researcher's end page is never on a guarded host.
+            qc_hit = "" if (_qc_flag or here_guarded) else qc_failure_in(curr_page_fp)
             if qc_hit:
                 _qc_flag = qc_hit
             page_signal = _page_change_hint(_last_page_fp,

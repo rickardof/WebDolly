@@ -132,6 +132,9 @@ check("the run record carries the verdict", '"flagged": s.get("flagged") or ""' 
 check("the dashboard row carries it as its last column",
       'r.get("gen_tps"), r.get("flagged") or ""' in gsrc)
 check("the per-cycle ping says so instead of a bare tick", "_last_run_flag()" in gsrc)
+check("a past rejection on Prolific's own pages is not read as this run's",
+      '"" if (_qc_flag or here_guarded) else qc_failure_in' in
+      open(os.path.join(HERE, "..", "agent", "agent_core.py")).read())
 check("the daily summary lists the flagged runs",
       "Segnalati dal ricercatore" in gsrc.split("def _daily_summary_text")[1])
 
@@ -172,10 +175,22 @@ for q in (
     "What colour was the car in the video?",
     "Does the advertisement contain an AI symbol?",
     "Nell'immagine era presente un simbolo?",
+    "2. Was there a logo in the image you just saw?",
+    "Do you remember what the video showed?",
 ):
     check(f"left to the eyes: {q[:46]!r}", ff.needs_eyes(field(q)))
 
+# Ad studies write almost every opinion item in the past tense; those are not
+# recall questions and must stay on the fast path, or a whole study is filled
+# by hand one field at a time.
 for q in (
+    "The advertisement was believable",
+    "The ad was annoying",
+    "The advertisement showed the product clearly",
+    "The ad contains humour",
+    "How much did you like the advertisement?",
+    "The advertisement above was informative",
+    "I would consider buying the product in the ad.",
     "How much do you like this brand?",
     "Which of the following best describes your job?",
     "How many hours a week do you work?",

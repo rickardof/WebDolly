@@ -1294,18 +1294,28 @@ _STIMULUS_RE = re.compile(
     r"|\bcharts?\b|\bgraphs?\b|\bvignette|\bscenario\b|\bstimulus\b"
     r"|immagin|\bfoto\b|annuncio|pubblicit|\bvideo\b", re.I)
 _RECALL_RE = re.compile(
-    r"\bdid\b|\bdoes\b|\bwas\b|\bwere\b|\bis there\b|\bare there\b|how many"
-    r"|what colou?r|\bnotice\b|displayed|\bshown\b|\bshow(?:s|ed)?\b|\bappear"
-    r"|\brecall\b|\bremember\b|\bcontain|you (?:just )?(?:saw|watched|read|viewed)"
-    r"|\babove\b|previous page|\bhai visto\b|\bera presente\b|\bmostrav", re.I)
+    # Asked as a question about the stimulus, not stated as an opinion of it.
+    # The verb cues are anchored to the start of the question on purpose: ad
+    # studies write nearly every Likert item in the past tense ("The
+    # advertisement was believable", "The ad showed the product clearly"), and
+    # a loose \bwas\b sent whole pages of ordinary opinion items to the slow
+    # path. "Did the advertisement display a notice?" still matches.
+    r"^[^A-Za-z]{0,8}(?:did|does|was|were|is there|are there)\b"
+    r"|how many|what colou?r|\bshown (?:above|earlier|previously)\b"
+    r"|\b(?:recall|remember)\b|you (?:just )?(?:saw|watched|read|viewed)"
+    r"|previous page|\bhai visto\b|\bera presente\b|\bc'era\b",
+    re.I)
 
 
 def needs_eyes(field: dict) -> bool:
     """True when this question asks what was in something the participant was
     shown, so only the step that holds the screenshot can answer it."""
-    text = " ".join([str(field.get("text") or ""),
-                     " ".join(str(o) for o in (field.get("options") or []))])
-    return bool(_STIMULUS_RE.search(text) and _RECALL_RE.search(text))
+    text = str(field.get("text") or "").strip()
+    shown_in = text + " " + " ".join(str(o) for o in (field.get("options") or []))
+    # The stimulus may be named in an option ("the one in the video"); the
+    # question shape is read from the question itself, where the anchor means
+    # something.
+    return bool(_STIMULUS_RE.search(shown_in) and _RECALL_RE.search(text))
 
 
 def summarize_for_agent(result: dict) -> str:
