@@ -192,7 +192,10 @@ def _local_current() -> list:
 
 _local_load()
 
-_submissions_cache: dict = {"data": [], "ts": 0.0}
+# "data": every submission known, newest first (see the local store below).
+# "header": Prolific's own SUMMARY figures, which are the account's real
+# lifetime totals. "complete": whether the store matches that SUMMARY yet.
+_submissions_cache: dict = {"data": [], "ts": 0.0, "header": {}, "complete": False}
 _submissions_lock = threading.Lock()
 _submissions_trigger = threading.Event()   # set on each "done" event
 
@@ -290,16 +293,108 @@ def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
     return parsed
 
 
-def _fetch_submissions() -> list[dict]:
-    """Open a temporary tab, read the Prolific submissions page, close the tab.
+# Prolific's own SUMMARY block, at the top of every /submissions page. These
+# are the account's authoritative lifetime figures: summing the rows we
+# managed to read instead reported GBP 0,70 + USD 27,39 over 8 studies against
+# the GBP 590,94 + USD 939,95 over 559 the page itself was showing, because
+# only the first of 41 pages was ever read.
+_AMOUNT_RE = _re.compile(r'^([£$€])\s*([\d.,]+)$')
+_INT_RE = _re.compile(r'^\d[\d.,]*$')
 
-    Runs only during the inter-cycle idle window (called by _submissions_auto_updater
-    when state phase is None), so the agent never notices the ~5-second pause.
-    Saves and restores the active tab atomically inside the bridge worker thread.
+
+def _money(line: str) -> tuple[str, float] | None:
+    """("£", 590.94) from a bare amount line, or None.
+
+    Chromium runs with --lang=it-IT, so Prolific renders "£590,94": the comma
+    is the decimal separator and the dot groups thousands ("£1.234,56").
     """
-    SUBMISSIONS_URL = "https://app.prolific.com/submissions"
+    m = _AMOUNT_RE.match(line.strip())
+    if not m:
+        return None
+    raw = m.group(2)
+    if "," in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif raw.count(".") > 1:
+        raw = raw.replace(".", "")
+    try:
+        return m.group(1), float(raw)
+    except ValueError:
+        return None
+
+
+def _parse_submission_header(rows: list[str]) -> dict:
+    """The SUMMARY block and the wallet lines, or {} if the page did not show
+    them. Earnings are per currency: Prolific pays some studies in GBP and
+    others in USD and never adds them up itself."""
+    def _after(label: str, within: int = 3):
+        for i, r in enumerate(rows):
+            if r.strip().lower() == label:
+                return rows[i + 1:i + 1 + within]
+        return []
+
+    out: dict = {}
+    for key, label in (("balance", "balance"), ("pending", "pending")):
+        for line in _after(label, 1):
+            m = _money(line)
+            if m:
+                out[key] = {m[0]: m[1]}
+    for key, label in (("total", "total submissions"), ("approved", "submissions approved")):
+        for line in _after(label, 1):
+            if _INT_RE.match(line.strip()):
+                out[key] = int(line.strip().replace(".", "").replace(",", ""))
+    earned: dict = {}
+    # "Total earned" is followed by one line per currency, so read until the
+    # next line that is not an amount instead of assuming how many there are.
+    for line in _after("total earned", 6):
+        m = _money(line)
+        if not m:
+            break
+        earned[m[0]] = earned.get(m[0], 0.0) + m[1]
+    if earned:
+        out["earned"] = earned
+    return out
+
+
+def _parse_last_page(rows: list[str]) -> int:
+    """The highest page number in the pager at the foot of the list, or 1.
+
+    The pager reads "Prev 1 2 3 4 5 ... 41 Next", so the last numbered button
+    is the page count. Only the tail of the page is considered: a study title
+    that happens to be a number must not be mistaken for a page.
+    """
+    tail = rows[-16:]
+    if not any(r.strip().lower() == "next" for r in tail):
+        return 1
+    nums = [int(r) for r in tail if r.strip().isdigit()]
+    return max(nums) if nums else 1
+
+
+# Prolific lists 20 submissions a page and pages with ?page=N (verified
+# against the live account: pages 1-3 return disjoint sets of 20 rows and the
+# pager reports 41 pages for 816 submissions).
+_SUBMISSIONS_URL = "https://app.prolific.com/submissions"
+_SUBS_PER_PAGE = 20
+
+
+def _fetch_submissions(page: int = 1) -> dict:
+    """Open a temporary tab, read one page of the submissions list, close it.
+
+    Returns {"rows", "header", "last_page"}; "rows" is empty when the page
+    could not be read, and the caller keeps whatever it already had.
+
+    Runs only during the inter-cycle idle window (see
+    _submissions_auto_updater), so the agent never notices the pause. Saves
+    and restores the active tab atomically inside the bridge worker thread.
+    """
+    url = _SUBMISSIONS_URL if page <= 1 else f"{_SUBMISSIONS_URL}?page={page}"
     JS = """() => (document.body.innerText || '').split('\\n')
                   .map(s => s.trim()).filter(s => s.length > 0)"""
+    # The list is rendered client-side, so wait for it to be there instead of
+    # for a fixed five seconds: at several pages a refresh the fixed wait IS
+    # the cost of the crawl.
+    READY = ("() => /SUBMISSION HISTORY/i.test(document.body.innerText) && "
+             "/(APPROVED|AWAITING REVIEW|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)/"
+             ".test(document.body.innerText)")
 
     def _do(b):
         prev     = b._active
@@ -307,8 +402,12 @@ def _fetch_submissions() -> list[dict]:
         b._known.append(new_page)
         b._active = new_page
         try:
-            new_page.goto(SUBMISSIONS_URL, wait_until="domcontentloaded", timeout=25000)
-            new_page.wait_for_timeout(5000)
+            new_page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            try:
+                new_page.wait_for_function(READY, timeout=12000)
+            except Exception:
+                new_page.wait_for_timeout(4000)   # read whatever is there
+            new_page.wait_for_timeout(700)        # let the last rows paint
             return new_page.evaluate(JS) or []
         finally:
             b._active = prev
@@ -319,34 +418,183 @@ def _fetch_submissions() -> list[dict]:
                 pass
 
     try:
-        raw_rows = pw_bridge.run(_do, timeout=45)
+        raw_rows = pw_bridge.run(_do, timeout=60)
     except Exception as e:
-        _dbg(f"tab fetch error: {e}")
-        return []
+        _dbg(f"tab fetch error (page {page}): {e}")
+        return {"rows": [], "header": {}, "last_page": 1}
 
-    _dbg(f"tab fetch: got {len(raw_rows)} rows")
-    return _parse_submission_rows(raw_rows)
+    rows = _parse_submission_rows(raw_rows)
+    header = _parse_submission_header(raw_rows)
+    _dbg(f"tab fetch page {page}: {len(raw_rows)} lines, {len(rows)} rows, header={header}")
+    return {"rows": rows, "header": header, "last_page": _parse_last_page(raw_rows)}
+
+
+# ------------------------------------------------------------ the local store
+# Reading only the first page meant /earnings and /status spoke for 20 of 816
+# submissions. Every page read is merged into one file instead, so a crawl can
+# stop whenever the agent needs the browser back and resume later, and so a
+# row whose status changes weeks after submission (awaiting review -> approved)
+# is updated in place rather than counted twice.
+SUBS_STORE = Path(agent_core.LOG_ROOT) / "submissions.json"
+_SUBS_STORE_V = 1
+# How long to leave the history alone after a sweep that ended without
+# matching Prolific's SUMMARY. Six hours: long enough that an unmatchable
+# count cannot turn into a permanent crawl, short enough that a status that
+# flips deep in the history is picked up the same day.
+_SUBS_SWEEP_COOLDOWN = 6 * 3600
+
+
+def _subs_key(row: dict) -> str:
+    """A submission's identity. The timestamp is to the minute and the title is
+    the study's, so the pair is unique and, unlike a row's position, survives
+    newer submissions pushing it onto a later page."""
+    return f"{row.get('date_full', '')}|{row.get('title', '')}"
+
+
+def _subs_ts(row: dict) -> float:
+    """The submission's own date as an epoch, or 0.0 when unparseable."""
+    from datetime import datetime as _dt
+    for fmt in ("%d %b %Y, %H:%M", "%d %b %Y"):
+        try:
+            return _dt.strptime(row.get("date_full", ""), fmt).timestamp()
+        except ValueError:
+            pass
+    return 0.0
+
+
+def _subs_store_load() -> dict:
+    try:
+        d = json.loads(SUBS_STORE.read_text())
+        if d.get("v") == _SUBS_STORE_V and isinstance(d.get("rows"), dict):
+            return d
+    except Exception:
+        pass
+    return {"v": _SUBS_STORE_V, "rows": {}, "header": {}, "cursor": 2, "ts": 0.0}
+
+
+def _subs_store_save(store: dict) -> None:
+    try:
+        SUBS_STORE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SUBS_STORE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store, separators=(",", ":")))
+        tmp.replace(SUBS_STORE)
+    except Exception as e:
+        _dbg(f"store save failed: {e}")
+
+
+def _subs_merge(store: dict, rows: list) -> int:
+    """Add or update rows in the store; returns how many actually changed."""
+    changed = 0
+    for r in rows:
+        k = _subs_key(r)
+        if store["rows"].get(k) != r:
+            store["rows"][k] = r
+            changed += 1
+    return changed
+
+
+def _subs_rows(store: dict) -> list:
+    """Every submission known, newest first."""
+    return sorted(store["rows"].values(), key=_subs_ts, reverse=True)
+
+
+def _subs_complete(store: dict) -> bool:
+    """True when the store holds as much as Prolific's own SUMMARY claims.
+
+    The page states the account's totals, so they are the checksum that says
+    whether the crawl still has pages to read -- no guessing from page counts,
+    and a status that flipped deep in the history shows up as a shortfall in
+    the approved count.
+    """
+    h = store.get("header") or {}
+    if not h.get("total"):
+        return False
+    rows = store["rows"].values()
+    approved = sum(1 for r in rows if (r.get("status") or "").lower() == "approved")
+    return len(store["rows"]) >= h["total"] and approved >= h.get("approved", 0)
+
+
+def _subs_agent_idle() -> bool:
+    """Whether the browser can be borrowed: the agent is stopped, or between
+    cycles. Checked again before every page of a crawl, because pw_bridge
+    serialises calls and a long crawl would otherwise queue the next cycle
+    behind it."""
+    with state_lock:
+        return not state["running"] or state.get("phase") is None
+
+
+def _submissions_refresh(max_pages: int = 6) -> bool:
+    """Read page 1, then as much of the history as is still missing.
+
+    Page 1 every time (that is where today's work lands). After it, the deep
+    sweep walks pages 2..last_page across refreshes, keeping its place in the
+    store, and only while the store disagrees with the page's own SUMMARY.
+    Once they agree it costs exactly one page load a refresh. Returns True if
+    anything was read.
+    """
+    store = _subs_store_load()
+    if not store["rows"]:
+        # First fill: there is nothing to report from until the history is in,
+        # so take a bigger bite. Still one page at a time, still giving the
+        # browser back the moment the agent wants it.
+        max_pages = max(max_pages, 20)
+    first = _fetch_submissions(1)
+    if not first["rows"]:
+        return False
+    _subs_merge(store, first["rows"])
+    if first["header"]:
+        store["header"] = first["header"]
+    last_page = max(1, first["last_page"])
+
+    pages_read = 1
+    page = max(2, int(store.get("cursor") or 2))
+    # A sweep in progress (cursor past page 2) always continues. A new one
+    # starts only after the cooldown: if the SUMMARY can never be matched --
+    # a row Prolific no longer lists, a title we truncate differently -- the
+    # crawl must not then borrow the browser on every single cycle forever.
+    sweeping = not _subs_complete(store) and (
+        page > 2 or time.time() - (store.get("swept") or 0) > _SUBS_SWEEP_COOLDOWN)
+    while (sweeping and pages_read < max_pages and not _subs_complete(store)
+           and page <= last_page and _subs_agent_idle()):
+        got = _fetch_submissions(page)
+        pages_read += 1
+        if got["rows"]:
+            _subs_merge(store, got["rows"])
+            if got["header"]:
+                store["header"] = got["header"]
+            last_page = max(last_page, got["last_page"])
+        page += 1
+        if page > last_page:
+            # The sweep reached the end. Newer submissions shift rows onto
+            # later pages, so one pass can still miss one: park the cursor
+            # back at the start and let the cooldown decide when to retry.
+            page = 2
+            store["swept"] = time.time()
+            break
+        time.sleep(random.uniform(0.8, 2.0))
+    store["cursor"] = page
+    store["ts"] = time.time()
+    _subs_store_save(store)
+
+    rows = _subs_rows(store)
+    with _submissions_lock:
+        _submissions_cache["data"] = rows
+        _submissions_cache["header"] = store.get("header") or {}
+        _submissions_cache["complete"] = _subs_complete(store)
+        _submissions_cache["ts"] = time.time()
+    _dbg(f"refresh: {pages_read} page(s), store {len(rows)}/"
+         f"{(store.get('header') or {}).get('total', '?')}, cursor {page}")
+    return True
 
 
 def _agent_submissions() -> list[dict]:
-    """Return cached submissions (updated by background thread). Never blocks."""
+    """Submissions from the last 24h, newest first, or the newest few when the
+    day was quiet. Reads the in-memory store; never blocks and never fetches."""
     with _submissions_lock:
         all_subs = list(_submissions_cache["data"])
 
-    # How many of the recent cycles actually banked a completion code. Only
-    # used to size the fallback list below, but it uses the same rule as the
-    # statistics page so the two can never disagree.
-    completed = 0
-    try:
-        for tf in list(reversed(_transcript_files()))[:200]:
-            r = _run_record_cached(tf)
-            if r and r.get("outcome") == "CODE":
-                completed += 1
-    except Exception:
-        pass
-
-    # Show submissions from the last 24h (covers what the agent did today).
-    # Fall back to the top max(completed,5) if nothing recent is found.
+    # Submissions from the last 24h (what the agent did today), newest first;
+    # the newest eight when the window is empty.
     from datetime import datetime, timedelta
     cutoff = datetime.now() - timedelta(hours=24)
     recent = []
@@ -362,7 +610,7 @@ def _agent_submissions() -> list[dict]:
                     recent.append(s)
             except Exception:
                 pass
-    return recent if recent else all_subs[:max(completed, 5)]
+    return recent if recent else all_subs[:8]
 
 
 def load_presets() -> list:
@@ -1307,6 +1555,10 @@ def _dashboard_data() -> dict:
     except Exception:
         skipped = []
     return {"generated": time.time(), "runs": runs, "submissions": subs,
+            # Prolific's own SUMMARY block: the account's real lifetime totals,
+            # and whether the local history is still being read in.
+            "subs_header": dict(_submissions_cache.get("header") or {}),
+            "subs_complete": bool(_submissions_cache.get("complete")),
             "submissions_ts": _submissions_cache.get("ts") or None, "skipped": skipped,
             "agent": _status_payload(with_events=False, fresh_url=False),
             "slow_tps": agent_core.SLOW_TPS}
@@ -1924,68 +2176,91 @@ def _fmt_money_by_cur(by_cur: dict[str, float]) -> str:
 
 
 def _earnings_text() -> str:
-    """Earnings breakdown: today, this week, this month, all-time (approved only).
-    Per-currency because Prolific pays some studies in £ and others in $."""
+    """Earnings by the date the study was taken, plus the account's own totals.
+
+    The periods are summed from the local submission store; the all-time
+    figures come from Prolific's SUMMARY block, which states them itself.
+    Summing the rows for an all-time total is what made this report read
+    "£0.70 + $27.39 over 8 studies" while the page said £590.94 + $939.95
+    over 559: only the first of 41 pages was ever read.
+    Per currency throughout, because Prolific pays some studies in £ and
+    others in $ and the two are never added together.
+    """
     from datetime import date, datetime as _dt, timedelta
     today = date.today()
     week_start = today - timedelta(days=today.weekday())  # Monday
     month_start = today.replace(day=1)
+    PERIODS = (("today", "Oggi", today), ("week", "Settimana", week_start),
+               ("month", "Mese", month_start))
 
-    # buckets[period] = {currency_symbol: total}
-    buckets: dict[str, dict[str, float]] = {k: {} for k in ("today", "week", "month", "all")}
-    counts = {"today": 0, "week": 0, "month": 0, "all": 0}
-    pending: dict[str, float] = {}
-    pending_n = 0
+    ok: dict[str, dict[str, float]] = {k: {} for k, _, _ in PERIODS}
+    wait: dict[str, dict[str, float]] = {k: {} for k, _, _ in PERIODS}
+    n_ok = {k: 0 for k, _, _ in PERIODS}
+    n_wait = {k: 0 for k, _, _ in PERIODS}
 
     with _submissions_lock:
         subs = list(_submissions_cache.get("data") or [])
+        header = dict(_submissions_cache.get("header") or {})
+        complete = bool(_submissions_cache.get("complete"))
 
     for s in subs:
         status = (s.get("status") or "").lower()
-        reward = s.get("reward")
-        if not reward:
-            continue
+        if status not in ("approved", "awaiting review"):
+            continue                   # returned / timed out / rejected pay nothing
         try:
-            amt = float(reward)
+            amt = float(s.get("reward") or 0)
         except (ValueError, TypeError):
             continue
+        if not amt:
+            continue
         cur = s.get("currency", "£")
-
         df = s.get("date_full", "")
-        try:
+        d = None
+        for fmt in ("%d %b %Y, %H:%M", "%d %b %Y"):
             try:
-                d = _dt.strptime(df, "%d %b %Y, %H:%M").date()
+                d = _dt.strptime(df, fmt).date()
+                break
             except ValueError:
-                d = _dt.strptime(df, "%d %b %Y").date()
-        except ValueError:
-            d = None
+                pass
+        if d is None:
+            continue
+        for key, _label, since in PERIODS:
+            if d >= since:
+                bucket, count = (ok, n_ok) if status == "approved" else (wait, n_wait)
+                bucket[key][cur] = bucket[key].get(cur, 0.0) + amt
+                count[key] += 1
 
-        if status == "approved":
-            buckets["all"][cur] = buckets["all"].get(cur, 0.0) + amt
-            counts["all"] += 1
-            if d:
-                if d >= month_start:
-                    buckets["month"][cur] = buckets["month"].get(cur, 0.0) + amt
-                    counts["month"] += 1
-                if d >= week_start:
-                    buckets["week"][cur] = buckets["week"].get(cur, 0.0) + amt
-                    counts["week"] += 1
-                if d == today:
-                    buckets["today"][cur] = buckets["today"].get(cur, 0.0) + amt
-                    counts["today"] += 1
-        elif status == "awaiting review":
-            pending[cur] = pending.get(cur, 0.0) + amt
-            pending_n += 1
+    lines = ["💰 Guadagni (per data di partecipazione)"]
+    for key, label, _since in PERIODS:
+        money = _fmt_money_by_cur(ok[key]) if ok[key] else "—"
+        if n_ok[key] or n_wait[key]:
+            tail = f"{n_ok[key]} approvati"
+            if n_wait[key]:
+                tail += (f" · {n_wait[key]} in revisione "
+                         f"{_fmt_money_by_cur(wait[key])}")
+        else:
+            tail = "nessuno studio"
+        lines.append(f"   {label + ':':11s} {money}  ·  {tail}")
 
-    lines = [
-        "💰 Guadagni",
-        f"   Oggi:       {_fmt_money_by_cur(buckets['today'])}  ({counts['today']} studi)",
-        f"   Settimana:  {_fmt_money_by_cur(buckets['week'])}  ({counts['week']} studi)",
-        f"   Mese:       {_fmt_money_by_cur(buckets['month'])}  ({counts['month']} studi)",
-        f"   Totale:     {_fmt_money_by_cur(buckets['all'])}  ({counts['all']} studi)",
-    ]
-    if pending:
-        lines.append(f"\n⏳ In revisione: {_fmt_money_by_cur(pending)} ({pending_n} studi)")
+    lines.append("")
+    if header.get("earned"):
+        lines.append(f"🏦 Totale account: {_fmt_money_by_cur(header['earned'])}"
+                     + (f" su {header['approved']} studi approvati"
+                        if header.get("approved") else ""))
+    if header.get("balance"):
+        bal = f"   Saldo: {_fmt_money_by_cur(header['balance'])}"
+        if header.get("pending"):
+            bal += f" · In revisione: {_fmt_money_by_cur(header['pending'])}"
+        lines.append(bal)
+    if header.get("total"):
+        read = len(subs)
+        if not complete:
+            lines.append(f"   ⏳ Storico letto: {read} di {header['total']} "
+                         "submission (le altre pagine arrivano a cicli fermi)")
+        else:
+            lines.append(f"   Storico completo: {read} submission")
+    elif not subs:
+        lines.append("Nessuna submission letta ancora.")
     return "\n".join(lines)
 
 
@@ -2272,6 +2547,26 @@ def _telegram_bot_loop():
                 COUNTS_AS_EARNED = {"approved"}
 
                 total_24h_by_cur: dict[str, float] = {}
+                n_24h = 0
+                # Sum over EVERY submission in the window, not only the eight
+                # that fit on screen: the total used to be computed inside the
+                # display loop, so a ninth study of the day was money the
+                # report simply left out.
+                for s in subs:
+                    if (s.get("reward") and s["status"].lower() in COUNTS_AS_EARNED):
+                        cur = s.get("currency", "£")
+                        try:
+                            try:
+                                d = datetime.strptime(s.get("date_full", ""), "%d %b %Y, %H:%M")
+                            except ValueError:
+                                d = datetime.strptime(s.get("date_full", ""), "%d %b %Y")
+                        except Exception:
+                            continue
+                        if d >= cutoff_24h:
+                            total_24h_by_cur[cur] = (total_24h_by_cur.get(cur, 0.0)
+                                                     + float(s["reward"]))
+                            n_24h += 1
+
                 lines.append("")
                 lines.append("📋 Studi recenti:")
                 for s in subs[:8]:
@@ -2281,21 +2576,11 @@ def _telegram_bot_loop():
                     cur = s.get("currency", "£")
                     reward_disp = f" {cur}{rwd}" if rwd else ""
                     lines.append(f"{emoji} {s['title']}{date_disp}{reward_disp}")
+                if len(subs) > 8:
+                    lines.append(f"   … e altri {len(subs) - 8}")
 
-                    # Sum earnings for last 24h (approved/awaiting only), per currency.
-                    if rwd and s["status"].lower() in COUNTS_AS_EARNED:
-                        date_full = s.get("date_full", "")
-                        try:
-                            try:
-                                d = datetime.strptime(date_full, "%d %b %Y, %H:%M")
-                            except ValueError:
-                                d = datetime.strptime(date_full, "%d %b %Y")
-                            if d >= cutoff_24h:
-                                total_24h_by_cur[cur] = total_24h_by_cur.get(cur, 0.0) + float(rwd)
-                        except Exception:
-                            pass
-
-                lines.append(f"💰 Guadagni ultime 24h: {_fmt_money_by_cur(total_24h_by_cur)}")
+                lines.append(f"💰 Approvati nelle ultime 24h: "
+                             f"{_fmt_money_by_cur(total_24h_by_cur)} ({n_24h} studi)")
             else:
                 if _submissions_cache["ts"] == 0.0:
                     lines.append("📋 Studi: caricamento al termine del ciclo...")
@@ -2421,15 +2706,32 @@ def _submissions_auto_updater():
     window (phase=None) so the agent is never interrupted mid-cycle."""
     if TEST_INSTANCE:
         return
+    # Serve the stored history at once: a restart used to leave /status and
+    # /earnings on "nessuna submission" until the first idle window.
+    try:
+        _store = _subs_store_load()
+        if _store["rows"]:
+            with _submissions_lock:
+                _submissions_cache["data"] = _subs_rows(_store)
+                _submissions_cache["header"] = _store.get("header") or {}
+                _submissions_cache["complete"] = _subs_complete(_store)
+                _submissions_cache["ts"] = _store.get("ts") or 0.0
+    except Exception:
+        pass
     time.sleep(20)  # let the browser settle after server start
     _submissions_trigger.set()   # fetch once on startup if agent is idle
     while True:
-        # Wait for a "done" signal or 5-minute timeout
-        _submissions_trigger.wait(timeout=300)
+        # Wait for a "done" signal, or wake on a timer: every minute while the
+        # history is still being read in, every five once it is complete.
+        _submissions_trigger.wait(
+            timeout=300 if _submissions_cache.get("complete") else 60)
         _submissions_trigger.clear()
         try:
-            # Skip if cache is fresh (< 60s old)
-            if time.time() - _submissions_cache["ts"] < 60:
+            # Skip if the cache is fresh -- unless history is still missing,
+            # in which case every idle window is wanted until the store
+            # matches Prolific's own SUMMARY.
+            if (time.time() - _submissions_cache["ts"] < 60
+                    and _submissions_cache.get("complete")):
                 continue
 
             with state_lock:
@@ -2438,13 +2740,10 @@ def _submissions_auto_updater():
 
             # Safe: agent stopped, OR between cycles (phase=None after "done")
             if not running or (running and phase is None):
-                with _submissions_lock:
-                    if time.time() - _submissions_cache["ts"] < 60:
-                        continue
-                    data = _fetch_submissions()
-                    if data:  # keep stale cache on transient errors
-                        _submissions_cache["data"] = data
-                        _submissions_cache["ts"] = time.time()
+                # _submissions_refresh takes the cache lock itself, once it
+                # has the data: holding it across a multi-page crawl would
+                # block /status and the dashboard for the whole crawl.
+                _submissions_refresh()
         except Exception:
             pass
 

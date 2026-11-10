@@ -390,6 +390,19 @@ function svgEl(tag, attrs, parent) {
 }
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
+/* Prolific states the account's own totals on its submissions page. While the
+   local history is still being read in, say so under the earnings tile rather
+   than letting a partial sum pass for the whole period: reading only the first
+   of 41 pages is what made this report claim £0.70 + $27.39 against the
+   £590.94 + $939.95 the account had actually earned. */
+function subsFootnote() {
+  const h = D.subs_header || {};
+  if (!h.total || D.subs_complete) return '';
+  const read = (D.submissions || []).length;
+  return `<span class="dim" title="Le pagine mancanti vengono lette quando l'agente è fra un ciclo e l'altro">` +
+    `storico letto: ${fmtN(read)} di ${fmtN(h.total)}</span>`;
+}
+
 /* ============================================================ outcome model */
 /* Only CODE is a completed study. NOCODE is a cycle that ended WITHOUT a
    completion code (the server now also files a "CODE: NOCODE" answer there),
@@ -536,10 +549,10 @@ function renderKPIs(runs, prevRuns, A, P, a, b) {
     const sym = curKeys[0] || '£';
     tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div>` +
       `<div class="v">${fmtMoneyByCur(subs.earnedByCur)}</div><div class="sub">${deltaOK ? deltaHTML(subs.earnedByCur[sym], prevSubs.earnedByCur[sym], true, v => moneyFmt(v, sym)) : ''}` +
-      `<span>${subs.anyPending ? fmtMoneyByCur(subs.pendingByCur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span></div></div>`);
+      `<span>${subs.anyPending ? fmtMoneyByCur(subs.pendingByCur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span>${subsFootnote()}</div></div>`);
   } else {
     tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div><div class="v">—</div>` +
-      `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span></div></div>`);
+      `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span>${subsFootnote()}</div></div>`);
   }
   const tpsColor = !isFinite(tpsMed) ? css('--c-blue') : tpsMed < slow ? css('--c-bad') : css('--c-blue');
   tiles.push(`<div class="card tile"><div class="k">${icon('gauge', 15)}Velocità del modello</div>` +
