@@ -1,0 +1,158 @@
+"""Unit tests for noticing that a researcher's own checks rejected the work.
+
+Runs standalone (no browser). Pure: page text in, verdict out.
+
+The failure this file guards against is silent by construction. On 10 Nov
+2026 an 80-trial image-comparison study ended on a page reading
+
+    Your submission has been flagged ...
+    ground_truth: Failed to correctly choose obvious test cases.
+
+and every surface still called the cycle a clean success: the study handed
+over a completion code, the code was banked, Prolific showed the submission
+awaiting review. Four runs on that platform had ended the same way since
+6 Nov without anything recording it. The verdict exists on exactly one
+screen, for a few seconds, and nowhere else.
+
+The cause of those four was a mechanical answer pattern -- the model
+alternated left/right "to avoid straight-lining" without looking at the
+images -- so the standing rules are checked here too: an A/B trial is to be
+decided from what it shows, and no positional pattern, neither one side nor
+an alternation, counts as an answer.
+"""
+
+import json
+import os
+import sys
+import types
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "agent"))
+
+for mod_name in ("playwright", "playwright.sync_api"):
+    if mod_name not in sys.modules:
+        m = types.ModuleType(mod_name)
+        if mod_name == "playwright.sync_api":
+            m.sync_playwright = lambda: None
+        sys.modules[mod_name] = m
+
+import agent_core as ac
+
+_RESULTS: list[tuple[str, bool, str]] = []
+
+
+def check(name: str, ok, detail: str = ""):
+    _RESULTS.append((name, bool(ok), detail))
+    print(f"{'PASS' if ok else 'FAIL'}  {name:66s} {detail}", flush=True)
+
+
+def section(title: str):
+    print(f"\n--- {title} " + "-" * max(0, 56 - len(title)), flush=True)
+
+
+# The two pages the study actually served, as innerText reads them (the
+# fingerprint collapses the newlines, which is why the detector works on one
+# long line and returns a window rather than a line).
+FLAGGED = (
+    "Thank you for your participation! Total time: 26m 14s Your submission has been "
+    "flagged. Our automatic checks have noticed some potential issues. This may be due "
+    "to faulty checks on our side, or an issue with your voting style. We will still use "
+    "your response, and apologise if you think you voted properly, nonetheless incase the "
+    "checks were correct can you please make sure to read the instructions even more "
+    "carefully in the future. Thank you for your time and effort! Validation Results: "
+    "avg_response_time: Average response time is acceptable: 18.10s ground_truth: Failed "
+    "to correctly choose obvious test cases. number_of_votes: All votes were submitted "
+    "successfully. Return to Prolific and collect your reward"
+)
+PASSED = (
+    "Thank you for your participation! Total time: 11m 20s Your submission has been "
+    "validated. Thank you for your time and effort! Validation Results: avg_response_time: "
+    "Average response time is acceptable: 17.86s ground_truth: Correctly chose obvious "
+    "test cases. number_of_votes: All votes were submitted successfully. Return to "
+    "Prolific and collect your reward"
+)
+
+section("qc_failure_in")
+
+hit = ac.qc_failure_in(FLAGGED)
+check("the page that rejected the work is recognised", bool(hit))
+check("the researcher's own wording is kept, not just the word 'flagged'",
+      "ground_truth" in hit or "Failed to correctly choose" in hit, hit[:90])
+check("the snippet stays short enough for a Telegram line", len(hit) <= 220, str(len(hit)))
+check("the page that accepted the work is left alone", ac.qc_failure_in(PASSED) == "")
+
+# False positives would be worse than the bug: every study that warns about
+# attention checks, or carries one, would be reported as a rejection.
+for benign in (
+    "Please note: this study contains attention checks. If you fail an attention check "
+    "your submission may be rejected.",
+    "This is an attention check. Please select Strongly disagree.",
+    "To show you are paying attention, choose the third option.",
+    "Your submission has been validated. Thank you!",
+    "Failed to load the image. Please refresh.",
+    "",
+):
+    check(f"not a rejection: {benign[:46]!r}", ac.qc_failure_in(benign) == "")
+
+for real in (
+    "You failed the attention check and cannot continue.",
+    "Unfortunately you did not pass our quality checks.",
+    "Your submission has been flagged for review.",
+    "The comprehension check was not passed.",
+):
+    check(f"a rejection: {real[:46]!r}", bool(ac.qc_failure_in(real)))
+
+section("from the page to summary.json")
+
+
+def diag(step, **kw):
+    d = {"type": "diag", "step": step, "url": "https://eval.services/?evaluation_id=x",
+         "guarded": False, "timer_active": True}
+    d.update(kw)
+    return json.dumps(d)
+
+
+lines = [diag(1), diag(2, qc_flag="ground_truth: Failed to correctly choose obvious test cases."),
+         json.dumps({"step": 3, "action_type": "terminate", "args": {"answer": "CODE: CAAFDDC88"}}),
+         diag(3, action="terminate", result="CODE: CAAFDDC88", code_source="url")]
+s = ac.summarize_transcript(lines)
+check("the verdict reaches the summary", s.get("flagged", "").startswith("ground_truth"))
+check("a flagged run is still a completed study, because the code was real",
+      s["outcome"] == "CODE" and s["code"] == "CAAFDDC88")
+
+clean = ac.summarize_transcript([diag(1), diag(2),
+                                 json.dumps({"step": 2, "action_type": "terminate",
+                                             "args": {"answer": "CODE: CAAFDDC88"}})])
+check("a run nobody flagged carries no flag field", "flagged" not in clean)
+
+section("what the surfaces do with it")
+
+gsrc = open(os.path.join(HERE, "..", "agent", "gui_server.py")).read()
+check("the run record carries the verdict", '"flagged": s.get("flagged") or ""' in gsrc)
+check("the dashboard row carries it as its last column",
+      'r.get("gen_tps"), r.get("flagged") or ""' in gsrc)
+check("the per-cycle ping says so instead of a bare tick", "_last_run_flag()" in gsrc)
+check("the daily summary lists the flagged runs",
+      "Segnalati dal ricercatore" in gsrc.split("def _daily_summary_text")[1])
+
+page = open(os.path.join(HERE, "..", "agent", "dashboard.html")).read()
+check("the page reads the verdict from the column the server writes",
+      "FLAG = 11;" in page and "r[FLAG]" in page)
+
+section("the rule that stops it happening again")
+
+for name, rules in (("full", ac._STANDING_RULES_FULL), ("compact", ac._STANDING_RULES_COMPACT)):
+    low = rules.lower()
+    check(f"{name}: planted ground-truth trials are named",
+          "ground-truth" in low or "ground truth" in low)
+    check(f"{name}: an alternation is refused like straight-lining",
+          "alternation" in low or "left-right" in low)
+    check(f"{name}: a past correction cannot excuse a planted check",
+          "correction" in low and ("never covers" in low or "rule 1 wins" in low))
+    check(f"{name}: the trial is still decided by looking at it",
+          "both options" in low)
+
+if __name__ == "__main__":
+    passed = sum(1 for _, ok, _ in _RESULTS if ok)
+    print(f"\n== SUMMARY ==  {passed}/{len(_RESULTS)} passed")
+    sys.exit(0 if passed == len(_RESULTS) else 1)

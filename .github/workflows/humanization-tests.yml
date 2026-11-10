@@ -22,6 +22,7 @@ on:
       - "tests/submissions_parse_test.py"
       - "tests/context_trim_test.py"
       - "tests/run_counting_test.py"
+      - "tests/qc_flag_test.py"
       - ".github/workflows/humanization-tests.yml"
   push:
     branches: [main]
@@ -53,6 +54,8 @@ jobs:
         run: python tests/context_trim_test.py
       - name: Study-counting tests (completed vs re-read vs code-less)
         run: python tests/run_counting_test.py
+      - name: Researcher-check tests (a flagged submission is reported)
+        run: python tests/qc_flag_test.py
 
   humanization-e2e:
     runs-on: ubuntu-latest

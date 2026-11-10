@@ -1705,6 +1705,54 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
 _WS_RE = re.compile(r"\s+")
 
 
+# A researcher's own words when their automatic checks reject the work that was
+# just submitted. These pages are the only place the verdict ever appears: the
+# study still returns a completion code, Prolific still shows "awaiting review",
+# so without this the run looks like a clean success on every surface and the
+# failure is found weeks later in a rejection -- or never.
+#
+# Every alternative demands a word of failure ("failed", "did not pass",
+# "flagged"), never the bare phrase: a study that WARNS about attention checks
+# in its instructions, or announces "this is an attention check", must not be
+# read as one that failed them.
+_QC_FAIL_RE = re.compile(
+    r"submission has been flagged"
+    r"|failed to correctly choose"
+    r"|(?:failed|did not pass|didn't pass|missed)[^.!?]{0,60}?"
+    r"(?:attention|quality|validation|comprehension|screening)[^.!?]{0,20}?check"
+    r"|(?:attention|quality|comprehension|validation)[^.!?]{0,20}?check[^.!?]{0,60}?"
+    r"(?:failed|was not passed|not passed|unsuccessful)"
+    r"|you (?:have )?failed [^.!?]{0,40}?check",
+    re.I)
+_QC_GENERIC_RE = re.compile(r"submission has been flagged", re.I)
+
+
+def qc_failure_in(text: str) -> str:
+    """The sentence a page uses to say the submission failed the researcher's
+    automatic checks, or "" when it says no such thing.
+
+    Returned with its surroundings (a window, not the match alone) so the
+    summary carries the researcher's wording: "ground_truth: Failed to
+    correctly choose obvious test cases" says what to fix, "flagged" does not.
+    """
+    hits = list(_QC_FAIL_RE.finditer(text or ""))
+    if not hits:
+        return ""
+    # "Your submission has been flagged" comes first on the page and says the
+    # least; the line that names the check that failed usually comes after it,
+    # under the results. Prefer the specific one, whatever its position.
+    m = next((h for h in hits if not _QC_GENERIC_RE.fullmatch(h.group(0))), hits[0])
+    text = text or ""
+    start = max(0, m.start() - 70)
+    before = text[start:m.start()]
+    cut = max(before.rfind(". "), before.rfind("! "), before.rfind("? "))
+    if cut >= 0:                       # start the snippet at a sentence
+        start += cut + 2
+    elif start > 0 and " " in before:  # ...or at least not mid-word
+        start += before.index(" ") + 1
+    return _WS_RE.sub(" ", text[start:m.end() + 110]).strip()[:220]
+
+
 def _page_fingerprint(limit: int = 8000) -> str:
     """Normalized visible page text PLUS the srcs of the visible images, used
     by _page_change_hint to tell the model how much its previous action
@@ -3225,10 +3273,19 @@ _STANDING_RULES_FULL = (
     "8. Repetitive trials: when a survey has many identical repeated trials (e.g. 60 A/B "
     "comparisons, repeated Likert scales), work through them efficiently with normal clicks — "
     "develop a fast rhythm: select option, scroll to submit, click submit, wait for next trial. "
-    "Do NOT use run_js (it is disabled). Vary your selections when uncertain — never pick "
-    "the same column/option for every single trial (straight-lining triggers rejection). "
+    "Do NOT use run_js (it is disabled). DECIDE EACH TRIAL FROM WHAT IT SHOWS: look at both "
+    "options before clicking. Many comparison studies plant ground-truth trials among the "
+    "ordinary ones — one option is obviously broken, distorted, or does not match the stated "
+    "prompt — and getting those wrong fails the researcher's automatic checks even when every "
+    "other answer is fine. So never choose by position: neither always the same side "
+    "(straight-lining) nor a left-right-left alternation, which is just as mechanical and just "
+    "as detectable. Variety is the RESULT of judging each pair, not a goal of its own; when the "
+    "two options really look equivalent, pick either one and move on. "
     "Follow any guidance from past user corrections shown in the [Things the user told you] "
-    "section — they carry across studies on the same domain. "
+    "section — they carry across studies on the same domain; but a correction that tells you to "
+    "answer fast or without inspecting the stimuli never covers a trial where one option is "
+    "obviously wrong or where the text carries an instruction: those are planted checks and "
+    "rule 1 wins. "
     "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction.\n"
     "9. NEVER ask_user_question — this run is unattended and nobody will reply. The USER PROFILE "
     "block at the top of this task counts as 'explicitly provided' for the critical-point rule, "
@@ -3259,7 +3316,11 @@ _STANDING_RULES_COMPACT = (
     "6. Respect minimum time — wait if timer says time remains. "
     "7. Screener: emphasise true persona traits that match; never invent contradicting facts. "
     "8. Repetitive trials: work through them efficiently with normal clicks. "
-    "Do NOT use run_js. Vary selections — never straight-line. "
+    "Do NOT use run_js. Judge EACH trial from what it shows — look at both options. Studies "
+    "plant ground-truth trials where one option is obviously broken/off-prompt, and missing "
+    "them fails the automatic checks. Never answer by position: not the same side every time, "
+    "not a left-right alternation. A past user correction about answering fast never covers a "
+    "trial with an obviously wrong option or an embedded instruction. "
     "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction. "
     "9. NEVER ask_user_question — unattended run. Treat the USER PROFILE above as 'explicitly provided'; "
     "for any demographic not in it, invent a value consistent with the profile and your prior answers in this survey."
@@ -3304,6 +3365,7 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
     running), or elsewhere on Prolific.
     """
     steps, answer, source = 0, "", None
+    flagged = ""
     where = {"list": 0, "study": 0, "elsewhere": 0}
     gen = []
     studies = []
@@ -3319,6 +3381,8 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
             source = d.get("code_source") or source or "model"
         if d.get("type") == "diag":
             url = d.get("url") or ""
+            if d.get("qc_flag") and not flagged:
+                flagged = d["qc_flag"]
             if d.get("timer_active") and not d.get("guarded"):
                 where["study"] += 1
             elif d.get("guarded") and _LIST_PATH.match(urlparse(url).path or ""):
@@ -3350,6 +3414,11 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
            "code_source": source if outcome in ("CODE", "NOCODE") else None,
            "steps_where": where, "studies": studies,
            "gen_tps_median": sorted(gen)[len(gen) // 2] if gen else None}
+    if flagged:
+        # The researcher said the submission failed their checks. Kept out
+        # of the outcome itself: the code was really earned and really
+        # banked, so it stays a CODE run, with the verdict beside it.
+        out["flagged"] = flagged
     if started:
         out["started"] = started.isoformat(timespec="seconds")
     if started and ended:
@@ -3512,6 +3581,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # Reset per run so one cycle's final page doesn't bleed into the next.
         _last_page_fp: str = ""
         _last_action_type_for_signal: str = ""
+        # First "your submission failed our checks" wording seen this run,
+        # read off the fingerprint the change signal already computes, so
+        # noticing it costs no extra page read. Kept per run: it goes into
+        # the step's diag line, and from there into summary.json.
+        _qc_flag: str = ""
         # Loop detector: last few action signatures with their URL path. When
         # the SAME signature on the SAME path repeats its threshold number of
         # times in a row (STUCK_THRESHOLD, or SCROLL_STUCK_THRESHOLD for
@@ -4026,6 +4100,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # step's action moved the page. Done after screenshot so the
             # action-settle delay has already run.
             curr_page_fp = _page_fingerprint()
+            qc_hit = "" if _qc_flag else qc_failure_in(curr_page_fp)
+            if qc_hit:
+                _qc_flag = qc_hit
             page_signal = _page_change_hint(_last_page_fp,
                                             _last_action_type_for_signal,
                                             curr_page_fp)
@@ -4505,6 +4582,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             }
             if action_type == "left_click" and here_guarded:
                 diag["pre_click_duration"] = pre_click_duration
+            if qc_hit:
+                diag["qc_flag"] = qc_hit
             diag["timer_started"] = _timer_started_this_step
             transcript.write(json.dumps(diag) + "\n")
             transcript.flush()

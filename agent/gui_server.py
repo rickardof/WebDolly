@@ -200,6 +200,23 @@ _submissions_lock = threading.Lock()
 _submissions_trigger = threading.Event()   # set on each "done" event
 
 
+def _last_run_flag() -> str:
+    """The "your submission failed our checks" wording from the run that just
+    ended, or "". Read from the newest summary.json, which run_agent writes
+    before the cycle returns, so the per-cycle ping can carry the verdict:
+    the study still gave a completion code, so without this line the ping
+    says nothing but a cheerful tick.
+    """
+    try:
+        tfs = _transcript_files()
+        if not tfs:
+            return ""
+        s = json.loads((tfs[-1].parent / "summary.json").read_text())
+        return (s.get("flagged") or "")[:200]
+    except Exception:
+        return ""
+
+
 def _transcript_files() -> list:
     """Every run transcript, newest last. Runs older than FARA_MAX_RUNS keep
     their transcript gzipped (see agent_core._prune_old_runs), so both forms
@@ -1426,6 +1443,10 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
                     emoji = "⚠️"; head = "Completato senza codice"
                 else:
                     emoji = "ℹ️"
+                _flag = _last_run_flag()
+                if _flag:
+                    emoji = "🚩"
+                    head = f"{head}\n⚠️ {_flag}"
                 agent_core._notify_telegram(f"{emoji} Ciclo {cycle}: {head}")
             # Inter-cycle idle: a real user doesn't start the next study 2s
             # after submitting the last. 8-25s normally; ~5% of the time a
@@ -1600,7 +1621,7 @@ def _run_record(tf) -> dict | None:
             "steps": s.get("steps", 0), "outcome": outcome, "answer": s.get("answer", ""),
             "code": s.get("code") or "", "studies": s.get("studies") or [],
             "code_source": s.get("code_source"), "where": s.get("steps_where") or {},
-            "gen_tps": s.get("gen_tps_median")}
+            "gen_tps": s.get("gen_tps_median"), "flagged": s.get("flagged") or ""}
 
 
 _record_cache: dict = {}
@@ -1634,7 +1655,8 @@ def _dashboard_data() -> dict:
     The page does the aggregation itself, so switching period is instant and
     the server only has to list runs. One row per run:
     [start, end, seconds, steps, outcome, answer, code_source,
-     steps_on_list, steps_in_study, steps_elsewhere, model_tokens_per_s]
+     steps_on_list, steps_in_study, steps_elsewhere, model_tokens_per_s,
+     qc_flag]
     """
     from datetime import datetime as _dt
     runs = []
@@ -1647,7 +1669,7 @@ def _dashboard_data() -> dict:
                      int(r.get("duration_s") or 0), int(r.get("steps") or 0), _outcome_of(r),
                      (r.get("answer") or "")[:80], r.get("code_source"),
                      int(w.get("list", 0)), int(w.get("study", 0)), int(w.get("elsewhere", 0)),
-                     r.get("gen_tps")])
+                     r.get("gen_tps"), r.get("flagged") or ""])
     subs = []
     for s in list(_submissions_cache.get("data") or []):
         ts = None
@@ -2254,6 +2276,13 @@ def _daily_summary_text(day=None) -> str:
              + (f", codice già registrato {repeat}" if repeat else "") + ")",
              f"✅ Studi completati: {len(done)}"]
     lines += [f"   • {d}" for d in done]
+    # A flagged submission still earns a code, so it is counted above as
+    # completed; it is listed again here because the researcher said the
+    # work failed their checks, and that is the only notice there will be.
+    flagged = [r for r in runs if r.get("flagged")]
+    if flagged:
+        lines.append(f"🚩 Segnalati dal ricercatore: {len(flagged)}")
+        lines += [f"   • {r['flagged'][:120]}" for r in flagged[:4]]
     lines.append(f"⏭ Studi scartati: {len(skipped)}")
     lines += [f"   • {v.get('title') or 'senza titolo'} — {v.get('reason')}" for v in skipped[:8]]
     with state_lock:

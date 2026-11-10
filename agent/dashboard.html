@@ -220,6 +220,8 @@
     background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 26%, transparent); }
   .copy { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; }
   .copy:hover { opacity: 1; background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .flag { display: inline-block; padding: 2px 8px; border-radius: 7px; font: 600 11px var(--mono); color: var(--bad);
+    background: color-mix(in srgb, var(--bad) 10%, transparent); border: 1px solid color-mix(in srgb, var(--bad) 26%, transparent); cursor: help; }
   .more { display: flex; justify-content: center; padding: 10px 0 2px; }
   .tview { max-height: 320px; overflow: auto; }
 
@@ -329,7 +331,8 @@
 <script>
 /* ============================================================ data */
 let D = /*__DATA__*/null;
-const S = 0, E = 1, DUR = 2, STEPS = 3, OUT = 4, ANS = 5, SRC = 6, WL = 7, WS = 8, WE = 9, TPS = 10;
+const S = 0, E = 1, DUR = 2, STEPS = 3, OUT = 4, ANS = 5, SRC = 6, WL = 7, WS = 8, WE = 9, TPS = 10,
+      FLAG = 11;
 const $ = id => document.getElementById(id);
 
 /* ============================================================ formatting */
@@ -937,12 +940,13 @@ function renderTables(runs) {
   const more = arr => arr.length > LIMIT ? `<div class="more"><button class="btn btn-ghost" id="moreBtn">${tblAll ? 'Mostra meno' : 'Mostra tutti (' + arr.length + ')'}</button></div>` : '';
   let html = '';
   if (tblTab === 'done') {
-    html = done.length ? `<table><thead><tr><th>Inizio</th><th class="num">Durata</th><th class="num">Passi</th><th>Codice</th><th>Letto da</th></tr></thead><tbody>` +
+    html = done.length ? `<table><thead><tr><th>Inizio</th><th class="num">Durata</th><th class="num">Passi</th><th>Codice</th><th>Letto da</th><th>Controlli</th></tr></thead><tbody>` +
       cut(done).map(r => {
         const code = String(r[ANS] || '').replace(/^CODE:\s*/, '');
         return `<tr><td>${esc(dt(r[S]))}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
           `<td>${r[OUT] === 'CODE' ? `<span class="code">${esc(code)}<button class="copy" data-copy="${esc(code)}" title="Copia">${icon('copy', 13)}</button></span>` : '<span class="dim">senza codice</span>'}</td>` +
-          `<td class="dim">${r[SRC] === 'url' ? 'URL di Prolific' : r[SRC] === 'model' ? 'schermo' : '—'}</td></tr>`;
+          `<td class="dim">${r[SRC] === 'url' ? 'URL di Prolific' : r[SRC] === 'model' ? 'schermo' : '—'}</td>` +
+          `<td class="dim">${r[FLAG] ? `<span class="flag" title="${esc(r[FLAG])}">controlli non superati</span>` : ''}</td></tr>`;
       }).join('') + `</tbody></table>` + more(done) : '';
     if (!done.length) html = `<div class="empty-chart">${icon('check', 22)}<div>Nessuno studio completato in questo periodo</div></div>`;
   } else if (tblTab === 'fail') {
