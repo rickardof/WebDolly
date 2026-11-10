@@ -226,11 +226,19 @@ def _read_transcript(path) -> str:
 
 
 def _dbg(msg: str):
-    """Write a debug line to submissions_api_debug.txt."""
+    """Append a debug line to submissions_api_debug.txt.
+
+    It used to overwrite the file, so only the very last line survived and a
+    multi-page crawl left no trace of which page went wrong. Capped at 200 KB.
+    """
     try:
         from agent_core import LOG_ROOT
         Path(LOG_ROOT).mkdir(parents=True, exist_ok=True)
-        (Path(LOG_ROOT) / "submissions_api_debug.txt").write_text(str(msg)[:4000])
+        f = Path(LOG_ROOT) / "submissions_api_debug.txt"
+        if f.exists() and f.stat().st_size > 200_000:
+            f.write_text(f.read_text(errors="replace")[-50_000:])
+        with f.open("a") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {str(msg)[:4000]}\n")
     except Exception:
         pass
 
@@ -445,8 +453,20 @@ def _fetch_submissions(page: int = 1) -> dict:
 
     rows = _parse_submission_rows(raw_rows)
     header = _parse_submission_header(raw_rows)
-    _dbg(f"tab fetch page {page}: {len(raw_rows)} lines, {len(rows)} rows, header={header}")
-    return {"rows": rows, "header": header, "last_page": _parse_last_page(raw_rows)}
+    last_page = _parse_last_page(raw_rows)
+    _dbg(f"page {page}/{last_page}: {len(raw_rows)} lines, {len(rows)} rows")
+    # A page that yields fewer rows than Prolific puts on one is the only way
+    # the store can end up short of the SUMMARY, and after the fact there is
+    # nothing left to look at. Keep its lines: an unknown status word or a
+    # row shape the parser does not cover shows up immediately.
+    if len(rows) < _SUBS_PER_PAGE and page < last_page:
+        try:
+            (Path(agent_core.LOG_ROOT) / f"submissions_short_p{page}.txt"
+             ).write_text("\n".join(raw_rows))
+            _dbg(f"page {page} came up short ({len(rows)} rows): lines kept")
+        except Exception:
+            pass
+    return {"rows": rows, "header": header, "last_page": last_page}
 
 
 # ------------------------------------------------------------ the local store
