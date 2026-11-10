@@ -3197,11 +3197,22 @@ def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None
                 "button to proceed (e.g. Next/Continue/Submit)."
             )
 
+    # What was actually answered, question by question. Until now the
+    # transcript kept only "filled 8/8 fields successfully": a rejected study
+    # whose middle pages were batch-filled left no record of a single question
+    # or answer, and no screenshot either, because this path takes no model
+    # turn. Five pages could vanish that way.
+    by_id = {f["id"]: f for f in fields}
+    qa = [[(by_id.get(fid, {}).get("text") or fid).strip().replace("\n", " ")[:120],
+           (", ".join(map(str, v)) if isinstance(v, list) else str(v))[:80]]
+          for fid, v in (result.get("answers") or {}).items()][:40]
+
     step_event = {
         "type": "batch_fill",
         "thoughts": "Detected a multi-question form; filled it via DOM extraction instead of per-field clicking.",
         "result": result,
         "result_desc": summary,
+        "qa": qa,
     }
     return step_event, next_text, summary
 
@@ -3839,6 +3850,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     task, attempted_form_signatures, survey_memory, timer=study_timer)
                 transcript.write(json.dumps(
                     {"step": step, "batch_fill_check": batch_diag}) + "\n")
+                if (batch_step_event or {}).get("qa"):
+                    transcript.write(json.dumps(
+                        {"step": step, "batch_fill_qa": batch_step_event["qa"]}) + "\n")
                 transcript.flush()
                 if batch_step_event is not None:
                     pending_user_response = batch_next_text

@@ -855,6 +855,15 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     unanswered = [f for f in fields if not f.get("answered") and not _identity_kind(f)]
     if not ok:
         unanswered = []          # identity-only page: nothing for the model
+    # Questions about the advertisement/image/video the participant was just
+    # shown are not answered here at all: this path reads the DOM, never the
+    # screen, so it would be guessing -- and that is where a manipulation or
+    # attention check sits. They go back as undecided, which also stops the
+    # DOM auto-advance, so the vision step answers them with the page in view.
+    deferred_visual = [f for f in unanswered if base.needs_eyes(f)]
+    if deferred_visual:
+        skip = {f["id"] for f in deferred_visual}
+        unanswered = [f for f in unanswered if f["id"] not in skip]
     preserved = {f["id"]: f["current"] for f in fields if f.get("answered")}
     scaled = {f["id"]: base.scale_view_for_llm(f) for f in unanswered}
     llm_view = [{k: v for k, v in scaled[f["id"]].items() if not k.startswith("_") and k != "widget"}
@@ -871,7 +880,7 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     # filled and is reported as undecided -- which also stops the DOM
     # "Next" click, so the page is never submitted with a gap.
     undecided = sorted(set(undecided) | ({f["id"] for f in unanswered} - set(new_answers))
-                       | set(identity_missing))
+                       | set(identity_missing) | {f["id"] for f in deferred_visual})
     new_answers.update(identity_answers)
 
     res = apply_answers(fields, new_answers)
@@ -908,6 +917,9 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
         "skipped": False, "field_count": len(fields),
         "already_answered_count": len(preserved), "newly_answered_count": len(new_answers),
         "undecided": undecided, "answers": {**preserved, **new_answers},
+        "deferred_visual": [{"id": f["id"],
+                             "text": (f.get("text") or f["id"]).strip().replace("\n", " ")}
+                            for f in deferred_visual],
         "apply_errors": apply_errors, "apply_errors_human": apply_errors_human,
         "mismatches": [],
         "verified_state": {}, "apply_attempts": 1,

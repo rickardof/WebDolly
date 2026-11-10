@@ -152,6 +152,59 @@ for name, rules in (("full", ac._STANDING_RULES_FULL), ("compact", ac._STANDING_
     check(f"{name}: the trial is still decided by looking at it",
           "both options" in low)
 
+section("what batch-fill must not answer")
+
+# The run that was rejected on 10 Nov filled five pages of an advertisement
+# study with no model turn and no screenshot: 38 fields, decided from the DOM
+# text alone. A study that shows an ad and then asks what the ad showed puts
+# its manipulation check exactly there, and the text path cannot see the ad.
+import form_fill as ff
+
+
+def field(text, options=None, fid="fs:0:radio"):
+    return {"id": fid, "text": text, "options": options or ["Yes", "No"]}
+
+
+for q in (
+    "Did the advertisement display a notice that AI was involved?",
+    "Was there a logo in the image you just saw?",
+    "How many people appear in the picture shown above?",
+    "What colour was the car in the video?",
+    "Does the advertisement contain an AI symbol?",
+    "Nell'immagine era presente un simbolo?",
+):
+    check(f"left to the eyes: {q[:46]!r}", ff.needs_eyes(field(q)))
+
+for q in (
+    "How much do you like this brand?",
+    "Which of the following best describes your job?",
+    "How many hours a week do you work?",
+    "To show you are paying attention, please select 'Strongly disagree'.",
+    "What is your age?",
+    "I would consider buying this product.",
+):
+    check(f"batch-fill keeps: {q[:46]!r}", not ff.needs_eyes(field(q)))
+
+# The agent-facing line has to name the question, not an id: the step that
+# reads it is the one holding the screenshot.
+msg = ff.summarize_for_agent({
+    "skipped": False, "field_count": 8, "already_answered_count": 0,
+    "undecided": ["fs:3:radio"], "mismatches": [], "apply_errors": {},
+    "deferred_visual": [{"id": "fs:3:radio",
+                         "text": "Did the advertisement display a notice that AI was involved?"}]})
+check("the deferred question is named in words", "Did the advertisement display" in msg)
+check("and is not repeated as a bare id", "fs:3:radio" not in msg, msg[-80:])
+
+src = open(os.path.join(HERE, "..", "agent", "form_fill_pw.py")).read()
+check("a deferred question is never sent to the text model",
+      'unanswered = [f for f in unanswered if f["id"] not in skip]' in src)
+check("and counts as undecided, which stops the blind auto-advance",
+      '| {f["id"] for f in deferred_visual}' in src)
+
+acsrc = open(os.path.join(HERE, "..", "agent", "agent_core.py")).read()
+check("every batch-filled question and answer reaches the transcript",
+      '"batch_fill_qa"' in acsrc and '"qa": qa,' in acsrc)
+
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
     print(f"\n== SUMMARY ==  {passed}/{len(_RESULTS)} passed")

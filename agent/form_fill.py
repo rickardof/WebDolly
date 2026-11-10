@@ -1277,6 +1277,37 @@ def click_advance_button(settle_seconds: float = 1.2) -> dict:
     }
 
 
+# A question batch-fill cannot honestly answer: the answer is on the screen,
+# not in the DOM text it reads. Batch-fill sends the page's question text and
+# option labels to a text model; it never sees the advertisement, the video or
+# the image the question is about, so "Did the advertisement show an AI
+# notice?" is answered by guessing, and researchers plant exactly that question
+# as their manipulation or attention check. Those questions are left for the
+# vision step, which has the screenshot.
+#
+# Both halves must match: a stimulus to look at, and a cue that the question
+# asks what was in it. "How much do you like the advertisement?" is an opinion
+# and stays with batch-fill; "Was there a logo in the advertisement?" does not.
+_STIMULUS_RE = re.compile(
+    r"advertis|\bads?\b|\bimages?\b|\bpictures?\b|\bphotos?\b|\bvideos?\b|\bclips?\b"
+    r"|\bbanner|\bposter|\blogos?\b|\bsymbols?\b|\bicons?\b|\bbadges?\b|screenshot"
+    r"|\bcharts?\b|\bgraphs?\b|\bvignette|\bscenario\b|\bstimulus\b"
+    r"|immagin|\bfoto\b|annuncio|pubblicit|\bvideo\b", re.I)
+_RECALL_RE = re.compile(
+    r"\bdid\b|\bdoes\b|\bwas\b|\bwere\b|\bis there\b|\bare there\b|how many"
+    r"|what colou?r|\bnotice\b|displayed|\bshown\b|\bshow(?:s|ed)?\b|\bappear"
+    r"|\brecall\b|\bremember\b|\bcontain|you (?:just )?(?:saw|watched|read|viewed)"
+    r"|\babove\b|previous page|\bhai visto\b|\bera presente\b|\bmostrav", re.I)
+
+
+def needs_eyes(field: dict) -> bool:
+    """True when this question asks what was in something the participant was
+    shown, so only the step that holds the screenshot can answer it."""
+    text = " ".join([str(field.get("text") or ""),
+                     " ".join(str(o) for o in (field.get("options") or []))])
+    return bool(_STIMULUS_RE.search(text) and _RECALL_RE.search(text))
+
+
 def summarize_for_agent(result: dict) -> str:
     """Turns a run_batch_fill() result into a short text observation to feed
     back into Fara's normal CUA loop (replacing what would otherwise be a
@@ -1291,8 +1322,17 @@ def summarize_for_agent(result: dict) -> str:
     msg = f"[batch-fill] filled {ok}/{n} fields successfully."
     if already:
         msg += f" ({already} were already answered and left untouched.)"
-    if undecided:
-        msg += f" Could not decide answers for {undecided} -- fill those yourself."
+    deferred = result.get("deferred_visual") or []
+    if deferred:
+        # Named, not listed by id: the step that reads this has the
+        # screenshot and needs to know WHICH question to look up.
+        qs = "; ".join(f'"{d["text"][:90]}"' for d in deferred[:4])
+        msg += (f" Left unanswered on purpose, because they ask about something only "
+                f"visible on the page: {qs}. Read the screenshot and answer those "
+                "yourself before moving on.")
+    rest = [u for u in undecided if u not in {d["id"] for d in deferred}]
+    if rest:
+        msg += f" Could not decide answers for {rest} -- fill those yourself."
     if result.get("apply_errors_human"):
         msg += " " + " ".join(result["apply_errors_human"])
     elif result["apply_errors"]:
