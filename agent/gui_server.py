@@ -454,16 +454,24 @@ def _fetch_submissions(page: int = 1) -> dict:
     rows = _parse_submission_rows(raw_rows)
     header = _parse_submission_header(raw_rows)
     last_page = _parse_last_page(raw_rows)
-    _dbg(f"page {page}/{last_page}: {len(raw_rows)} lines, {len(rows)} rows")
-    # A page that yields fewer rows than Prolific puts on one is the only way
-    # the store can end up short of the SUMMARY, and after the fact there is
-    # nothing left to look at. Keep its lines: an unknown status word or a
-    # row shape the parser does not cover shows up immediately.
-    if len(rows) < _SUBS_PER_PAGE and page < last_page:
+    # Every page of the list shows one status badge per submission, so that
+    # count is what the page holds and len(rows) is what we got out of it.
+    # The store settling 9 short of the SUMMARY, with every page yielding its
+    # 20 rows and no key ever clashing, has to be one of these two: a row the
+    # parser drops (no title found within the backward window, so nothing is
+    # emitted) or two rows of one page landing on a single key. Both are
+    # invisible unless measured here, so measure both and keep the page.
+    badges = sum(1 for r in raw_rows if _STATUS_RE.match(r))
+    keys = [_subs_key(r) for r in rows]
+    dupes = len(keys) - len(set(keys))
+    _dbg(f"page {page}/{last_page}: {len(raw_rows)} lines, {badges} badges, "
+         f"{len(rows)} rows" + (f", {dupes} duplicate keys" if dupes else ""))
+    if dupes or len(rows) != badges or (badges < _SUBS_PER_PAGE and page < last_page):
         try:
-            (Path(agent_core.LOG_ROOT) / f"submissions_short_p{page}.txt"
+            (Path(agent_core.LOG_ROOT) / f"submissions_odd_p{page}.txt"
              ).write_text("\n".join(raw_rows))
-            _dbg(f"page {page} came up short ({len(rows)} rows): lines kept")
+            _dbg(f"page {page} does not add up ({badges} badges, {len(rows)} rows, "
+                 f"{dupes} duplicate keys): lines kept")
         except Exception:
             pass
     return {"rows": rows, "header": header, "last_page": last_page}
@@ -551,8 +559,19 @@ def _subs_merge(store: dict, rows: list) -> int:
     adjustment to a row already read (so it does not).
     """
     changed = 0
+    seen: dict = {}
     for r in rows:
         k = _subs_key(r)
+        # One page can genuinely show the same study twice at the same minute
+        # for the same money: "AI Videos - Evaluation", 13 Nov 2025 18:44,
+        # $5.00, once approved and once returned. Date and title alone are
+        # then not an identity, and the second row used to overwrite the
+        # first. Numbering the repeats within the page keeps both, and keeps
+        # doing so on every later read, because they always arrive together
+        # and in the same order.
+        seen[k] = seen.get(k, 0) + 1
+        if seen[k] > 1:
+            k = f"{k}#{seen[k]}"
         old = store["rows"].get(k)
         if old is not None and (old.get("reward") != r.get("reward")
                                 or old.get("currency") != r.get("currency")):
@@ -624,8 +643,21 @@ def _submissions_refresh(max_pages: int = 6) -> bool:
     # starts only after the cooldown: if the SUMMARY can never be matched --
     # a row Prolific no longer lists, a title we truncate differently -- the
     # crawl must not then borrow the browser on every single cycle forever.
+    # Page numbers only mean something while the list stands still. Every new
+    # submission pushes every older one down, so a row can cross a boundary
+    # the sweep has already passed and never be read: that is how the store
+    # settled 8 short of a list a single uninterrupted pass reads whole. If
+    # the account's own total moved since this sweep began, the sweep starts
+    # over rather than carrying on with stale page numbers.
+    total_now = (store.get("header") or {}).get("total")
+    if page > 2 and store.get("sweep_total") not in (None, total_now):
+        _dbg(f"sweep restarted: the list grew from {store.get('sweep_total')} "
+             f"to {total_now} while it was being read")
+        page = 2
     sweeping = not _subs_complete(store) and (
         page > 2 or time.time() - (store.get("swept") or 0) > _SUBS_SWEEP_COOLDOWN)
+    if sweeping and page == 2:
+        store["sweep_total"] = total_now
     while (sweeping and pages_read < max_pages and not _subs_complete(store)
            and page <= last_page and _subs_agent_idle()):
         got = _fetch_submissions(page)

@@ -432,6 +432,47 @@ def _():
     assert next(iter(st["rows"].values()))["status"] == "Approved"
 
 
+@_t("store:the_same_study_twice_in_one_minute_is_two_rows")
+def _():
+    # Prolific really does list this: "AI Videos - Evaluation", 13 Nov 2025
+    # 18:44, $5.00, once approved and once returned, both on page 18. Date
+    # and title alone are not an identity, and the second row used to
+    # overwrite the first -- 8 submissions lost that way.
+    st = {"rows": {}, "header": {}}
+    same = [_row("AI Videos - Evaluation", "13 Nov 2025, 18:44", status="Approved",
+                 reward="5.00", cur="$"),
+            _row("AI Videos - Evaluation", "13 Nov 2025, 18:44", status="Returned",
+                 reward="5.00", cur="$")]
+    gs._subs_merge(st, same)
+    assert len(st["rows"]) == 2, st["rows"]
+    assert sorted(r["status"] for r in st["rows"].values()) == ["Approved", "Returned"]
+
+
+@_t("store:reading_that_page_again_does_not_add_a_third")
+def _():
+    st = {"rows": {}, "header": {}}
+    same = [_row("A", "13 Nov 2025, 18:44", status="Approved", reward="5.00"),
+            _row("A", "13 Nov 2025, 18:44", status="Returned", reward="5.00")]
+    gs._subs_merge(st, same)
+    assert gs._subs_merge(st, same) == 0
+    assert len(st["rows"]) == 2
+
+
+@_t("store:and_a_status_flip_still_updates_in_place")
+def _():
+    st = {"rows": {}, "header": {}}
+    gs._subs_merge(st, [_row("A", "13 Nov 2025, 18:44", status="Awaiting Review",
+                             reward="5.00"),
+                        _row("A", "13 Nov 2025, 18:44", status="Returned",
+                             reward="5.00")])
+    gs._subs_merge(st, [_row("A", "13 Nov 2025, 18:44", status="Approved",
+                             reward="5.00"),
+                        _row("A", "13 Nov 2025, 18:44", status="Returned",
+                             reward="5.00")])
+    assert len(st["rows"]) == 2, st["rows"]
+    assert sorted(r["status"] for r in st["rows"].values()) == ["Approved", "Returned"]
+
+
 @_t("store:same_title_different_day_is_a_second_study")
 def _():
     st = {"rows": {}, "header": {}}
