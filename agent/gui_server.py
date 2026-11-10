@@ -530,11 +530,26 @@ def _subs_store_save(store: dict) -> None:
 
 
 def _subs_merge(store: dict, rows: list) -> int:
-    """Add or update rows in the store; returns how many actually changed."""
+    """Add or update rows in the store; returns how many actually changed.
+
+    Two rows of the same page landing on one key would be a submission lost
+    without a trace, and the store then never reaches the SUMMARY's count: a
+    full 41-page read lands 807 of 816 while every single page yields its 20
+    rows. Whenever a key arrives over a row that differs in more than its
+    status, say so -- the line shows whether Prolific listed two payments of
+    one study separately (so the key needs a third part) or simply added an
+    adjustment to a row already read (so it does not).
+    """
     changed = 0
     for r in rows:
         k = _subs_key(r)
-        if store["rows"].get(k) != r:
+        old = store["rows"].get(k)
+        if old is not None and (old.get("reward") != r.get("reward")
+                                or old.get("currency") != r.get("currency")):
+            _dbg(f"key clash {k!r}: {old.get('currency')}{old.get('reward')}"
+                 f" ({old.get('status')}) <- {r.get('currency')}{r.get('reward')}"
+                 f" ({r.get('status')})")
+        if old != r:
             store["rows"][k] = r
             changed += 1
     return changed
