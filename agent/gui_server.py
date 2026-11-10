@@ -524,13 +524,19 @@ def _subs_store_load() -> dict:
     try:
         d = json.loads(SUBS_STORE.read_text())
         if d.get("v") == _SUBS_STORE_V and isinstance(d.get("rows"), dict):
-            # Drop what an older parser could not read: every Prolific
-            # submission has a date, so a row without one is mangled and
-            # would sit in the store for ever, counting toward the total and
-            # satisfying the checksum with a row that says nothing. Dropping
-            # it makes the store incomplete again, which is what sends the
-            # crawl back for the real one.
-            d["rows"] = {k: r for k, r in d["rows"].items() if r.get("date_full")}
+            # Drop what an older parser could not read. The signature is a
+            # title holding an amount, which is what the bonus line used to
+            # become. NOT the absence of a date: the oldest submissions
+            # really are listed without one --
+            #     Runners wanted: help improve a running app
+            #     By maze.design
+            #     Reward: $4,33
+            #     RETURNED
+            # -- and requiring a date threw away 8 real rows, which left the
+            # store permanently 8 short of the SUMMARY and re-swept all 41
+            # pages every six hours looking for them.
+            d["rows"] = {k: r for k, r in d["rows"].items()
+                         if (r.get("title") or " ")[:1] not in "£$€"}
             return d
     except Exception:
         pass

@@ -252,10 +252,34 @@ def _():
         assert rows[0]["date_full"], (extra, rows)
 
 
-@_t("store:a_row_without_a_date_is_forgotten")
+@_t("parse:the_oldest_rows_carry_no_date_at_all")
 def _():
-    # Phantoms written by the older parser must not survive in the store: they
-    # would count toward the total and satisfy the crawl's checksum.
+    # Prolific lists its oldest submissions without a date. They are real
+    # submissions and must be kept; treating the missing date as damage threw
+    # 8 of them away and left the store permanently short of the SUMMARY.
+    rows = _parse_submission_rows("""SUBMISSION HISTORY
+Study name
+Date
+Reward
+Status
+Actions
+Runners wanted: help improve a running app
+By some.design
+Reward: $4,33
+RETURNED
+Prev
+1
+Next""".split("\n"))
+    assert len(rows) == 1, rows
+    assert rows[0]["title"] == "Runners wanted: help improve a running app"
+    assert rows[0]["reward"] == "4.33" and rows[0]["currency"] == "$"
+    assert rows[0]["date_full"] == ""
+
+
+@_t("store:a_dateless_row_is_kept_but_a_phantom_is_not")
+def _():
+    # The phantom's signature is a title holding an amount, not a missing
+    # date.
     import tempfile, pathlib, json as _j
     with tempfile.TemporaryDirectory() as d:
         orig = gs.SUBS_STORE
@@ -269,10 +293,14 @@ def _():
                          "9 Nov 2026, 09:19|Real": {
                              "title": "Real", "status": "Approved",
                              "date": "9 Nov 2026", "date_full": "9 Nov 2026, 09:19",
-                             "reward": "1.00", "currency": "£"}}}))
+                             "reward": "1.00", "currency": "£"},
+                         "|Runners wanted": {
+                             "title": "Runners wanted", "status": "Returned",
+                             "date": "", "date_full": "",
+                             "reward": "4.33", "currency": "$"}}}))
             back = gs._subs_store_load()
-            assert list(back["rows"]) == ["9 Nov 2026, 09:19|Real"], back["rows"]
-            assert not gs._subs_complete(back), "dropping it must reopen the crawl"
+            assert sorted(back["rows"]) == ["9 Nov 2026, 09:19|Real", "|Runners wanted"], \
+                back["rows"]
         finally:
             gs.SUBS_STORE = orig
 
