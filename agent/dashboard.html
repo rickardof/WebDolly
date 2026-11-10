@@ -123,7 +123,11 @@
   .tile .k .ic { color: var(--text-3); }
   .tile .v { font-size: 28px; font-weight: 650; letter-spacing: -.025em; line-height: 1.1; color: var(--text); white-space: nowrap; }
   .tile .v small { font-size: 13px; font-weight: 600; color: var(--text-3); letter-spacing: 0; margin-left: 4px; }
-  .tile .sub { display: flex; align-items: center; gap: 8px; min-height: 18px; font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; }
+  /* Two currencies at 28px do not fit a tile: "$105.17 + £46.37" hung 24px
+     outside the card. Shown smaller and allowed to wrap instead of clipped,
+     because a truncated amount is worse than a smaller one. */
+  .tile .v.v-multi { font-size: 18px; line-height: 1.3; white-space: normal; }
+  .tile .sub { display: flex; align-items: center; gap: 8px; min-height: 18px; font-size: 11.5px; color: var(--text-3); white-space: normal; flex-wrap: wrap; overflow: hidden; }
   .delta { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 999px; font-weight: 600; font-size: 11px; }
   .delta.up-good, .delta.down-good { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
   .delta.up-bad, .delta.down-bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
@@ -547,11 +551,12 @@ function renderKPIs(runs, prevRuns, A, P, a, b) {
     const prevKeys = prevSubs ? Object.keys(prevSubs.earnedByCur).filter(c => prevSubs.earnedByCur[c] > 0) : [];
     const deltaOK = curKeys.length === 1 && prevKeys.length === 1 && curKeys[0] === prevKeys[0] && period !== 'all';
     const sym = curKeys[0] || '£';
-    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div>` +
-      `<div class="v">${fmtMoneyByCur(subs.earnedByCur)}</div><div class="sub">${deltaOK ? deltaHTML(subs.earnedByCur[sym], prevSubs.earnedByCur[sym], true, v => moneyFmt(v, sym)) : ''}` +
-      `<span>${subs.anyPending ? fmtMoneyByCur(subs.pendingByCur) + ' in revisione' : fmtN(subs.count) + ' submission'}</span>${subsFootnote()}</div></div>`);
+    const earned = fmtMoneyByCur(subs.earnedByCur);
+    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno incassato</div>` +
+      `<div class="v${earned.includes(' + ') ? ' v-multi' : ''}">${earned}</div><div class="sub">${deltaOK ? deltaHTML(subs.earnedByCur[sym], prevSubs.earnedByCur[sym], true, v => moneyFmt(v, sym)) : ''}` +
+      `<span>${fmtN(subs.nPaid)} su ${fmtN(subs.count)} submission${subs.anyPending ? ` · ${fmtMoneyByCur(subs.pendingByCur)} in revisione` : ''}</span>${subsFootnote()}</div></div>`);
   } else {
-    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno approvato</div><div class="v">—</div>` +
+    tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno incassato</div><div class="v">—</div>` +
       `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span>${subsFootnote()}</div></div>`);
   }
   const tpsColor = !isFinite(tpsMed) ? css('--c-blue') : tpsMed < slow ? css('--c-bad') : css('--c-blue');
@@ -754,12 +759,23 @@ function renderModel(runs) {
   }
   if (pts.length < 2) { emptyChart(host, pts.length ? 'Una sola misura: serve almeno un altro ciclo' : 'Nessuna misura nel periodo', 'gauge'); return; }
   const H = fillHeight(host, 230), W = host.clientWidth || 600, padL = 34, padR = 12, padT = 14, padB = 26, pw = W - padL - padR, ph = H - padT - padB;
-  const n = pts.length, GAP = 16;
+  const n = pts.length, GAP = 16, MIN_STEP = 1.5;
   const brk = pts.map((q, i) => i > 0 && q.t - pts[i - 1].t > SESSION_GAP);
   const nBreaks = brk.filter(Boolean).length;
-  const step = Math.max(0.5, (pw - nBreaks * GAP) / (n - 1));
+  // The row has to end inside the card. `step` used to have a 0.5px floor
+  // while every session gap still added a fixed 16px, so on a long period the
+  // gaps alone outgrew the width: over the whole history the last point sat
+  // 1050px past the right edge of the PAGE (a 1742px line in a 690px card).
+  // Each branch below spends exactly `pw`: full-width gaps while they fit,
+  // then narrower ones, then none at all.
+  let gap = GAP, step = (pw - nBreaks * gap) / (n - 1);
+  if (step < MIN_STEP) {
+    gap = Math.max(0, (pw - (n - 1) * MIN_STEP) / Math.max(1, nBreaks));
+    step = (pw - nBreaks * gap) / (n - 1);
+    if (step <= 0) { gap = 0; step = pw / (n - 1); }
+  }
   const xs = []; let acc = padL;
-  pts.forEach((q, i) => { if (i) acc += step + (brk[i] ? GAP : 0); xs.push(acc); });
+  pts.forEach((q, i) => { if (i) acc += step + (brk[i] ? gap : 0); xs.push(acc); });
   const ny = niceMax(Math.max(slow * 1.5, ...pts.map(p => p.v)));
   const Y = v => padT + ph - v / ny.max * ph;
   const svg = svgEl('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': `Velocità del modello, ${n} cicli misurati`}, host);
@@ -780,7 +796,7 @@ function renderModel(runs) {
   pts.forEach((q, i) => {
     const newDay = i === 0 || new Date(q.t * 1000).toDateString() !== new Date(pts[i - 1].t * 1000).toDateString();
     if (brk[i]) {
-      const sx = Math.round(xs[i] - GAP / 2) + .5;
+      const sx = Math.round(xs[i] - gap / 2) + .5;
       svgEl('line', {x1: sx, x2: sx, y1: padT, y2: padT + ph, class: 'sep'}, svg);
     }
     if (i === 0 || brk[i] || newDay) label(xs[i], newDay ? `${DAYS[new Date(q.t * 1000).getDay()]} ${new Date(q.t * 1000).getDate()}` : hhmm(q.t));
@@ -865,15 +881,23 @@ function fmtMoneyByCur(byCur) {
 function filteredSubs(a, b) {
   const list = (D.submissions || []).filter(s => s.ts && s.ts >= a && s.ts < b);
   const earnedByCur = {}, pendingByCur = {};
+  let nPaid = 0;
   for (const s of list) {
     const st = (s.status || '').toLowerCase();
     const c = s.currency || '£';
-    if (st === 'approved') earnedByCur[c] = (earnedByCur[c] || 0) + (s.reward || 0);
+    // A screened-out submission pays a screening fee, and Prolific counts it
+    // in its own "Total earned": leaving it out kept every period short of
+    // the account's headline (523 approved = $909.12 + £577.19, with the 35
+    // screened out = $933.95 + £580.14 against a SUMMARY of $939.95+£590.94).
+    if (st === 'approved' || st === 'screened out') {
+      earnedByCur[c] = (earnedByCur[c] || 0) + (s.reward || 0); nPaid++;
+    }
     if (st === 'awaiting review') pendingByCur[c] = (pendingByCur[c] || 0) + (s.reward || 0);
   }
   const anyEarned = Object.values(earnedByCur).some(v => v > 0);
   const anyPending = Object.values(pendingByCur).some(v => v > 0);
-  return {list, earnedByCur, pendingByCur, anyEarned, anyPending, count: list.length, has: list.length > 0};
+  return {list, earnedByCur, pendingByCur, anyEarned, anyPending, nPaid,
+          count: list.length, has: list.length > 0};
 }
 function renderSubs(a, b) {
   const host = $('subs'), f = filteredSubs(a, b);

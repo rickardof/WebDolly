@@ -457,6 +457,28 @@ def _():
     assert gs._subs_complete(st), "3 rows, 2 approved: matches the SUMMARY"
 
 
+@_t("store:a_screening_fee_counts_as_paid_like_prolific_counts_it")
+def _():
+    # Prolific's "Submissions approved" includes the screened-out rows, which
+    # pay a screening fee: on the live account 523 approved + 35 screened out
+    # = 558 against a SUMMARY of 559. Counting only "approved" left the
+    # checksum unsatisfiable, so the crawl re-swept the whole history every
+    # six hours for ever.
+    st = {"rows": {}, "header": {"total": 2, "approved": 2}}
+    gs._subs_merge(st, [_row("A", "9 Nov 2026, 10:00"),
+                        _row("B", "8 Nov 2026, 10:00", status="Screened Out",
+                             reward="0.10")])
+    assert gs._subs_complete(st), "a screened-out row is one of Prolific's approved"
+
+
+@_t("store:a_returned_row_is_not_paid")
+def _():
+    st = {"rows": {}, "header": {"total": 2, "approved": 2}}
+    gs._subs_merge(st, [_row("A", "9 Nov 2026, 10:00"),
+                        _row("B", "8 Nov 2026, 10:00", status="Returned")])
+    assert not gs._subs_complete(st)
+
+
 @_t("store:no_header_means_never_complete")
 def _():
     # Without Prolific's own figures there is nothing to check against, so the

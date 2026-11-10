@@ -484,6 +484,16 @@ _SUBS_STORE_V = 1
 _SUBS_SWEEP_COOLDOWN = 6 * 3600
 
 
+# What Prolific counts in "Submissions approved" and "Total earned": not only
+# the approved rows but the screened-out ones too, which pay a screening fee.
+# Measured against the live account: 523 approved + 35 screened out = 558
+# rows worth $933.95 + £580.14, against a SUMMARY of 559 rows worth
+# $939.95 + £590.94 (the gap is the 9 rows still missing from the store).
+# Counting only "approved" made the crawl's checksum unsatisfiable and left
+# every period short of the account's own headline.
+_SUBS_PAID = ("approved", "screened out")
+
+
 def _subs_key(row: dict) -> str:
     """A submission's identity. The timestamp is to the minute and the title is
     the study's, so the pair is unique and, unlike a row's position, survives
@@ -572,8 +582,8 @@ def _subs_complete(store: dict) -> bool:
     if not h.get("total"):
         return False
     rows = store["rows"].values()
-    approved = sum(1 for r in rows if (r.get("status") or "").lower() == "approved")
-    return len(store["rows"]) >= h["total"] and approved >= h.get("approved", 0)
+    paid = sum(1 for r in rows if (r.get("status") or "").lower() in _SUBS_PAID)
+    return len(store["rows"]) >= h["total"] and paid >= h.get("approved", 0)
 
 
 def _subs_agent_idle() -> bool:
@@ -2242,6 +2252,11 @@ def _fmt_money_by_cur(by_cur: dict[str, float]) -> str:
     return " + ".join(parts) if parts else "£0.00"
 
 
+_IT_DAYS = ("lun", "mar", "mer", "gio", "ven", "sab", "dom")
+_IT_MONTHS = ("gen", "feb", "mar", "apr", "mag", "giu",
+              "lug", "ago", "set", "ott", "nov", "dic")
+
+
 def _earnings_text() -> str:
     """Earnings by the date the study was taken, plus the account's own totals.
 
@@ -2257,8 +2272,14 @@ def _earnings_text() -> str:
     today = date.today()
     week_start = today - timedelta(days=today.weekday())  # Monday
     month_start = today.replace(day=1)
-    PERIODS = (("today", "Oggi", today), ("week", "Settimana", week_start),
-               ("month", "Mese", month_start))
+    # The window each line covers, spelled out. The statistics page offers
+    # rolling windows ("ultimi 7 giorni", "ultimi 30 giorni") whose figures
+    # are much larger than these calendar ones, and two numbers under two
+    # similar words with no window stated is a discrepancy nobody can resolve.
+    PERIODS = (("today", f"Oggi (da mezzanotte)", today),
+               ("week", f"Settimana (da {_IT_DAYS[week_start.weekday()]} {week_start.day})",
+                week_start),
+               ("month", f"Mese (dal 1 {_IT_MONTHS[month_start.month - 1]})", month_start))
 
     ok: dict[str, dict[str, float]] = {k: {} for k, _, _ in PERIODS}
     wait: dict[str, dict[str, float]] = {k: {} for k, _, _ in PERIODS}
@@ -2272,7 +2293,7 @@ def _earnings_text() -> str:
 
     for s in subs:
         status = (s.get("status") or "").lower()
-        if status not in ("approved", "awaiting review"):
+        if status not in _SUBS_PAID and status != "awaiting review":
             continue                   # returned / timed out / rejected pay nothing
         try:
             amt = float(s.get("reward") or 0)
@@ -2293,21 +2314,23 @@ def _earnings_text() -> str:
             continue
         for key, _label, since in PERIODS:
             if d >= since:
-                bucket, count = (ok, n_ok) if status == "approved" else (wait, n_wait)
+                bucket, count = ((ok, n_ok) if status in _SUBS_PAID
+                                 else (wait, n_wait))
                 bucket[key][cur] = bucket[key].get(cur, 0.0) + amt
                 count[key] += 1
 
-    lines = ["💰 Guadagni (per data di partecipazione)"]
+    lines = ["💰 Guadagni (per data di partecipazione)",
+             "   incassati = approvati + screening fee, come li conta Prolific"]
     for key, label, _since in PERIODS:
         money = _fmt_money_by_cur(ok[key]) if ok[key] else "—"
         if n_ok[key] or n_wait[key]:
-            tail = f"{n_ok[key]} approvati"
+            tail = f"{n_ok[key]} incassati"
             if n_wait[key]:
                 tail += (f" · {n_wait[key]} in revisione "
                          f"{_fmt_money_by_cur(wait[key])}")
         else:
             tail = "nessuno studio"
-        lines.append(f"   {label + ':':11s} {money}  ·  {tail}")
+        lines.append(f"   {label}: {money}  ·  {tail}")
 
     lines.append("")
     if header.get("earned"):
