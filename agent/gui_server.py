@@ -240,6 +240,9 @@ _STATUS_RE   = _re.compile(
     r'^(AWAITING REVIEW|APPROVED|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)$',
     _re.IGNORECASE)
 _MONEY_RE    = _re.compile(r'^(screened out )?reward', _re.IGNORECASE)
+# The label of an extra payment on a submission, whose amount is on the next
+# line with no prefix of its own.
+_EXTRA_PAY_RE = _re.compile(r'^(bonus|adjustment|tip)s?\s*:?\s*$', _re.IGNORECASE)
 # Chromium runs with --lang=it-IT, so Prolific renders rewards in Italian
 # locale: "Reward: £0,06" / "Reward: £1,20". The old regex only accepted
 # "." and silently truncated the fractional part, showing £1,20 as £1.00
@@ -267,8 +270,12 @@ def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
         line = raw_rows[i]
         if _STATUS_RE.match(line):
             status = line.title()
-            title, date_full, reward_str, currency = "", "", "", "£"
-            for j in range(i - 1, max(i - 10, -1), -1):
+            title, date_full, currency, paid = "", "", "£", 0.0
+            # A row reads, in page order: title, "By <researcher>", date,
+            # ["Approved by <date>"], ["Read more"], "Reward: <amount>",
+            # optionally "Bonus:"/"Adjustment:" and a bare amount, then the
+            # status. So walk back from the status until the title.
+            for j in range(i - 1, max(i - 12, -1), -1):
                 prev = raw_rows[j]
                 if _DATELINE_RE.match(prev):
                     date_full = prev.strip()
@@ -276,8 +283,21 @@ def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
                     m = _REWARD_AMT.search(prev)
                     if m:
                         currency = m.group(1)
-                        reward_str = m.group(2).replace(",", ".")
-                elif _BY_RE.match(prev) or _SKIP_LINE.match(prev):
+                        paid += float(m.group(2).replace(",", "."))
+                elif _AMOUNT_RE.match(prev):
+                    # A bare amount: the value of the "Bonus:"/"Adjustment:"
+                    # line just above it. It belongs to this submission, so it
+                    # is added to what the study paid. This line used to fall
+                    # through to the title branch, which took "£0,51" for the
+                    # study name and stopped -- inventing a dateless,
+                    # rewardless phantom submission and losing the real one
+                    # (9 of the first 399 rows read).
+                    m = _money(prev)
+                    if m:
+                        currency = m[0]
+                        paid += m[1]
+                elif (_EXTRA_PAY_RE.match(prev) or _BY_RE.match(prev)
+                        or _SKIP_LINE.match(prev)):
                     continue
                 elif not title and len(prev) > 4:
                     title = prev[:80]
@@ -287,7 +307,7 @@ def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
                     "title": title, "status": status,
                     "date": date_full.split(",")[0].strip(),
                     "date_full": date_full,
-                    "reward": reward_str, "currency": currency,
+                    "reward": f"{paid:.2f}" if paid else "", "currency": currency,
                 })
         i += 1
     return parsed
@@ -466,6 +486,13 @@ def _subs_store_load() -> dict:
     try:
         d = json.loads(SUBS_STORE.read_text())
         if d.get("v") == _SUBS_STORE_V and isinstance(d.get("rows"), dict):
+            # Drop what an older parser could not read: every Prolific
+            # submission has a date, so a row without one is mangled and
+            # would sit in the store for ever, counting toward the total and
+            # satisfying the checksum with a row that says nothing. Dropping
+            # it makes the store incomplete again, which is what sends the
+            # crawl back for the real one.
+            d["rows"] = {k: r for k, r in d["rows"].items() if r.get("date_full")}
             return d
     except Exception:
         pass
@@ -564,6 +591,11 @@ def _submissions_refresh(max_pages: int = 6) -> bool:
                 store["header"] = got["header"]
             last_page = max(last_page, got["last_page"])
         page += 1
+        # Save after every page, not at the end of the crawl: a restart in the
+        # middle of a 41-page sweep would otherwise throw away everything it
+        # had read and start again from page 2.
+        store["cursor"] = page if page <= last_page else 2
+        _subs_store_save(store)
         if page > last_page:
             # The sweep reached the end. Newer submissions shift rows onto
             # later pages, so one pass can still miss one: park the cursor

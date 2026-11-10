@@ -164,7 +164,10 @@ def _():
     ]
     parsed = _parse_submission_rows(rows)
     assert len(parsed) == 1
-    assert parsed[0]["reward"] == "5"
+    # Amounts are normalised to two decimals now that a row can carry more
+    # than one (reward + bonus), so "£5" reads back as 5.00, not "5".
+    assert parsed[0]["reward"] == "5.00"
+    assert float(parsed[0]["reward"]) == 5.0
     assert parsed[0]["currency"] == "£"
 
 
@@ -191,6 +194,87 @@ def _():
     # A currency bucket at 0 should not clutter the string with "£0.00 + $5.00".
     out = _fmt_money_by_cur({"£": 0.0, "$": 5.00})
     assert out == "$5.00", f"got {out!r}"
+
+
+# ===================================================== bonuses and adjustments
+# A submission can carry a second payment, whose label and amount sit between
+# the reward and the status:
+#     Study 2 perceived ethical leadership / By mdi.ac.in / 9 Nov 2026, 09:19
+#     Reward: £0,31 / Adjustment: / £0,51 / APPROVED
+# The bare amount used to fall through to the title branch, so the row became
+# a phantom submission titled "£0,51" with no date and no reward, and the real
+# one was never emitted: 9 such phantoms in the first 399 rows read.
+def _rowtext(extra: str = "") -> list:
+    return ("""SUBMISSION HISTORY
+Study name
+Date
+Reward
+Status
+Actions
+Perceived ethical leadership
+By some.ac.in
+9 Nov 2026, 09:19
+Reward: £0,31
+""" + extra + """APPROVED
+Prev
+1
+Next""").split("\n")
+
+
+@_t("parse:adjustment_is_added_to_the_reward")
+def _():
+    rows = _parse_submission_rows(_rowtext("Adjustment:\n£0,51\n"))
+    assert len(rows) == 1, rows
+    r = rows[0]
+    assert r["title"] == "Perceived ethical leadership", r
+    assert r["date_full"] == "9 Nov 2026, 09:19", r
+    assert r["reward"] == "0.82" and r["currency"] == "£", r
+
+
+@_t("parse:bonus_is_added_to_the_reward")
+def _():
+    rows = _parse_submission_rows(_rowtext("Bonus:\n£1,00\n"))
+    assert len(rows) == 1 and rows[0]["reward"] == "1.31", rows
+
+
+@_t("parse:no_extra_payment_is_unchanged")
+def _():
+    rows = _parse_submission_rows(_rowtext())
+    assert len(rows) == 1 and rows[0]["reward"] == "0.31", rows
+
+
+@_t("parse:a_phantom_row_is_never_emitted")
+def _():
+    # One status line means one submission, however many amounts it carries.
+    for extra in ("", "Adjustment:\n£0,51\n", "Bonus:\n£1,00\n"):
+        rows = _parse_submission_rows(_rowtext(extra))
+        assert len(rows) == 1, (extra, rows)
+        assert rows[0]["date_full"], (extra, rows)
+
+
+@_t("store:a_row_without_a_date_is_forgotten")
+def _():
+    # Phantoms written by the older parser must not survive in the store: they
+    # would count toward the total and satisfy the crawl's checksum.
+    import tempfile, pathlib, json as _j
+    with tempfile.TemporaryDirectory() as d:
+        orig = gs.SUBS_STORE
+        try:
+            gs.SUBS_STORE = pathlib.Path(d) / "submissions.json"
+            gs.SUBS_STORE.write_text(_j.dumps({
+                "v": 1, "cursor": 2, "header": {"total": 2, "approved": 2},
+                "rows": {"|£0,51": {"title": "£0,51", "status": "Approved",
+                                    "date": "", "date_full": "", "reward": "",
+                                    "currency": "£"},
+                         "9 Nov 2026, 09:19|Real": {
+                             "title": "Real", "status": "Approved",
+                             "date": "9 Nov 2026", "date_full": "9 Nov 2026, 09:19",
+                             "reward": "1.00", "currency": "£"}}}))
+            back = gs._subs_store_load()
+            assert list(back["rows"]) == ["9 Nov 2026, 09:19|Real"], back["rows"]
+            assert not gs._subs_complete(back), "dropping it must reopen the crawl"
+        finally:
+            gs.SUBS_STORE = orig
 
 
 # ===================================================== the SUMMARY block and
