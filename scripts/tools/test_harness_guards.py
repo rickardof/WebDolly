@@ -604,6 +604,70 @@ check("and the correction is written into the step result",
       "dispatch_action(action_type, args) + snap_note" in src)
 
 
+# --------------------------------------------------------------------------
+section("the last inch on Prolific (run_20261110_184734: a finished survey, "
+        "never submitted)")
+# The Google Form showed no completion code. The model filled it, submitted
+# it, came back to the Prolific tab, clicked "I'm finished" -- and then called
+# terminate NOCODE with the "Confirm submission" panel open and the link
+# "I didn't receive a completion code" one click below. Slot still reserved,
+# study never submitted. guarded_nocode_refusal exempts it (the survey WAS
+# opened) and completion_pushback is spent on the survey host.
+PRO = APP + "/studies/6af3550a148b4a6e6c385cdb"
+d = ac.nocode_link_decision
+
+check("the panel's own link is the signal: press it",
+      d("NOCODE", PRO, True, False, [], [], 0, False) == "click")
+check("the model's own 'CODE: NOCODE' spelling counts too",
+      d("CODE: NOCODE", PRO, True, False, [], [], 0, False) == "click")
+check("no panel on screen -> the submission is already made, let it end",
+      d("NOCODE", PRO, False, False, [], [], 0, False) == "")
+check("a cancel/submit confirmation seen -> nothing left to press",
+      d("NOCODE", PRO, True, True, [], [], 0, False) == "")
+check("a real code answer is never touched",
+      d("CODE: C1NKBGUZ", PRO, True, False, [], [], 0, False) == "")
+check("off Prolific it is completion_pushback's job, not this guard's",
+      d("NOCODE", "https://eval.services/x", True, False, [], [], 0, False) == "")
+check("still there after we pressed it -> say so in words, do not re-click",
+      d("NOCODE", PRO, True, False, [], [], 1, True) == "retry")
+check("safety valve: the third attempt passes whatever the page shows",
+      d("NOCODE", PRO, True, False, [], [], 2, False) == "")
+check("a code WAS seen on the study pages -> never submit without it",
+      d("NOCODE", PRO, True, False, ["C1NKBGUZ"], [], 0, False) == "codes")
+check("...including one only on the page in front of us",
+      d("NOCODE", PRO, True, False, [], ["C1NKBGUZ"], 0, False) == "codes")
+check("and the refusal names that code instead of describing it",
+      "C1NKBGUZ" in ac.nocode_codes_refusal(["C1NKBGUZ"]))
+
+_ljs = ac._NOCODE_LINK_JS
+check("the probe reads the control's own label, in English and Italian",
+      "receive" in _ljs and "non\\s+ho\\s+ricevuto" in _ljs)
+check("it only ever looks at controls, not at prose that mentions a code",
+      "'a, button, [role=\"button\"], input[type=\"submit\"]'" in _ljs
+      and "t.length > 120" in _ljs)
+check("a hidden or disabled control does not count as present",
+      "visibility === 'hidden'" in _ljs and "aria-disabled" in _ljs)
+check("the probe is read-only: finding the link never clicks it",
+      ".click()" not in _ljs and "dispatchEvent" not in _ljs)
+
+check("the refusal names the link and the cancel branch, not just the rule",
+      "I didn't receive a completion code" in ac._NOCODE_LINK_REFUSAL
+      and "Cancel participation" in ac._NOCODE_LINK_REFUSAL)
+check("the harness presses it with the real cursor, scrolled into view",
+      "_lbox = _scroll_box_into_view(_nocode_link_box)" in src
+      and "_humanized_click_box(_lbox)" in src)
+check("it runs after the never-opened-the-study guard, not instead of it",
+      src.index("nocode_block = guarded_nocode_refusal(")
+      < src.index("_nc = nocode_link_decision("))
+check("the dialog it opens is left to the model to confirm",
+      "confirm the submission in the" in src)
+check("the per-study state is cleared on the studies list",
+      "_nocode_link_attempts = 0" in src and "_nocode_link_tried = False" in src)
+check("the compact rules (the live ones) now carry the no-code branch",
+      "I didn't receive a completion code" in ac._STANDING_RULES_COMPACT
+      and "I didn't receive a completion code" in ac._STANDING_RULES_FULL)
+
+
 print()
 passed, total = sum(RESULTS), len(RESULTS)
 print(f"== SUMMARY ==  {passed}/{total} passed", "ok" if passed == total else "FAILED")

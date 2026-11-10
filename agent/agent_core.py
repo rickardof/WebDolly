@@ -2735,6 +2735,115 @@ def _completion_return_near_miss(x: float, y: float,
         return None
 
 
+# -- Prolific's own "I didn't receive a completion code" control -----------
+#
+# run_20261110_184734: a 1-minute Google Form study whose confirmation screen
+# ("La tua risposta e stata registrata") carried no completion code. The model
+# did everything right up to the last inch -- filled the form, submitted it,
+# switched back to the Prolific tab, clicked "I'm finished", even went hunting
+# through the form's page source for a hidden code -- and then, with
+# Prolific's "Confirm submission" panel open and a blue link reading
+# "I didn't receive a completion code" one click below the greyed-out
+# "Complete study" button, called terminate NOCODE. Twice. The slot stayed
+# reserved and the finished survey was never submitted.
+#
+# Neither existing guard covers that inch. guarded_nocode_refusal exempts any
+# run that reached the external survey -- it exists for the opposite bug, a
+# NOCODE emitted without ever opening the study -- and completion_pushback is
+# spent on the survey host and returns "" as soon as we are back on Prolific.
+#
+# The discriminating signal is the control itself, not the run's history:
+# while that link is on screen the submission has NOT been made, because
+# Prolific replaces the whole panel with "Awaiting review" the moment it has.
+# So the harness probes for it (read-only: only input is scored) and, like the
+# return-to-Prolific control above, presses it with the real cursor instead of
+# arguing with a model that has already decided it is finished. The dialog it
+# opens is left to the model, with the screenshot in view: confirming a
+# submission, or deciding the survey was never really done and cancelling
+# participation instead, is a judgment the harness must not make blind.
+_NOCODE_LINK_JS = r"""
+(() => {
+  const vis = el => {
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return null;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none') return null;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
+    return r;
+  };
+  const re = /(did\s*n.{0,2}t|have\s*n.{0,2}t|not)\s+receive(d)?\s+(a|the|any)?\s*(completion\s+)?code|non\s+ho\s+ricevuto\s+(il\s+|un\s+)?codice/i;
+  for (const el of document.querySelectorAll(
+         'a, button, [role="button"], input[type="submit"]')) {
+    const t = (el.innerText || el.value || '').trim();
+    if (!t || t.length > 120 || !re.test(t)) continue;
+    const r = vis(el);
+    if (r) return {x: r.x, y: r.y, width: r.width, height: r.height,
+                   text: t.slice(0, 80)};
+  }
+  return null;
+})()
+"""
+
+
+def _nocode_link_box():
+    """Viewport box of Prolific's "I didn't receive a completion code"
+    control, or None. Read-only: finding it never clicks anything."""
+    try:
+        return pw_bridge.evaluate(_NOCODE_LINK_JS) or None
+    except Exception:
+        return None
+
+
+def nocode_link_decision(answer: str, url: str, link_found: bool,
+                         saw_cancel_confirm: bool, seen_codes: list,
+                         page_codes: list, attempts: int,
+                         already_clicked: bool) -> str:
+    """What to do with a no-code `terminate` while that link is on screen.
+
+    "codes"  a completion code WAS seen on the study's pages: refuse and name
+             it rather than forfeiting it by submitting without one.
+    "click"  press the link for the model (first time only).
+    "retry"  the link is still there after we pressed it: say so in words.
+    ""       let the terminate through -- no panel open (so the submission is
+             already made, or there is nothing left to press), the study was
+             closed on Prolific, the answer is not a no-code one, or the
+             safety valve has been reached.
+    """
+    if not _is_nocode_answer(answer):
+        return ""
+    if not _on_guarded_site(url):
+        return ""
+    if saw_cancel_confirm:
+        return ""                      # already submitted/cancelled on Prolific
+    if not link_found:
+        return ""
+    if attempts >= 2:
+        return ""                      # safety valve: 3rd try passes
+    if seen_codes or page_codes:
+        return "codes"
+    return "retry" if already_clicked else "click"
+
+
+def nocode_codes_refusal(seen: list) -> str:
+    code = next((c for c in seen if c), "")
+    return (f"NOCODE REFUSED: you are ending this study as 'no completion code', but "
+            f"{code} was shown on the study's own pages. Type {code} into the "
+            "'Completion Code' field of this panel, click 'Complete study', and "
+            f"terminate with CODE:{code}. Only if Prolific rejects that code should "
+            "you fall back to 'I didn't receive a completion code'.")
+
+
+_NOCODE_LINK_REFUSAL = (
+    "NOCODE REFUSED: Prolific's 'Confirm submission' panel is still open on this "
+    "page, which means the study has NOT been submitted -- the slot stays reserved "
+    "and the survey you just filled in is lost. On that panel, under the greyed-out "
+    "'Complete study' button, there is a link reading 'I didn't receive a completion "
+    "code': left_click it, confirm in the dialog that follows, and call terminate "
+    "NOCODE only once the page says the submission was saved ('Awaiting review'). "
+    "If instead you never actually completed the survey, press 'Cancel' and use "
+    "'Cancel participation' before terminating.")
+
+
 def completion_pushback(answer: str, url: str, seen_codes: list,
                         page_codes: list, already_pushed: bool) -> str:
     """One-shot nudge when a free-text `terminate` has not actually reached
@@ -3322,7 +3431,10 @@ _STANDING_RULES_COMPACT = (
     "3. NO AUDIO — skip studies requiring listening/speakers/headphones. Videos OK if no audio needed. "
     "4. Read FULL question text before answering. Stay consistent with persona; no filler. "
     "5. Only do studies, nothing else. After 'Take part' button goes grey, WAIT — it's loading. "
-    "After survey: Prolific tab → 'I'm finished' → enter code → confirm → terminate. "
+    "After survey: Prolific tab → 'I'm finished' → enter the code → 'Complete study' → terminate. "
+    "If the survey gave NO code, click 'I didn't receive a completion code' on that same "
+    "panel, confirm, and terminate NOCODE only once Prolific says the submission is saved "
+    "('Awaiting review'). NEVER terminate with the 'Confirm submission' panel still open. "
     "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
     "6. Respect minimum time — wait if timer says time remains. "
     "7. Screener: emphasise true persona traits that match; never invent contradicting facts. "
@@ -3555,6 +3667,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _saw_external_this_study: bool = False
         _saw_cancel_confirm: bool = False
         _nocode_guard_attempts: int = 0
+        # Sibling guard, Prolific side: a no-code terminate while the
+        # 'Confirm submission' panel is still open. See _NOCODE_LINK_JS.
+        _nocode_link_attempts: int = 0
+        _nocode_link_tried: bool = False
         # Reservation-loop guard: once a slot is reserved on Prolific the URL
         # becomes /studies/{id} and stays there — the only legitimate exits
         # are 'Start study' or 'Cancel participation'. The model sometimes
@@ -3881,6 +3997,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _saw_external_this_study = False
                 _saw_cancel_confirm = False
                 _nocode_guard_attempts = 0
+                _nocode_link_attempts = 0
+                _nocode_link_tried = False
                 _reserved_loop_url = ""
                 _reserved_loop_count = 0
                 _reserved_stuck_count = 0
@@ -4632,6 +4750,56 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _nocode_guard_attempts += 1
                     pending_user_response = nocode_block
                     continue
+                # The other half of the same mistake, one page later: the
+                # survey WAS done, we are back on Prolific, and the model
+                # gives up with the 'Confirm submission' panel still open and
+                # 'I didn't receive a completion code' one click away. The
+                # link's presence is proof the study is unsubmitted; press it
+                # rather than argue. See _NOCODE_LINK_JS.
+                if (_is_nocode_answer(answer) and _on_guarded_site(here)
+                        and not _saw_cancel_confirm
+                        and _nocode_link_attempts < 2):
+                    _lbox_seen = _nocode_link_box()
+                    _codes_now = codes_on_page(_end_page_text())
+                    _nc = nocode_link_decision(
+                        answer, here, _lbox_seen is not None, _saw_cancel_confirm,
+                        _seen_codes, _codes_now, _nocode_link_attempts,
+                        _nocode_link_tried)
+                    if _nc:
+                        _nocode_link_attempts += 1
+                    if _nc == "codes":
+                        pending_user_response = nocode_codes_refusal(
+                            _seen_codes + _codes_now)
+                        continue
+                    if _nc == "click":
+                        _lbox = _scroll_box_into_view(_nocode_link_box)
+                        if _lbox and _humanized_click_box(_lbox):
+                            _nocode_link_tried = True
+                            cancel.sleep(random.uniform(1.2, 2.2))
+                            try:
+                                _after = pw_bridge.current_url()
+                            except Exception:
+                                _after = here
+                            _live({"type": "notice", "text":
+                                   "[completion] the study was not submitted: clicked "
+                                   f"Prolific's {_lbox.get('text')!r} -> {_after}"})
+                            pending_user_response = (
+                                "HARNESS ACTION: you were ending this study as 'no "
+                                "completion code' with Prolific's 'Confirm submission' "
+                                "panel still open, so the study was NOT submitted. The "
+                                f"link {_lbox.get('text')!r} has been clicked for you. "
+                                "Look at the screenshot: confirm the submission in the "
+                                "dialog that opened (the button that submits / "
+                                "continues), wait for the page to say the submission "
+                                "was saved ('Awaiting review'), and only then terminate "
+                                "NOCODE. If you did NOT actually complete the survey, "
+                                "dismiss the dialog and use 'Cancel participation' "
+                                "instead.")
+                            continue
+                        _nc = "retry"
+                    if _nc == "retry":
+                        pending_user_response = _NOCODE_LINK_REFUSAL
+                        continue
                 # Ending on the survey host's own thank-you/validation page
                 # with the final "submit & return to Prolific" control
                 # skipped. Before saying anything to the model, try to finish

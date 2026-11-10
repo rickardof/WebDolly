@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Confirm submission fixture</title>
+<!-- Synthetic stand-in for Prolific's post-"I'm finished" panel. Hand-written
+     from the layout, with no researcher name, study title or account data:
+     a code field, a disabled submit, a cancel, the no-code link and a report
+     link, plus prose that mentions a completion code but is not a control. -->
+<style>
+ body { font: 16px/1.4 system-ui, sans-serif; margin: 0; }
+ .page { display: flex; min-height: 100vh; }
+ .left { flex: 1; padding: 32px; }
+ .panel { width: 520px; padding: 32px; background: #f7f8fa; }
+ input { width: 100%; padding: 10px; font: inherit; }
+ .primary { width: 100%; margin-top: 16px; padding: 12px; background: #dfe3e8;
+            color: #6b7280; border: 0; }
+ .secondary { width: 100%; margin-top: 10px; padding: 12px; background: #fff;
+              border: 1px solid #1e3a8a; color: #1e3a8a; }
+ .links { margin-top: 24px; text-align: center; }
+ .links a { display: block; margin: 8px 0; color: #1d4ed8; }
+ #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); }
+ #modal .box { background: #fff; width: 420px; margin: 180px auto; padding: 24px; }
+ .spacer { height: 1200px; }
+ .hidden-link { display: none; }
+</style>
+<div class="page">
+  <div class="left">
+    <h1>A study with no completion code</h1>
+    <p>This page describes a study. It even uses the words completion code in
+       running text, and mentions that some participants did not receive a
+       completion code, so a probe that matches prose instead of controls will
+       be wrong here.</p>
+    <p><a class="hidden-link" href="#">I didn't receive a completion code</a></p>
+    <button disabled>I didn't receive a completion code</button>
+  </div>
+  <div class="panel" id="panel">
+    <h2>Confirm submission</h2>
+    <p>Please enter the completion code you received below:</p>
+    <label for="cc">Completion Code</label>
+    <input id="cc">
+    <button class="primary" disabled>Complete study</button>
+    <button class="secondary">Cancel</button>
+    <div class="links">
+      <a href="#" id="nocode">I didn't receive a completion code</a>
+      <a href="#" id="report">Report study</a>
+    </div>
+  </div>
+</div>
+<div class="spacer"></div>
+<div id="modal"><div class="box">
+  <h3>Submit without a completion code?</h3>
+  <p>We will let the researcher know you did not receive one.</p>
+  <button id="confirm">Submit</button>
+</div></div>
+<script>
+ document.getElementById('nocode').addEventListener('click', e => {
+   e.preventDefault();
+   document.getElementById('modal').style.display = 'block';
+ });
+ document.getElementById('confirm').addEventListener('click', () => {
+   document.getElementById('modal').style.display = 'none';
+   document.getElementById('panel').innerHTML =
+     '<h2>Awaiting review</h2><p>We have saved your submission for this study.'
+     + ' You can now take part in other studies.</p>'
+     + '<p>Completion code: NOCODE</p>';
+ });
+</script>
