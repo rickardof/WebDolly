@@ -2300,9 +2300,15 @@ def _earnings_text() -> str:
                      + (f" su {header['approved']} studi approvati"
                         if header.get("approved") else ""))
     if header.get("balance"):
-        bal = f"   Saldo: {_fmt_money_by_cur(header['balance'])}"
+        # Prolific's wallet converts everything to one currency: its "Pending"
+        # £7.74 is the same money as the £2.85 + $6.71 awaiting review above,
+        # at its own rate. Labelled as the wallet, not as a second "in
+        # revisione", so two different-looking figures do not sit under one
+        # word.
+        bal = f"   Portafoglio: {_fmt_money_by_cur(header['balance'])} disponibili"
         if header.get("pending"):
-            bal += f" · In revisione: {_fmt_money_by_cur(header['pending'])}"
+            bal += (f" · {_fmt_money_by_cur(header['pending'])} in attesa "
+                    "(Prolific converte tutto in £)")
         lines.append(bal)
     if header.get("total"):
         read = len(subs)
