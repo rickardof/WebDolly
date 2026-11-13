@@ -1813,6 +1813,38 @@ def _text_similarity(a: str, b: str) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
+# -- what the study has already shown -------------------------------------
+#
+# run_20261113_114533 answered "Health and well-being" to "Thinking back to
+# the shopping scenario, the family member's main goal was primarily...".
+# The scenario, six pages earlier, said the opposite in bold three times:
+# "a pleasurable eating experience", "prioritising enjoyment and pleasure".
+# Batch-fill reads the page in front of it and nothing else, and the
+# screenshot of a page we left is not an answer either once context is
+# trimmed. So the gist of those pages is kept for the length of the study.
+_URLISH_RE = re.compile(r"\bhttps?://\S+")
+_STUDY_PAGE_CHARS = 700
+_STUDY_PAGES_KEPT = 4
+
+
+def _remember_study_page(pages: list, fp: str) -> None:
+    """Keep the gist of a page this study has already shown.
+
+    Only pages the vision step handles ever reach here: one with a fillable
+    form is taken by batch-fill, which returns before this point. What
+    accumulates is therefore the set worth keeping -- the scenario, the
+    instructions, the stimulus -- and never the question pages themselves.
+    """
+    text = _URLISH_RE.sub("", fp or "").strip()[:_STUDY_PAGE_CHARS]
+    if len(text) < 40:
+        return
+    for old in pages:
+        if _text_similarity(old, text) > 0.8:
+            return                      # same page again (a scroll, a hover)
+    pages.append(text)
+    del pages[:-_STUDY_PAGES_KEPT]
+
+
 _PROGRESS_RE = re.compile(r"\b(\d{1,3})\s*/\s*(\d{1,3})\b")
 
 
@@ -3173,7 +3205,7 @@ _MAX_BATCH_ATTEMPTS = 2
 
 
 def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None,
-                      timer: "StudyTimer | None" = None):
+                      timer: "StudyTimer | None" = None, study_pages: list = None):
     """Checks the current page for a batch-fillable form and, if found and
     not already attempted, runs form_fill's extract/decide/apply/verify
     cycle. Returns (step_event, next_turn_text, diag): the first two are
@@ -3228,7 +3260,11 @@ def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None
     clean = (not result.get("skipped")
              and not result.get("mismatches")
              and not result.get("apply_errors")
-             and not result.get("undecided"))
+             and not result.get("undecided")
+             # Questions whose text the DOM never gave us were answered from
+             # their options alone. Advancing on that is how six pages of
+             # run_20261113_114533 went by with no record and no eyes.
+             and not result.get("blind"))
     advance = None
     if clean:
         # Minimum-time guard. Before auto-advancing, peek at the forward
@@ -3305,6 +3341,19 @@ def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None
                 "questions remain on this page, otherwise find and click the "
                 "button to proceed (e.g. Next/Continue/Submit)."
             )
+
+    # A question that points back at something shown earlier ("Thinking back
+    # to the shopping scenario...") is deferred to the vision step, but the
+    # screenshot in front of that step is the page the question is NOT about.
+    # Hand it what the study showed before, so the answer is there to be read
+    # rather than guessed. Only when something was actually deferred.
+    if (result.get("deferred_visual") or []) and study_pages:
+        recap = "\n---\n".join(p[:400] for p in study_pages[-3:])
+        next_text += (
+            "\n\nEARLIER IN THIS STUDY, oldest first (text of pages you have already "
+            "passed through). A question that refers back to a scenario, an instruction "
+            "or a stimulus must be answered from THIS, not from what sounds "
+            f"plausible:\n{recap}")
 
     # What was actually answered, question by question. Until now the
     # transcript kept only "filled 8/8 fields successfully": a rejected study
@@ -3671,6 +3720,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # 'Confirm submission' panel is still open. See _NOCODE_LINK_JS.
         _nocode_link_attempts: int = 0
         _nocode_link_tried: bool = False
+        # The scenario / instruction / stimulus pages of the study in
+        # progress. See _remember_study_page.
+        _study_pages: list = []
         # Reservation-loop guard: once a slot is reserved on Prolific the URL
         # becomes /studies/{id} and stays there — the only legitimate exits
         # are 'Start study' or 'Cancel participation'. The model sometimes
@@ -3963,7 +4015,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # guard had in 1ffb26d.
             if batch_fill and not here_on_launch and not _user_inject_pending:
                 batch_step_event, batch_next_text, batch_diag = _maybe_batch_fill(
-                    task, attempted_form_signatures, survey_memory, timer=study_timer)
+                    task, attempted_form_signatures, survey_memory, timer=study_timer,
+                    study_pages=_study_pages)
                 transcript.write(json.dumps(
                     {"step": step, "batch_fill_check": batch_diag}) + "\n")
                 if (batch_step_event or {}).get("qa"):
@@ -3999,6 +4052,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 _nocode_guard_attempts = 0
                 _nocode_link_attempts = 0
                 _nocode_link_tried = False
+                _study_pages = []
                 _reserved_loop_url = ""
                 _reserved_loop_count = 0
                 _reserved_stuck_count = 0
@@ -4238,6 +4292,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             qc_hit = "" if (_qc_flag or here_guarded) else qc_failure_in(curr_page_fp)
             if qc_hit:
                 _qc_flag = qc_hit
+            # Only pages with no fillable form reach this far (batch-fill
+            # returns before it), which is exactly the scenario / instruction
+            # / stimulus set a later question can refer back to.
+            if not here_guarded:
+                _remember_study_page(_study_pages, curr_page_fp)
             page_signal = _page_change_hint(_last_page_fp,
                                             _last_action_type_for_signal,
                                             curr_page_fp)

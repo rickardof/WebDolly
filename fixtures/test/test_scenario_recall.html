@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scenario recall fixture</title>
+<!-- Synthetic stand-in for the two shapes that cost run_20261113_114533 a
+     study: (1) a question that refers back to a scenario shown on an earlier
+     page, (2) choice questions the DOM carries no label for, where the only
+     option text is the raw input value. No real study content. -->
+<style> body { font: 16px/1.5 system-ui, sans-serif; margin: 40px; max-width: 760px; }
+ .q { margin: 28px 0; } table { border-collapse: collapse; } td { padding: 6px 14px; } </style>
+<h2>Part 2</h2>
+
+<div class="q">
+  <p>Thinking back to the shopping scenario, the family member's main goal was primarily...</p>
+  <label><input type="radio" name="QID29" value="Enjoyment and pleasure"> Enjoyment and pleasure</label><br>
+  <label><input type="radio" name="QID29" value="Health and well-being"> Health and well-being</label><br>
+  <label><input type="radio" name="QID29" value="Saving money"> Saving money</label>
+</div>
+
+<div class="q">
+  <p>How often do you typically consume yoghurt?</p>
+  <label><input type="radio" name="QID33" value="Daily"> Daily</label><br>
+  <label><input type="radio" name="QID33" value="About once a week"> About once a week</label><br>
+  <label><input type="radio" name="QID33" value="Never"> Never</label>
+</div>
+
+<!-- No question text anywhere, no option labels: the row is addressed only
+     by the input name, and every input carries the browser default value. -->
+<table>
+  <tr>
+    <td><input type="radio" name="QID20-1"></td>
+    <td><input type="radio" name="QID20-1"></td>
+    <td><input type="radio" name="QID20-1"></td>
+  </tr>
+  <tr>
+    <td><input type="radio" name="QID22-1"></td>
+    <td><input type="radio" name="QID22-1"></td>
+    <td><input type="radio" name="QID22-1"></td>
+  </tr>
+</table>
+
+<button id="next">Next page</button>

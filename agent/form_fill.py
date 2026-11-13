@@ -142,6 +142,42 @@ function _precedingHeadingText(el) {
   }
   return null;
 }
+// The prompt sitting just before a group of radios/checkboxes that has no
+// <fieldset>, no legend and no aria-label -- the commonest survey markup
+// there is: a <p> or <div> with the question, then the options as <label>s.
+// Without this the group's "question" fell back to the control's name
+// attribute ("QID33", "QID20-1"), which is how a yoghurt study on 13 Nov
+// 2026 had six pages answered from option text alone.
+//
+// Deliberately narrow: the candidate is rejected when it is merely one of
+// this group's own option labels (walking up from an option can reach its
+// neighbour), when it is too short to be a question, or when it is long
+// enough to be a whole page of prose.
+const _CTRL_SEL = 'input, select, textarea, button, [role=radio], [role=checkbox], [role=button]';
+
+function _groupPrompt(els) {
+  if (!els || !els.length) return null;
+  const own = els.map(e => (_labelFor(e) || '').replace(/\s+/g, ' ').trim().toLowerCase());
+  let node = els[0];
+  for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+    for (let sib = node.previousElementSibling; sib; sib = sib.previousElementSibling) {
+      // Only a block of plain text can be this group's prompt. One that
+      // holds controls of its own is another question (or this group's own
+      // options), and reading it as the prompt would label this question
+      // with somebody else's words -- worse than no label at all, because a
+      // label that reads fine is one `unreadable` stops flagging.
+      if (sib.matches && sib.matches(_CTRL_SEL)) continue;
+      if (sib.querySelector && sib.querySelector(_CTRL_SEL)) continue;
+      const t = (sib.innerText || sib.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t.length < 4 || t.length > 280) continue;
+      if (own.includes(t.toLowerCase())) continue;
+      return t;
+    }
+    if (node.tagName === 'BODY') break;
+  }
+  return null;
+}
+
 function _isChecked(el) {
   if (el.tagName === 'INPUT') return el.checked;
   if (el.getAttribute('aria-checked') === 'true') return true;
@@ -358,7 +394,7 @@ function _getChoiceGroups() {
           `input[type="${el.type}"][name="${CSS.escape(el.name)}"]`)).filter(e => _visible(e) && !e.disabled)
       : [el];
     groups.push({ id: `name:${key}`, kind: el.type, els,
-      text: _groupLegend(el.closest('fieldset')) || name });
+      text: _groupLegend(el.closest('fieldset')) || _groupPrompt(els) || name });
   });
 
   Array.from(document.querySelectorAll('[role=radiogroup]')).forEach((rg, idx) => {
@@ -1303,7 +1339,19 @@ _RECALL_RE = re.compile(
     r"^[^A-Za-z]{0,8}(?:did|does|was|were|is there|are there)\b"
     r"|how many|what colou?r|\bshown (?:above|earlier|previously)\b"
     r"|\b(?:recall|remember)\b|you (?:just )?(?:saw|watched|read|viewed)"
-    r"|previous page|\bhai visto\b|\bera presente\b|\bc'era\b",
+    r"|previous page|\bhai visto\b|\bera presente\b|\bc'era\b"
+    # Back-references. run_20261113_114533 lost a study to one of these:
+    # "Thinking back to the shopping scenario, the family member's main goal
+    # was primarily..." -- a manipulation check on a page that does not
+    # contain the scenario. The cues below all point at something the
+    # participant was shown EARLIER, which is never where an opinion item
+    # about the thing in front of you points, so they cannot drag the Likert
+    # pages back onto the slow path.
+    r"|think(?:ing)? back|looking back"
+    r"|\b(?:earlier|previously) in (?:the|this)\b"
+    r"|previous screen|\bas described\b|\baccording to the\b"
+    r"|you were (?:shown|told|asked to (?:imagine|examine|read))"
+    r"|\bpensando a\b|\bin base all|\bpagina precedente\b",
     re.I)
 
 
@@ -1316,6 +1364,48 @@ def needs_eyes(field: dict) -> bool:
     # question shape is read from the question itself, where the anchor means
     # something.
     return bool(_STIMULUS_RE.search(shown_in) and _RECALL_RE.search(text))
+
+
+# A "question" that is only the handle the extractor invented for it: the
+# control's own name or id (QID20-1), or one of the positional fallbacks
+# below. Every text branch in the extraction JS ends in `|| id` / `|| name`
+# / `|| \`fs:${idx}:${type}\``, so text falling back to one of those is the
+# DOM saying it carries no label for this control.
+#
+# run_20261113_114533: six pages of a yoghurt study were filled this way,
+# 16 choice fields whose question text was "QID20-1", "QID22-1", ... and
+# whose options were the bare input values ("on"). The text model answered
+# all of them, the page auto-advanced, and no screenshot was taken: an
+# attention check planted in any of them would be invisible to every guard
+# and to anyone reading the transcript afterwards. Such a field is now left
+# to the vision step, like one that asks about something only the screen
+# shows: both are the same rule, which is that batch-fill answers only what
+# it can actually read.
+_FALLBACK_LABEL_RE = re.compile(r"^(?:fs|rg|rgp|cg|sw|lb|bg):\d+(?::[a-z]+)?$", re.I)
+
+
+def unreadable(field: dict) -> bool:
+    """True when nothing on the page says what this field is asking, or what
+    choosing one of its options would mean.
+
+    Either half is enough to make an answer a coin toss: a question with no
+    text, or options that cannot be told apart ("on", "on", "on" -- the
+    browser's default value, which is what an <input> with no value and no
+    label gives). Both were on the yoghurt study's pages.
+    """
+    text = str(field.get("text") or "").strip()
+    opts = [str(o).strip() for o in (field.get("options") or [])]
+    if len(opts) > 1 and len(set(opts)) == 1:
+        return True
+    if not text:
+        return True
+    if text == str(field.get("id") or "").strip():
+        return True
+    # id "name:radio:QID20-1" with text "QID20-1": the extractor namespaces
+    # the id and falls back to the control's own name for the text.
+    if text and str(field.get("id") or "").endswith(":" + text):
+        return True
+    return bool(_FALLBACK_LABEL_RE.match(text))
 
 
 def summarize_for_agent(result: dict) -> str:
@@ -1340,9 +1430,21 @@ def summarize_for_agent(result: dict) -> str:
         msg += (f" Left unanswered on purpose, because they ask about something only "
                 f"visible on the page: {qs}. Read the screenshot and answer those "
                 "yourself before moving on.")
-    rest = [u for u in undecided if u not in {d["id"] for d in deferred}]
+    named = {d["id"] for d in deferred} | set(result.get("blind") or [])
+    rest = [u for u in undecided if u not in named]
     if rest:
         msg += f" Could not decide answers for {rest} -- fill those yourself."
+    blind = result.get("blind") or []
+    if blind:
+        # Left alone for the same reason as a deferred one: answering a
+        # question you cannot read is a coin toss, and that is where an
+        # attention check hides. Counted, not listed by id -- the ids are
+        # precisely what carries no meaning here.
+        msg += (f" {len(blind)} question(s) on this page were NOT answered: the DOM "
+                "gives them no readable question text, or options that cannot be "
+                "told apart. The page was NOT advanced. Read them on the screenshot "
+                "and answer them yourself, watching for an attention check or an "
+                "instruction that names the option to pick.")
     if result.get("apply_errors_human"):
         msg += " " + " ".join(result["apply_errors_human"])
     elif result["apply_errors"]:

@@ -864,6 +864,16 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     if deferred_visual:
         skip = {f["id"] for f in deferred_visual}
         unanswered = [f for f in unanswered if f["id"] not in skip]
+    # Same rule, other half: a question the DOM carries no text for, or whose
+    # options cannot be told apart, is not answered here either. Six pages of
+    # run_20261113_114533 were filled from fields whose whole question was
+    # "QID20-1" and whose three options all read "on"; the page then
+    # auto-advanced with no screenshot, so an attention check planted in any
+    # of them could not be seen by anyone, then or afterwards.
+    blind = [f for f in unanswered if base.unreadable(f)]
+    if blind:
+        skip = {f["id"] for f in blind}
+        unanswered = [f for f in unanswered if f["id"] not in skip]
     preserved = {f["id"]: f["current"] for f in fields if f.get("answered")}
     scaled = {f["id"]: base.scale_view_for_llm(f) for f in unanswered}
     llm_view = [{k: v for k, v in scaled[f["id"]].items() if not k.startswith("_") and k != "widget"}
@@ -880,7 +890,8 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     # filled and is reported as undecided -- which also stops the DOM
     # "Next" click, so the page is never submitted with a gap.
     undecided = sorted(set(undecided) | ({f["id"] for f in unanswered} - set(new_answers))
-                       | set(identity_missing) | {f["id"] for f in deferred_visual})
+                       | set(identity_missing) | {f["id"] for f in deferred_visual}
+                       | {f["id"] for f in blind})
     new_answers.update(identity_answers)
 
     res = apply_answers(fields, new_answers)
@@ -920,6 +931,7 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
         "deferred_visual": [{"id": f["id"],
                              "text": (f.get("text") or f["id"]).strip().replace("\n", " ")}
                             for f in deferred_visual],
+        "blind": [f["id"] for f in blind],
         "apply_errors": apply_errors, "apply_errors_human": apply_errors_human,
         "mismatches": [],
         "verified_state": {}, "apply_attempts": 1,

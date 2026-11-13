@@ -216,9 +216,122 @@ check("a deferred question is never sent to the text model",
 check("and counts as undecided, which stops the blind auto-advance",
       '| {f["id"] for f in deferred_visual}' in src)
 
+section("a question about a page the study has already left")
+
+# run_20261113_114533, a University of Groningen yoghurt study. The scenario
+# page said, in bold, three times: "a pleasurable eating experience",
+# "prioritising enjoyment and pleasure". Six pages later the manipulation
+# check asked what the family member's goal was, and batch-fill -- which
+# reads the page in front of it and nothing else, on a page that also said
+# "20g protein per pot" -- answered "Health and well-being". No model turn,
+# no screenshot, study failed.
+for q in (
+    "Thinking back to the shopping scenario, the family member's main goal was primarily...",
+    "Think back to the scenario you read earlier. What was the goal?",
+    "Earlier in the study you were shown an image. What did it contain?",
+    "According to the scenario, what was the price of the product?",
+    "The advertisement you were shown earlier in this survey was for which brand?",
+):
+    check(f"left to the eyes: {q[:46]!r}", ff.needs_eyes(field(q)))
+
+# ...and the cues still cannot drag an ordinary opinion page onto the slow
+# path: without a stimulus word in the question there is nothing to refer
+# back to, and an opinion about the thing in front of you is not a question
+# about something earlier.
+for q in (
+    "Thinking about your own habits, how often do you buy yoghurt?",
+    "Looking back over the past month, how satisfied were you with your job?",
+    "According to your own experience, how healthy is this product?",
+    "The advertisement was believable",
+    "How much did you like the advertisement?",
+):
+    check(f"batch-fill keeps: {q[:46]!r}", not ff.needs_eyes(field(q)))
+
+section("a question the DOM gave no text for")
+
+# The same run: six pages, sixteen choice fields whose entire question text
+# was "QID20-1", "QID22-1", ... and whose options were the raw input values
+# ("on"). The text model answered every one of them and the page
+# auto-advanced, so an attention check planted in any of them would be
+# invisible -- to the model, to every guard, and to anyone reading the
+# transcript afterwards.
+check("a field whose text is just its own id is unreadable",
+      ff.unreadable({"id": "QID20-1", "text": "QID20-1", "options": ["on"]}))
+check("so is one with no text at all",
+      ff.unreadable({"id": "QID22-1", "text": "", "options": ["on"]}))
+for fb in ("fs:0:radio", "rg:2", "rgp:11", "cg:3", "sw:0", "lb:7", "bg:1"):
+    check(f"so is the positional fallback {fb!r}",
+          ff.unreadable({"id": fb, "text": fb, "options": ["a", "b"]}))
+check("a real question is readable",
+      not ff.unreadable({"id": "QID29", "text": "What is your gender?",
+                         "options": ["Male", "Female"]}))
+check("and so is a one-word label that is not the id",
+      not ff.unreadable({"id": "age_input", "text": "Age", "options": []}))
+check("a label that merely contains the id is still readable",
+      not ff.unreadable({"id": "QID29", "text": "QID29. How often do you shop?",
+                         "options": ["Daily"]}))
+
+msg = ff.summarize_for_agent({
+    "skipped": False, "field_count": 3, "already_answered_count": 0,
+    "undecided": ["QID20-1", "QID22-1"], "mismatches": [], "apply_errors": {},
+    "blind": ["QID20-1", "QID22-1"]})
+check("an unreadable question is reported as left unanswered",
+      "were NOT answered" in msg, msg)
+check("...which says the page was not advanced", "The page was NOT advanced" in msg)
+check("...and names what to look for", "attention check" in msg)
+check("...and does not also list them as bare ids",
+      "QID20-1" not in msg, msg[-90:])
+
+ffpw = open(os.path.join(HERE, "..", "agent", "form_fill_pw.py")).read()
+check("an unreadable question is never sent to the text model",
+      'blind = [f for f in unanswered if base.unreadable(f)]' in ffpw)
+check("and counts as undecided, which stops the blind auto-advance",
+      '| {f["id"] for f in blind})' in ffpw)
+check("and travels back in the result", '"blind": [f["id"] for f in blind],' in ffpw)
+check("options that cannot be told apart make a field unreadable",
+      ff.unreadable({"id": "name:radio:QID20-1", "text": "Pick one",
+                     "options": ["on", "on", "on"]}))
+check("a namespaced id whose text is only the control name is unreadable",
+      ff.unreadable({"id": "name:radio:QID29", "text": "QID29",
+                     "options": ["Enjoyment", "Health"]}))
+check("a Likert scale labelled 1..5 is still readable",
+      not ff.unreadable({"id": "name:radio:QID7", "text": "I enjoy yoghurt",
+                         "options": ["1", "2", "3", "4", "5"]}))
+
+section("what the study showed before this page")
+
+pages = []
+ac._remember_study_page(pages, "You are grocery shopping and need to buy a yoghurt "
+                               "for a family member who wants a pleasurable eating experience.")
+ac._remember_study_page(pages, "You are grocery shopping and need to buy a yoghurt "
+                               "for a family member who wants a pleasurable eating experience.")
+check("the same page seen twice is kept once", len(pages) == 1, str(len(pages)))
+ac._remember_study_page(pages, "Please examine the yoghurt packaging carefully. "
+                               "https://rug.eu.qualtrics.com/CP/Graphic.php?IM=IM_123")
+check("a second, different page is kept", len(pages) == 2)
+check("image URLs are not kept as if they were prose",
+      "https://" not in pages[1], pages[1][-40:])
+for i in range(8):
+    ac._remember_study_page(pages, f"Instruction page number {i} with enough text to count "
+                                   f"as a page of its own, number {i}.")
+check("only the last few pages are kept", len(pages) == ac._STUDY_PAGES_KEPT, str(len(pages)))
+check("a scrap of text is not a page", (ac._remember_study_page(pages, "Next"), len(pages))[1] == ac._STUDY_PAGES_KEPT)
+
 acsrc = open(os.path.join(HERE, "..", "agent", "agent_core.py")).read()
 check("every batch-filled question and answer reaches the transcript",
       '"batch_fill_qa"' in acsrc and '"qa": qa,' in acsrc)
+check("a page with an unreadable question is never auto-advanced",
+      'and not result.get("blind"))' in acsrc)
+check("the recap is handed over only when something was deferred",
+      'if (result.get("deferred_visual") or []) and study_pages:' in acsrc)
+check("and the deferring step is told to answer from it, not from plausibility",
+      "not from what sounds" in acsrc)
+check("the pages are remembered off the fingerprint the step already computes",
+      "_remember_study_page(_study_pages, curr_page_fp)" in acsrc)
+check("they are never kept from Prolific's own pages",
+      "if not here_guarded:\n                _remember_study_page" in acsrc)
+check("and are dropped when the study ends",
+      "_study_pages = []" in acsrc)
 
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
