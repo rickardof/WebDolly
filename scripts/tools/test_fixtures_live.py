@@ -635,6 +635,45 @@ def main():
     else:
         skip("REAL form-less matrix", "no survey_matrix fixture")
 
+    # ---- a custom dropdown: combobox + a popup list under <body> --------
+    # run_20261115_180326 (a Prolific-hosted task built with Element Plus):
+    # ten questions whose control is a READONLY <input role=combobox>, their
+    # options in a [role=listbox] teleported to <body> and hidden until it is
+    # clicked. Collected as free-text fields, all ten came back "Could NOT
+    # fill". The fixture is synthetic; the real capture stays out of git.
+    dd = os.path.join(ROOT, "fixtures", "test", "test_custom_dropdown.html")
+    if os.path.exists(dd):
+        import form_fill_pw as ff
+        close_extra_tabs()
+        push_to_container([dd])
+        pw_bridge.goto("file:///tmp/fixtures/test_custom_dropdown.html")
+        pw_bridge.wait_for_content()
+        fields = ff.extract_fields()
+        combos = [f for f in fields if f.get("widget") == "combobox"]
+        check("the dropdowns are collected as choice fields, not text boxes",
+              len(combos) == 2 and not [f for f in fields if f["type"] == "text"],
+              f"{len(combos)} combobox, {len(fields)} fields")
+        check("each one carries its own question",
+              sorted(f["text"] for f in combos) ==
+              ["How often do you repaint a room?",
+               "Which colour do you prefer for a kitchen wall?"],
+              [f["text"] for f in combos])
+        check("and the options of the popup that is still closed",
+              all(len(f["options"]) == 4 for f in combos),
+              [len(f["options"]) for f in combos])
+        check("no second field is invented for the popup itself",
+              not [f for f in fields if str(f["id"]).startswith("lb:")],
+              [f["id"] for f in fields])
+        check("the tracking pixel under <body> is not read as a question",
+              not [f for f in fields if "<img" in (f["text"] or "")])
+        check("the free-text question is still free text",
+              [f["type"] for f in fields if f["id"].endswith("why")] == ["textarea"])
+        check("every dropdown is handed to the vision step",
+              all(f.get("needs_vision") for f in combos))
+        close_extra_tabs()
+    else:
+        skip("custom dropdown fixture", "fixtures/test/test_custom_dropdown.html missing")
+
     print()
     passed = sum(results); total = len(results)
     print(f"== FIXTURE SUMMARY ==  {passed}/{total} passed",

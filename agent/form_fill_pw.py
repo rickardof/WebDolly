@@ -169,6 +169,26 @@ return (function() {
       current: on ? ['true'] : [], answered: true, widget: 'switch' });
   });
 
+  // A custom dropdown (combobox + a popup list teleported to <body>): the
+  // control is a readonly <input>, so without this it was collected as a
+  // free-text field and the model wrote a sentence into something that
+  // cannot be typed into. The options come from the owned listbox even
+  // while it is collapsed, and needs_vision sends the field to the vision
+  // step: opening the popup with the real cursor is not something the
+  // batch path can do yet.
+  _getComboboxes().forEach(cb => {
+    const id = PREFIX + cb.id;
+    tag(cb.el, id);
+    cb.els.forEach((el, i) => tag(el, id + '|' + i));
+    const sel = cb.els.filter(e => e.getAttribute('aria-selected') === 'true')
+                      .map(_optionLabel);
+    const shown = (cb.el.value || '').trim();
+    fields.push({ id, type: 'select', text: cb.text,
+      options: cb.els.map(_optionLabel), multiple: false,
+      current: sel[0] || shown || null, answered: !!(sel.length || shown),
+      widget: 'combobox', needs_vision: true });
+  });
+
   _getListboxes().forEach(lb => {
     const id = PREFIX + lb.id;
     lb.els.forEach((el, i) => tag(el, id + '|' + i));
@@ -214,6 +234,11 @@ return (function() {
   simple.forEach(([sel, type]) => {
     document.querySelectorAll(sel).forEach(el => {
       if (!_visible(el) || el.disabled) return;
+      // readOnly / role=combobox: nothing can be typed into it. It is the
+      // visible half of a custom widget, taken above when its options could
+      // be resolved; when they could not, leaving it out is still right,
+      // because an answer for it can never be applied.
+      if (type === 'text' && (el.readOnly || el.getAttribute('role') === 'combobox')) return;
       const raw = el.id || el.name; if (!raw) return;
       const id = PREFIX + raw; tag(el, id);
       const f = { id, type, text: fieldLabel(el) || raw, current: el.value, widget: 'native' };
@@ -565,6 +590,8 @@ def _apply_field_dom(fr, f: dict, fid: str, answer) -> bool:
     the vision path takes over). No DOM/CDP writes anywhere. Runs in the bridge
     thread; may raise a nav error, which the caller classifies."""
     t = f["type"]
+    if f.get("widget") == "combobox":
+        return False               # vision opens the popup and clicks it
     if t in ("radio", "checkbox") or f.get("widget") == "listbox":
         options = f["options"]
         wanted = answer if isinstance(answer, list) else [answer]
@@ -870,7 +897,11 @@ def run_batch_fill(persona: str = "", max_apply_attempts: int = 2,
     # "QID20-1" and whose three options all read "on"; the page then
     # auto-advanced with no screenshot, so an attention check planted in any
     # of them could not be seen by anyone, then or afterwards.
-    blind = [f for f in unanswered if base.unreadable(f)]
+    # Same rule once more: a control the real-input path cannot work (a
+    # custom dropdown whose popup has to be opened first) is left to the
+    # vision step with the page un-advanced, instead of being answered into
+    # a readonly input that silently keeps its old value.
+    blind = [f for f in unanswered if base.unreadable(f) or f.get("needs_vision")]
     if blind:
         skip = {f["id"] for f in blind}
         unanswered = [f for f in unanswered if f["id"] not in skip]

@@ -457,12 +457,54 @@ function _getSwitches() {
   }));
 }
 
+// A custom dropdown built as a combobox + a detached popup list: Element
+// Plus (and most Vue/React widget kits) render
+//   <input role=combobox readonly aria-controls="x" aria-haspopup=listbox>
+// and keep the options in a [role=listbox] teleported to <body>, hidden
+// until the control is clicked. Nothing about that input says "dropdown":
+// run_20261115_180326 emitted nine of them as free-text fields, the model
+// wrote a sentence into each ("I generally enjoy meeting new people...")
+// and every one came back "Could NOT fill" -- 35 times in one run, because
+// a readonly input cannot be typed into at all.
+function _comboboxOf(lb) {
+  if (!lb || !lb.id) return null;
+  return document.querySelector(
+    `[role=combobox][aria-controls="${lb.id}"], [role=combobox][aria-owns="${lb.id}"]`);
+}
+
+function _listboxOf(cb) {
+  const ref = cb.getAttribute('aria-controls') || cb.getAttribute('aria-owns');
+  return ref ? document.getElementById(ref) : null;
+}
+
+function _getComboboxes() {
+  return Array.from(document.querySelectorAll('[role=combobox]')).map((cb, idx) => {
+    if (!_visible(cb) || cb.disabled) return null;
+    const lb = _listboxOf(cb);
+    if (!lb) return null;
+    // NOT filtered by _visible: a collapsed dropdown keeps its options in
+    // the DOM with no layout box, and those options are the whole point.
+    const opts = Array.from(lb.querySelectorAll('[role=option]'));
+    if (!opts.length) return null;
+    return { id: cb.id || cb.name || `cb:${idx}`, el: cb, els: opts, lb,
+             text: _labelFor(cb) || _groupLegend(cb.closest('[role=group]'))
+                   || _precedingHeadingText(cb) || `cb:${idx}` };
+  }).filter(Boolean);
+}
+
 function _getListboxes() {
+  // A listbox a combobox owns is that combobox's option list, not a field of
+  // its own. Emitted separately it is the same question twice, and its label
+  // is scavenged from whatever sits before it under <body>: in
+  // run_20261115_180326 that was the Facebook pixel <noscript> and the
+  // option text of the dropdown next to it.
+  const owned = new Set(_getComboboxes().map(c => c.lb));
   return Array.from(document.querySelectorAll('[role=listbox]')).map((lb, idx) => {
+    if (owned.has(lb)) return null;
     const opts = Array.from(lb.querySelectorAll('[role=option]')).filter(_visible);
     return { id: `lb:${idx}`, els: opts,
       text: _groupLegend(lb) || _precedingHeadingText(lb) || `lb:${idx}` };
-  }).filter(g => g.els.length);
+  }).filter(g => g && g.els.length);
 }
 
 // A custom-widget radio group: sibling <button>/<div role=button> elements
@@ -560,6 +602,19 @@ _EXTRACT_JS = _SHARED_JS + r"""
     });
   });
 
+  _getComboboxes().forEach(cb => {
+    const options = cb.els.map(_optionLabel);
+    const selected = cb.els.filter(e => e.getAttribute('aria-selected') === 'true')
+                           .map(_optionLabel);
+    const shown = (cb.el.value || '').trim();
+    fields.push({
+      id: cb.id, type: 'select', widget: 'combobox', text: cb.text, options,
+      multiple: false, needs_vision: true,
+      current: selected[0] || shown || null,
+      answered: !!(selected.length || shown),
+    });
+  });
+
   _getListboxes().forEach(lb => {
     const options = lb.els.map(_optionLabel);
     const selected = lb.els.filter(e => e.getAttribute('aria-selected') === 'true').map(_optionLabel);
@@ -622,6 +677,11 @@ _EXTRACT_JS = _SHARED_JS + r"""
     'input[type=text], input[type=email], input[type=number], input[type=tel], input:not([type])'
   ).forEach(el => {
     if (!_visible(el) || el.disabled) return;
+    // readOnly: nothing can be typed into it, so offering it as a text field
+    // only ever produces an answer that cannot be applied. It is almost
+    // always the visible half of a custom dropdown or date picker, which
+    // _getComboboxes has already taken if it could resolve the options.
+    if (el.readOnly || el.getAttribute('role') === 'combobox') return;
     const id = el.id || el.name;
     if (!id) return;
     fields.push({
@@ -1384,6 +1444,11 @@ def needs_eyes(field: dict) -> bool:
 _FALLBACK_LABEL_RE = re.compile(r"^(?:fs|rg|rgp|cg|sw|lb|bg):\d+(?::[a-z]+)?$", re.I)
 
 
+# "<img height="1" width="1" style="display:none" src="https://..." -- the
+# text content of a <noscript> node is its own markup.
+_MARKUP_LABEL_RE = re.compile(r"<\s*[a-z!/]", re.IGNORECASE)
+
+
 def unreadable(field: dict) -> bool:
     """True when nothing on the page says what this field is asking, or what
     choosing one of its options would mean.
@@ -1405,6 +1470,20 @@ def unreadable(field: dict) -> bool:
     # the id and falls back to the control's own name for the text.
     if text and str(field.get("id") or "").endswith(":" + text):
         return True
+    # Markup read as a label: a dropdown's popup list is teleported to
+    # <body>, so walking back from it reaches whatever else lives there. In
+    # run_20261115_180326 that was a Facebook tracking pixel inside
+    # <noscript>, whose text content IS its own HTML source.
+    if _MARKUP_LABEL_RE.search(text):
+        return True
+    # The question is the options glued together ("None1-23-55-1010-20+20Not
+    # sure"): the same walk reached the option list of the dropdown next to
+    # it. Nothing in that string asks anything.
+    if len(opts) > 1:
+        squeezed = re.sub(r"\s+", "", text).lower()
+        joined = re.sub(r"\s+", "", "".join(opts)).lower()
+        if squeezed and (squeezed == joined or (len(squeezed) > 20 and squeezed in joined)):
+            return True
     return bool(_FALLBACK_LABEL_RE.match(text))
 
 

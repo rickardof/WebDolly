@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Custom dropdown fixture</title>
+<!--
+  Synthetic copy of the widget shape that cost run_20261115_180326 thirty-five
+  "Could NOT fill" reports: an Element Plus style el-select. The control is a
+  READONLY <input role=combobox aria-controls=...>, and its options live in a
+  [role=listbox] teleported to the end of <body>, display:none until opened.
+  Nothing here is from a real study: the questions and options are invented.
+
+  It also reproduces the two labels the extractor used to scavenge from
+  under <body>: a tracking pixel inside <noscript> (whose text content is its
+  own markup) and the option list of the dropdown next to it.
+-->
+<style>
+  body { font: 16px system-ui; margin: 24px; }
+  .q { margin: 18px 0; }
+  .el-input__inner { width: 320px; height: 32px; }
+  .popper { display: none; position: absolute; }
+</style>
+</head>
+<body>
+
+<div class="q">
+  <label for="sel-colour">Which colour do you prefer for a kitchen wall?</label><br>
+  <input class="el-input__inner" role="combobox" readonly placeholder="Select"
+         aria-controls="pop-colour" aria-expanded="false" aria-haspopup="listbox"
+         type="text" id="sel-colour" tabindex="0">
+</div>
+
+<div class="q">
+  <label for="sel-often">How often do you repaint a room?</label><br>
+  <input class="el-input__inner" role="combobox" readonly placeholder="Select"
+         aria-controls="pop-often" aria-expanded="false" aria-haspopup="listbox"
+         type="text" id="sel-often" tabindex="0">
+</div>
+
+<div class="q">
+  <label for="why">Why did you choose that colour?</label><br>
+  <textarea id="why" rows="3" cols="40"></textarea>
+</div>
+
+<!-- teleported poppers, exactly where the widget kit puts them -->
+<noscript><img height="1" width="1" style="display:none" src="https://example.invalid/tr?id=000&amp;ev=PageView"></noscript>
+
+<div class="popper" id="pop-colour" role="listbox">
+  <div role="option">Warm white</div>
+  <div role="option">Pale green</div>
+  <div role="option">Deep blue</div>
+  <div role="option">I have no preference</div>
+</div>
+
+<div class="popper" id="pop-often" role="listbox">
+  <div role="option">Never</div>
+  <div role="option">Every few years</div>
+  <div role="option">Once a year</div>
+  <div role="option">More than once a year</div>
+</div>
+
+</body>
+</html>

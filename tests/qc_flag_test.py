@@ -284,7 +284,8 @@ check("...and does not also list them as bare ids",
 
 ffpw = open(os.path.join(HERE, "..", "agent", "form_fill_pw.py")).read()
 check("an unreadable question is never sent to the text model",
-      'blind = [f for f in unanswered if base.unreadable(f)]' in ffpw)
+      'blind = [f for f in unanswered if base.unreadable(f) or f.get("needs_vision")]'
+      in ffpw)
 check("and counts as undecided, which stops the blind auto-advance",
       '| {f["id"] for f in blind})' in ffpw)
 check("and travels back in the result", '"blind": [f["id"] for f in blind],' in ffpw)
@@ -297,6 +298,48 @@ check("a namespaced id whose text is only the control name is unreadable",
 check("a Likert scale labelled 1..5 is still readable",
       not ff.unreadable({"id": "name:radio:QID7", "text": "I enjoy yoghurt",
                          "options": ["1", "2", "3", "4", "5"]}))
+
+section("a dropdown the harness cannot open")
+
+# run_20261115_180326, a Prolific-hosted task built with Element Plus: ten
+# questions were <input class="el-input__inner" role="combobox" readonly
+# aria-controls="el-id-5127-54">, with their options in a [role=listbox]
+# teleported to <body> and hidden until the control is clicked. The extractor
+# saw a text box with no options, the model wrote prose into it ("I generally
+# enjoy meeting new people at social gatherings...") and every single one came
+# back "Could NOT fill": a readonly input cannot be typed into. 35 of 60
+# fields in that run failed that way.
+check("a readonly input is never offered as a text field",
+      "el.readOnly || el.getAttribute('role') === 'combobox'" in ffpw)
+check("a combobox is paired with the listbox it owns",
+      "_getComboboxes()" in ffpw and "aria-controls" in ff._SHARED_JS)
+check("its options are read while the popup is still collapsed",
+      "NOT filtered by _visible" in ff._SHARED_JS)
+check("the field it produces is a choice, not free text",
+      "widget: 'combobox', needs_vision: true" in ffpw)
+check("and it goes to the vision step, not to the text model",
+      'base.unreadable(f) or f.get("needs_vision")' in ffpw)
+check("the real-input path refuses it rather than half-applying it",
+      'if f.get("widget") == "combobox":' in ffpw)
+check("a listbox that a combobox owns is not emitted twice",
+      "const owned = new Set(_getComboboxes().map(c => c.lb));" in ff._SHARED_JS)
+
+# The two labels that walk produced on the same page, both scavenged from
+# under <body>, where the poppers are teleported.
+check("markup read as a question is unreadable",
+      ff.unreadable({"id": "lb:3", "options": ["Yes", "No"],
+                     "text": '<img height="1" width="1" style="display:none" '
+                             'src="https://example.invalid/tr?id=1&ev=PageView"'}))
+check("so is a question that is only its own options glued together",
+      ff.unreadable({"id": "lb:4", "text": "None1-23-55-1010-20+20Not sure",
+                     "options": ["None", "1-2", "3-5", "5-10", "10-20",
+                                 "+20", "Not sure"]}))
+check("a real question that happens to quote an option is still readable",
+      not ff.unreadable({"id": "q7", "text": "Would you say Yes or No to that?",
+                         "options": ["Yes", "No"]}))
+check("and a question with a '<' in it is not mistaken for markup",
+      not ff.unreadable({"id": "q8", "text": "Is your income < 20.000 EUR?",
+                         "options": ["Yes", "No"]}))
 
 section("what the study showed before this page")
 
