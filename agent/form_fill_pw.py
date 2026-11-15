@@ -183,10 +183,16 @@ return (function() {
     const sel = cb.els.filter(e => e.getAttribute('aria-selected') === 'true')
                       .map(_optionLabel);
     const shown = (cb.el.value || '').trim();
+    // A tag-style multi-select answers nothing like a single one (each pick
+    // reopens the popup, picks stack up as removable chips). Not guessed at
+    // here: it keeps needs_vision and the page is not advanced without it.
+    const multi = cb.el.getAttribute('aria-multiselectable') === 'true'
+               || cb.lb.getAttribute('aria-multiselectable') === 'true'
+               || cb.el.hasAttribute('multiple');
     fields.push({ id, type: 'select', text: cb.text,
-      options: cb.els.map(_optionLabel), multiple: false,
+      options: cb.els.map(_optionLabel), multiple: multi,
       current: sel[0] || shown || null, answered: !!(sel.length || shown),
-      widget: 'combobox', needs_vision: true });
+      widget: 'combobox', needs_vision: multi });
   });
 
   _getListboxes().forEach(lb => {
@@ -510,6 +516,96 @@ def _select_option_el(frame, tag) -> bool:
     return False
 
 
+# Is this element laid out at all? A collapsed dropdown keeps its options in
+# the DOM with no boxes, so this is how we know the popup actually opened.
+_LAID_OUT_JS = "(t) => {" + _FIND + " return !!(e && e.getClientRects().length); }"
+
+# What the control SHOWS: an <input> writes the chosen label into its value,
+# a div-based one into its text. Read back after the click, because "the
+# click was issued" is not the same as "the answer landed" -- and a page that
+# fills cleanly advances with no model turn.
+_COMBO_SHOWN_JS = "(t) => {" + _FIND + r"""
+  if (!e) return null;
+  const v = (e.value === undefined || e.value === null) ? '' : String(e.value);
+  return v.trim() || (e.innerText || e.textContent || '').trim();
+}"""
+
+
+# Where the popup is, and whether the option we want is outside its own
+# scroll box. A long option list scrolls INSIDE the popup, not with the page,
+# so the wheel has to be aimed at the popup itself.
+_POPUP_AIM_JS = "(t) => {" + _FIND + r"""
+  if (!e) return null;
+  const lb = e.closest('[role=listbox]') || e.parentElement;
+  if (!lb) return null;
+  const lr = lb.getBoundingClientRect(), er = e.getBoundingClientRect();
+  if (!lr.width || !lr.height) return null;
+  return { px: lr.left + lr.width / 2, py: lr.top + lr.height / 2,
+           below: er.top >= lr.bottom - 2, above: er.bottom <= lr.top + 2,
+           scrollable: lb.scrollHeight > lb.clientHeight + 2 };
+}"""
+
+
+def _scroll_inside_popup(frame, opt_tag) -> bool:
+    """Wheel INSIDE an open popup until the option is hittable. True if it
+    got there. The cursor is parked over the list first, because the wheel
+    goes to whatever is under it."""
+    dx, dy = _frame_offset(frame)
+    for _ in range(10):
+        aim = frame.evaluate(_AIM_JS, opt_tag)
+        if aim and aim.get("ok"):
+            return True
+        pa = frame.evaluate(_POPUP_AIM_JS, opt_tag)
+        if not pa or not pa["scrollable"] or not (pa["below"] or pa["above"]):
+            return bool(aim and aim.get("ok"))
+        _REAL["move"](int(round(pa["px"] + dx)), int(round(pa["py"] + dy)))
+        _REAL["wheel"](bool(pa["below"]), 2)
+        time.sleep(random.uniform(0.1, 0.2))
+    aim = frame.evaluate(_AIM_JS, opt_tag)
+    return bool(aim and aim.get("ok"))
+
+
+def _select_combobox(frame, ctrl_tag, opt_tag, label) -> bool:
+    """A custom dropdown (combobox + popup list): real-click the control to
+    open the popup, then real-click the option, then read back what the
+    control shows. True only if it shows the label we asked for.
+
+    The popup is rendered on click and torn down on close, so each attempt
+    re-opens it; Escape is pressed on the way out so a half-open popup never
+    covers the page the vision step gets next."""
+    want = _norm_opt(label)
+    for _ in range(2):
+        if frame.evaluate(_COMBO_SHOWN_JS, ctrl_tag) and \
+                _norm_opt(str(frame.evaluate(_COMBO_SHOWN_JS, ctrl_tag))) == want:
+            return True
+        if not frame.evaluate(_LAID_OUT_JS, opt_tag):
+            if not _real_click(frame, ctrl_tag):
+                return False
+            opened = False
+            for _ in range(12):                      # ~1.5s, bounded
+                time.sleep(random.uniform(0.08, 0.15))
+                if frame.evaluate(_LAID_OUT_JS, opt_tag):
+                    opened = True
+                    break
+            if not opened:
+                _REAL["key"]("Escape")
+                continue
+        # The option may sit below the fold of the popup's own scroll box,
+        # which the page wheel cannot reach: scroll the list itself first.
+        _scroll_inside_popup(frame, opt_tag)
+        if not _real_click(frame, opt_tag):
+            _REAL["key"]("Escape")
+            continue
+        time.sleep(random.uniform(0.08, 0.18))
+        shown = frame.evaluate(_COMBO_SHOWN_JS, ctrl_tag)
+        if shown is not None and _norm_opt(str(shown)) == want:
+            STATS["fast"] += 1
+            return True
+        _REAL["key"]("Escape")
+        time.sleep(random.uniform(0.05, 0.12))
+    return False
+
+
 def _set_select_native(frame, fid, match) -> bool:
     """Native <select>: focus/open it with a real click, then navigate with the
     real keyboard (Home + Down x index) and confirm with Return. No DOM write."""
@@ -591,7 +687,14 @@ def _apply_field_dom(fr, f: dict, fid: str, answer) -> bool:
     thread; may raise a nav error, which the caller classifies."""
     t = f["type"]
     if f.get("widget") == "combobox":
-        return False               # vision opens the popup and clicks it
+        if f.get("multiple"):
+            return False           # tag-style multi-select: left to vision
+        options = f.get("options") or []
+        match = _match_option(answer if not isinstance(answer, list) else answer[0],
+                              options)
+        if match is None:
+            return False
+        return _select_combobox(fr, fid, f"{fid}|{options.index(match)}", match)
     if t in ("radio", "checkbox") or f.get("widget") == "listbox":
         options = f["options"]
         wanted = answer if isinstance(answer, list) else [answer]

@@ -18,7 +18,12 @@
   body { font: 16px system-ui; margin: 24px; }
   .q { margin: 18px 0; }
   .el-input__inner { width: 320px; height: 32px; }
-  .popper { display: none; position: absolute; }
+  .popper { display: none; position: absolute; background: #fff; z-index: 5;
+            border: 1px solid #c8ccd4; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .popper [role=option] { padding: 6px 10px; cursor: pointer; }
+  .popper [role=option]:hover { background: #eef3fb; }
+  .scroller { max-height: 140px; overflow-y: auto; }
+  .spacer { height: 900px; }
 </style>
 </head>
 <body>
@@ -35,6 +40,13 @@
   <input class="el-input__inner" role="combobox" readonly placeholder="Select"
          aria-controls="pop-often" aria-expanded="false" aria-haspopup="listbox"
          type="text" id="sel-often" tabindex="0">
+</div>
+
+<div class="q">
+  <label for="sel-many">Which of these rooms did you paint last?</label><br>
+  <input class="el-input__inner" role="combobox" readonly placeholder="Select"
+         aria-controls="pop-many" aria-expanded="false" aria-haspopup="listbox"
+         type="text" id="sel-many" tabindex="0">
 </div>
 
 <div class="q">
@@ -59,5 +71,66 @@
   <div role="option">More than once a year</div>
 </div>
 
+<!-- a list taller than its own scroll box: the option wanted is off the
+     bottom of the popup and has to be scrolled to inside it -->
+<div class="popper scroller" id="pop-many" role="listbox">
+  <div role="option">Kitchen</div>
+  <div role="option">Bathroom</div>
+  <div role="option">Hallway</div>
+  <div role="option">Living room</div>
+  <div role="option">Bedroom</div>
+  <div role="option">Study</div>
+  <div role="option">Dining room</div>
+  <div role="option">Garage</div>
+  <div role="option">Attic</div>
+  <div role="option">Cellar</div>
+</div>
+
+<script>
+// Behaves like the real widget: the popup is hidden until the control is
+// clicked, appears after a short delay (an animation frame or two in the
+// real one), writes the option text into the readonly input, and closes.
+(function () {
+  var open = null;
+  function close() {
+    if (!open) return;
+    open.pop.style.display = 'none';
+    open.cb.setAttribute('aria-expanded', 'false');
+    open = null;
+  }
+  document.querySelectorAll('[role=combobox]').forEach(function (cb) {
+    var pop = document.getElementById(cb.getAttribute('aria-controls'));
+    cb.addEventListener('click', function () {
+      if (open && open.cb === cb) { close(); return; }
+      close();
+      setTimeout(function () {
+        var r = cb.getBoundingClientRect();
+        pop.style.display = 'block';
+        pop.style.left = (r.left + window.scrollX) + 'px';
+        pop.style.top = (r.bottom + window.scrollY + 2) + 'px';
+        pop.style.width = r.width + 'px';
+        cb.setAttribute('aria-expanded', 'true');
+        open = {cb: cb, pop: pop};
+      }, 140);
+    });
+    pop.querySelectorAll('[role=option]').forEach(function (o) {
+      o.addEventListener('click', function () {
+        pop.querySelectorAll('[role=option]').forEach(function (x) {
+          x.setAttribute('aria-selected', 'false');
+        });
+        o.setAttribute('aria-selected', 'true');
+        cb.value = o.textContent.trim();
+        cb.dispatchEvent(new Event('change', {bubbles: true}));
+        close();
+      });
+    });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') close();
+  });
+})();
+</script>
+
+<div class="spacer"></div>
 </body>
 </html>

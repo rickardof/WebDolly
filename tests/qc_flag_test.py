@@ -316,11 +316,18 @@ check("a combobox is paired with the listbox it owns",
 check("its options are read while the popup is still collapsed",
       "NOT filtered by _visible" in ff._SHARED_JS)
 check("the field it produces is a choice, not free text",
-      "widget: 'combobox', needs_vision: true" in ffpw)
-check("and it goes to the vision step, not to the text model",
-      'base.unreadable(f) or f.get("needs_vision")' in ffpw)
-check("the real-input path refuses it rather than half-applying it",
-      'if f.get("widget") == "combobox":' in ffpw)
+      "widget: 'combobox', needs_vision: multi" in ffpw)
+check("a tag-style multi-select is left to the vision step instead",
+      'if f.get("multiple"):' in ffpw
+      and 'base.unreadable(f) or f.get("needs_vision")' in ffpw)
+check("the single-choice one is opened and clicked with the real cursor",
+      'def _select_combobox(' in ffpw and '_REAL["key"]("Escape")' in ffpw)
+check("the popup's own scroll box is scrolled when the option is past it",
+      'def _scroll_inside_popup(' in ffpw and "_REAL[\"wheel\"](bool(pa[\"below\"]), 2)" in ffpw)
+check("success is read off what the control shows, not off the click",
+      "_COMBO_SHOWN_JS" in ffpw and "_norm_opt(str(shown)) == want" in ffpw)
+check("the wait for the popup is bounded",
+      "for _ in range(12):" in ffpw)
 check("a listbox that a combobox owns is not emitted twice",
       "const owned = new Set(_getComboboxes().map(c => c.lb));" in ff._SHARED_JS)
 

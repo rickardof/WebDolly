@@ -651,15 +651,16 @@ def main():
         fields = ff.extract_fields()
         combos = [f for f in fields if f.get("widget") == "combobox"]
         check("the dropdowns are collected as choice fields, not text boxes",
-              len(combos) == 2 and not [f for f in fields if f["type"] == "text"],
+              len(combos) == 3 and not [f for f in fields if f["type"] == "text"],
               f"{len(combos)} combobox, {len(fields)} fields")
         check("each one carries its own question",
               sorted(f["text"] for f in combos) ==
               ["How often do you repaint a room?",
-               "Which colour do you prefer for a kitchen wall?"],
+               "Which colour do you prefer for a kitchen wall?",
+               "Which of these rooms did you paint last?"],
               [f["text"] for f in combos])
         check("and the options of the popup that is still closed",
-              all(len(f["options"]) == 4 for f in combos),
+              sorted(len(f["options"]) for f in combos) == [4, 4, 10],
               [len(f["options"]) for f in combos])
         check("no second field is invented for the popup itself",
               not [f for f in fields if str(f["id"]).startswith("lb:")],
@@ -668,8 +669,27 @@ def main():
               not [f for f in fields if "<img" in (f["text"] or "")])
         check("the free-text question is still free text",
               [f["type"] for f in fields if f["id"].endswith("why")] == ["textarea"])
-        check("every dropdown is handed to the vision step",
-              all(f.get("needs_vision") for f in combos))
+        check("a single-choice dropdown is not handed back to vision",
+              not any(f.get("needs_vision") for f in combos))
+
+        # ...and the real cursor can actually work it: open the popup, scroll
+        # inside the popup's own box for an option below its fold, click it,
+        # and read back what the control SHOWS. "The click was issued" is not
+        # the same as "the answer landed", and a clean page advances with no
+        # model turn.
+        pw_bridge.front()
+        want = {"sel-colour": "Deep blue", "sel-often": "Once a year",
+                "sel-many": "Cellar", "why": "It keeps the room calm."}
+        res = ff.apply_answers(fields, want)
+        after = {f["id"]: f for f in ff.extract_fields()}
+        check("every dropdown is set with the real cursor",
+              not res.get("errors"), res.get("errors"))
+        for fid, w in want.items():
+            check(f"...and {fid} shows the chosen answer",
+                  (after.get(fid, {}).get("current") or "").strip() == w,
+                  repr(after.get(fid, {}).get("current")))
+        check("the tenth option, below the popup's own fold, was reachable",
+              (after.get("sel-many", {}).get("current") or "").strip() == "Cellar")
         close_extra_tabs()
     else:
         skip("custom dropdown fixture", "fixtures/test/test_custom_dropdown.html missing")
