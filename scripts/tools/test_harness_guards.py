@@ -668,6 +668,74 @@ check("the compact rules (the live ones) now carry the no-code branch",
       and "I didn't receive a completion code" in ac._STANDING_RULES_FULL)
 
 
+# ===================================================================== 15
+section("a description that mentions screening is not a screen-out")
+# run_20261111_164730 steps 9-13: the page on screen was the plain study
+# description with the reservation timer running, and this sentence in it was
+# read as a status five steps in a row (cache entry: hits 5). The title was
+# then banned for 14 days. 20 of the 21 entries in that cache were studies
+# the account had never been screened out of, and one of them,
+# "Text-to-Image Evaluation: Image Quality", was Approved the day after it
+# was banned.
+_DESC = ("Before starting the study, you'll answer a few screening questions "
+         "to determine your eligibility.\n"
+         "If you don't meet the requirements, you'll be screened out of the "
+         "study, but we'll still provide a small bonus to compensate you for "
+         "your time.")
+check("the in-study-screening boilerplate is not a dead end",
+      ac._detect_dead_end(_DESC) == "", repr(ac._detect_dead_end(_DESC)))
+check("nor is a screener described without the word 'if'",
+      ac._detect_dead_end("There is a screener, if you do not qualify for the "
+                          "study, you will still receive a small incentive.") == "")
+check("nor 'you may be screened out'",
+      ac._detect_dead_end("You may be screened out based on your answers.") == "")
+check("a real screen-out banner still stops the study",
+      ac._detect_dead_end("You have been screened out of this study.") == "screened out")
+check("past tense counts too",
+      ac._detect_dead_end("Unfortunately, you were screened out of this study.")
+      == "screened out")
+check("the two bare words alone are never enough",
+      ac._detect_dead_end("Submission\nScreened out\n£0.25") == "",
+      "a status chip can belong to another card in the same DOM")
+check("the sentence that fired is kept for the log",
+      (ac._detect_dead_end("You have been screened out of this study.") == "screened out"
+       and ac._last_dead_end_sentence == "You have been screened out of this study."))
+check("and cleared when nothing fires",
+      ac._detect_dead_end("Nothing to see here.") == "" and ac._last_dead_end_sentence == "")
+check("the skip writes that sentence into the transcript",
+      '"type": "skip"' in src and '"matched": _last_dead_end_sentence' in src)
+check("the other markers are read the same way: a condition is not a status",
+      ac._detect_dead_end("If the study is full you will be returned to the list.") == "")
+check("while the banner itself still is",
+      ac._detect_dead_end("This study is no longer available.") == "non più disponibile")
+check("an already-done study is still recognised",
+      ac._detect_dead_end("You have already completed this study.") == "già svolto")
+check("a page with no marker at all stays empty",
+      ac._detect_dead_end("We're exploring different homepage styles.") == "")
+
+section("a screen-out bans one reservation, not every repost of the title")
+import tempfile                                            # noqa: E402
+import study_cache as sc                                   # noqa: E402
+_keep = sc.CACHE_FILE
+try:
+    with tempfile.TemporaryDirectory() as _td:
+        sc.CACHE_FILE = __import__("pathlib").Path(_td) / "study_cache.json"
+        sc.mark("a" * 24, "screened out", title="Text-to-Image Evaluation")
+        sc.mark("b" * 24, "non più disponibile", title="Coffee habits")
+        sc.mark("c" * 24, "audio/video: cuffie richieste", title="Audio task")
+        _line = sc.prompt_line()
+        check("the screened-out title is not handed to the model",
+              "Text-to-Image Evaluation" not in _line, _line)
+        check("a study that is full or closed still is",
+              "Coffee habits" in _line and "Audio task" in _line, _line)
+        check("the exact id is still bounced by the caller",
+              sc.is_marked("a" * 24) and sc.entries()["a" * 24]["reason"] == "screened out")
+        sc.CACHE_FILE.unlink(missing_ok=True)
+        check("nothing to say means no line at all", sc.prompt_line() == "")
+finally:
+    sc.CACHE_FILE = _keep
+check("the real cache file was left alone", sc.CACHE_FILE == _keep)
+
 print()
 passed, total = sum(RESULTS), len(RESULTS)
 print(f"== SUMMARY ==  {passed}/{total} passed", "ok" if passed == total else "FAILED")

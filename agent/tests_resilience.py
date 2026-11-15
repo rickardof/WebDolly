@@ -88,27 +88,28 @@ def offline():
         px = {}
         for mode in ("normal", "hurry", "super_fast"):
             ac.set_speed(mode)
-            scale = ac.SPEED_SCALE[mode]
+            scale = ac.HISTORY_SCALE[mode]
             rh, rw = fp.smart_resize(int(900 * scale), int(1440 * scale))
-            url = ac.encode_for_model(img)
+            url = ac.encode_for_history(img)
             px[mode] = rw * rh
-            want_mime = "data:image/jpeg;base64," if mode == "super_fast" else "data:image/png;base64,"
-            record(f"encode_for_model[{mode}] {rw}x{rh} {want_mime[5:-8]}",
+            want_mime = ("data:image/png;base64," if scale == 1.0
+                         else "data:image/jpeg;base64,")
+            record(f"encode_for_history[{mode}] {rw}x{rh} {want_mime[5:-8]}",
                    url.startswith(want_mime), f"{len(url)//1024} KB")
-        record("faster modes send fewer pixels (= fewer image tokens)",
+        record("faster modes keep fewer pixels in history (= fewer image tokens)",
                px["super_fast"] < px["hurry"] < px["normal"],
                " ".join(f"{k}={v/1e6:.2f}MP" for k, v in px.items()))
 
-        # Resampled once, from the full-res screenshot. Scaling down and then
-        # letting smart_resize scale part of the way back up blurs the text for
-        # nothing and cost 411 KB against 376 KB on a real screenshot.
-        ac.set_speed("hurry")
-        rh, rw = fp.smart_resize(int(900 * 0.75), int(1440 * 0.75))
-        buf = _io.BytesIO()
-        img.resize((rw, rh), Image.LANCZOS).save(buf, format="PNG")
-        want = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
-        record("hurry resamples once, straight from the full-res shot",
-               ac.encode_for_model(img) == want)
+        # The screenshot the model is about to click on is never degraded,
+        # whatever the mode: only the older ones kept in context are. This
+        # block used to read a SPEED_SCALE table that no longer exists, so the
+        # whole offline suite died here -- and with it the dead-end and
+        # study-cache checks further down, which is how a description could
+        # start reading as a screen-out unnoticed.
+        for mode in ("normal", "hurry", "super_fast"):
+            ac.set_speed(mode)
+            record(f"encode_for_model[{mode}] stays full-res PNG",
+                   ac.encode_for_model(img).startswith("data:image/png;base64,"))
         ac.set_speed("normal")
 
         # --- study timer vetoes an early terminate -----------------------

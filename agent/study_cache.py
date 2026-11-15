@@ -124,12 +124,23 @@ def titles() -> list:
     return out
 
 
+# A screen-out belongs to one reservation, not to the study. The same study
+# comes back reposted under a new id -- this file has held two ids for
+# "Quality of 4K Videos" at once -- and the account has been paid for the
+# repost ("Text-to-Image Evaluation: Image Quality": Approved 6 Nov, blocked
+# by title since 5 Nov). The model can only match the title, so a screen-out
+# must not become a standing refusal; the exact id is still bounced by the
+# caller. Reasons that are a property of the study itself (full, closed,
+# already done, audio/video) keep their line.
+_NO_TITLE_HINT = ("screened out",)
+
+
 def prompt_line() -> str:
     """One line for the agent's observation on the studies list page, or ""."""
     items = []
     for v in entries().values():
         t = (v.get("title") or "").strip()
-        if t:
+        if t and v.get("reason", "") not in _NO_TITLE_HINT:
             items.append(f'"{t}" [{v.get("reason", "scartato")}]')
         if len(items) >= 15:
             break

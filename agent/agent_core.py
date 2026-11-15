@@ -2199,7 +2199,32 @@ _DEAD_END_MARKERS = (
     (r"no longer available|no longer accepting|is full|places? (?:are |have been )?"
      r"(?:full|taken)|study (?:is|has been) (?:closed|completed)", "non più disponibile"),
     (r"you have already (?:completed|taken part|submitted)", "già svolto"),
-    (r"screened out", "screened out"),
+    # Only as a STATUS about this account, never as the two bare words. Every
+    # study tagged "Includes in-study screening" says in its own description
+    # "If you don't meet the requirements, you'll be screened out of the
+    # study, but we'll still provide a small bonus" -- run_20261111_164730
+    # matched that sentence on five consecutive steps (the cache entry has
+    # hits 5, steps 9 to 13), with the reservation timer running and nothing
+    # else on screen but the description. The study was then banned by title
+    # for 14 days. 20 of the 21 entries in the cache were studies this
+    # account was never screened out of: submissions.json has one "Screened
+    # Out" row among them.
+    (r"you(?:'ve| have| had)? been screened out|you were screened out"
+     r"|we(?:'ve| have)? screened you out",
+     "screened out"),
+)
+
+# A dead-end marker only counts in a sentence that states something that has
+# already happened. The same words in the researcher's description are a
+# hypothesis about what might happen later ("if you do not meet the
+# requirements...", "you may be screened out"), and the description is part
+# of the same body text as any banner, so tense is the only thing that tells
+# them apart.
+_HYPOTHETICAL_RE = re.compile(
+    r"\b(?:if|unless|in case|in the event|provided that|should you|whether"
+    r"|may|might|could|would|will|shall|going to|about to|once you|when you"
+    r"|qualora|potresti|potrebbe)\b|'ll\b|\bse\b",
+    re.IGNORECASE,
 )
 
 # Studies that need headphones, a camera or a mic: opt-in, because skipping
@@ -2212,10 +2237,29 @@ _AV_TEXT_MARKERS = (
 )
 
 
+# The sentence the last _detect_dead_end match came from. Logged with the
+# skip: for 17 of the 21 entries the old cache held, the page text that
+# condemned the study was gone by the time anyone asked.
+_last_dead_end_sentence = ""
+
+
 def _detect_dead_end(text: str) -> str:
-    for pattern, reason in _DEAD_END_MARKERS:
-        if re.search(pattern, text, re.IGNORECASE):
-            return reason
+    """The reason this study leads nowhere, read off the page, or "".
+
+    Sentence by sentence, so a marker is judged together with the words
+    around it: a conditional in the same sentence means the page is
+    describing what the study does, not reporting what happened to this
+    account.
+    """
+    global _last_dead_end_sentence
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+        for pattern, reason in _DEAD_END_MARKERS:
+            if re.search(pattern, sentence, re.IGNORECASE):
+                if _HYPOTHETICAL_RE.search(sentence):
+                    break      # the description, not a status
+                _last_dead_end_sentence = sentence.strip()[:200]
+                return reason
+    _last_dead_end_sentence = ""
     return ""
 
 
@@ -4110,6 +4154,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 title = _current_study_title or _study_title()
                 key = _current_study_id or title or here
                 study_cache.mark(key, skip_reason, title=title, url=here)
+                transcript.write(json.dumps(
+                    {"step": step, "type": "skip", "reason": skip_reason,
+                     "study": key, "title": title, "url": here,
+                     "matched": _last_dead_end_sentence}) + "\n")
+                transcript.flush()
                 abandoned = study_timer.is_active()
                 study_timer.reset()
                 _restore_user_speed()
