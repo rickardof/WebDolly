@@ -18,7 +18,9 @@ $pids += @(Get-NetTCPConnection -LocalPort ([int]$Port) -State Listen -ErrorActi
 foreach ($id in ($pids | Sort-Object -Unique)) {
     $proc = Get-Process -Id $id -ErrorAction SilentlyContinue
     if ($proc -and $proc.ProcessName -match '^python') {
-        Stop-Process -Id $id -Force
+        # venv\Scripts\python.exe e' un launcher che lancia il vero python: ferma tutto l'albero
+        # (anche il driver node di Playwright), e ignora i processi gia' spariti.
+        & taskkill.exe /PID $id /T /F 2>&1 | Out-Null
         Write-Host "GUI fermata (pid $id)"
     }
 }

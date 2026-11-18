@@ -79,11 +79,123 @@ _STEALTH_JS = r"""
 """
 
 
+# -- wedge watchdog ----------------------------------------------------------
+# Seen on Windows: after a page reload the Playwright driver (node) vanished
+# and the worker thread spun at 100% CPU inside page.wait_for_timeout() for
+# good. drop_connection()/recycle_tab() cannot help then, because the worker
+# only looks at the dropped connection between jobs and this job never ends --
+# every later call timed out until someone restarted the server by hand.
+# So: if ONE job keeps the worker busy far longer than any legitimate call
+# (they are bounded by 30-120 s), the process is beyond repair and is replaced.
+WEDGE_SECS = float(os.environ.get("FARA_BRIDGE_WEDGE_SECS", "240"))
+WATCHDOG_ON = os.environ.get("FARA_BRIDGE_WATCHDOG", "1") != "0"
+MAX_AUTO_RESTARTS = 3          # per RESTART_WINDOW, then only notify
+RESTART_WINDOW = 30 * 60
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_RESTARTS_FILE = os.path.join(_ROOT, "var", "watchdog_restarts.json")
+
+
+def _auto_restart_budget() -> bool:
+    """Record this restart; False when too many happened recently (a restart
+    loop would only hide a problem a restart does not fix)."""
+    import json
+    now = time.time()
+    try:
+        with open(_RESTARTS_FILE, encoding="utf-8") as f:
+            stamps = [t for t in json.load(f) if now - t < RESTART_WINDOW]
+    except Exception:
+        stamps = []
+    if len(stamps) >= MAX_AUTO_RESTARTS:
+        return False
+    stamps.append(now)
+    try:
+        os.makedirs(os.path.dirname(_RESTARTS_FILE), exist_ok=True)
+        with open(_RESTARTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stamps, f)
+    except Exception:
+        pass
+    return True
+
+
+def _restart_server(reason: str) -> None:
+    """Replace this (wedged) server process: tell Telegram, start a detached
+    helper that waits for us to die and runs scripts/windows/restart.ps1, then
+    exit. Windows only; elsewhere the wedge is reported and left to the
+    existing scripts/restart.sh."""
+    import sys
+    print(f"[watchdog] {reason}", file=sys.stderr, flush=True)
+    try:
+        import agent_core
+        agent_core._notify_telegram(
+            "⚠️ Bridge del browser bloccato, riavvio la GUI.\n"
+            f"{reason}\nLa run in corso va riavviata dal pannello o con /start.")
+    except Exception:
+        pass
+    script = os.path.join(_ROOT, "scripts", "windows", "restart.ps1")
+    if os.name != "nt" or not os.path.exists(script):
+        print("[watchdog] auto-restart only implemented for Windows; "
+              "run scripts/restart.sh by hand", file=sys.stderr, flush=True)
+        return
+    if not _auto_restart_budget():
+        msg = (f"[watchdog] {MAX_AUTO_RESTARTS} automatic restarts in the last "
+               f"{RESTART_WINDOW // 60} min: not restarting again")
+        print(msg, file=sys.stderr, flush=True)
+        try:
+            import agent_core
+            agent_core._notify_telegram("⚠️ " + msg + ". Controlla il browser/Docker.")
+        except Exception:
+            pass
+        return
+    import subprocess
+    # Was an agent run in progress? Then the new server must start it again:
+    # leave a marker for restart.ps1 -Resume (the request itself is kept in
+    # var/last_run.json by gui_server's /start_agent).
+    try:
+        import json, urllib.request
+        port = os.environ.get("FARA_PORT", "8766")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/agent/status", timeout=3) as r:
+            if json.load(r).get("running"):
+                with open(os.path.join(_ROOT, "var", "resume_run.flag"), "w", encoding="utf-8") as f:
+                    f.write(str(time.time()))
+    except Exception:
+        pass
+    # The helper must outlive us and must not be in our process tree (stop.ps1
+    # kills the tree), hence: own process group, and we exit right after.
+    # (Not DETACHED_PROCESS: powershell.exe then starts but silently does nothing.)
+    cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+           "-Command", f"Start-Sleep 4; & '{script}' -NoBrowser -Resume"]
+    flags = 0x00000200 | 0x08000000   # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    try:
+        log_path = os.path.join(_ROOT, "var", "logs", "pw", "watchdog_restart.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        out = open(log_path, "ab")
+        subprocess.Popen(cmd, creationflags=flags, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                         close_fds=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[watchdog] could not start the restart helper: {e}", file=sys.stderr, flush=True)
+        return
+    os._exit(75)
+
+
 class _Bridge:
     def __init__(self):
         self._q = queue.Queue()
+        self._busy_since = None     # monotonic start of the job the worker is in
+        self._busy_what = ""
         self._thread = threading.Thread(target=self._run, daemon=True, name="pw-bridge")
         self._thread.start()
+        if WATCHDOG_ON:
+            threading.Thread(target=self._watch, daemon=True, name="pw-bridge-watchdog").start()
+
+    def _watch(self):
+        while True:
+            time.sleep(10)
+            since, what = self._busy_since, self._busy_what
+            if since is not None and time.monotonic() - since > WEDGE_SECS:
+                _restart_server(f"the browser bridge has been stuck in '{what}' "
+                                f"for {time.monotonic() - since:.0f}s")
+                # Not Windows / over budget: keep watching, but do not spam.
+                time.sleep(max(WEDGE_SECS, 300))
 
     def _connect(self):
         self._pw = self._pw if getattr(self, "_pw", None) else sync_playwright().start()
@@ -129,6 +241,8 @@ class _Bridge:
         self._known = []
         while True:
             fn, args, kwargs, box, done = self._q.get()
+            self._busy_what = getattr(fn, "__name__", "call")
+            self._busy_since = time.monotonic()
             try:
                 if self._browser is None or not self._browser.is_connected():
                     self._connect()
@@ -142,6 +256,7 @@ class _Bridge:
                 if self._browser is not None and not self._browser.is_connected():
                     self._browser = None
             finally:
+                self._busy_since = None
                 done.set()
 
     def call(self, fn, *args, timeout: float = 120, **kwargs):

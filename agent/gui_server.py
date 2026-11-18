@@ -1958,6 +1958,14 @@ class Handler(BaseHTTPRequestHandler):
                 with state_lock:
                     if state["running"]:
                         return self._send_json({"error": "agent already running"}, status=409)
+                    # Remember the request so a watchdog restart of this server
+                    # (pw_bridge._restart_server) can start the same run again.
+                    try:
+                        _lr = HERE.parent / "var" / "last_run.json"
+                        _lr.parent.mkdir(parents=True, exist_ok=True)
+                        _lr.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+                    except Exception:
+                        pass
                     cancel.reset()
                     state["run_id"] = state.get("run_id", 0) + 1
                     state["seq"] = 0
