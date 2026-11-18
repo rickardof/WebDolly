@@ -1,0 +1,8 @@
+# Gli script e i file copiati nei container Linux devono restare LF anche su
+# Windows (con core.autocrlf=true il container non parte: "exec ...: no such file").
+*.sh              text eol=lf
+*.service         text eol=lf
+*.example         text eol=lf
+Dockerfile        text eol=lf
+docker/**         text eol=lf
+*.ps1             text eol=crlf

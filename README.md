@@ -66,7 +66,7 @@ Il modello si può servire in due modi, e la differenza di hardware è tutta qui
 | RAM | 8 GB (16 con opzione A) | 32 GB | il browser in container gira su ~1 GB |
 | Disco | 5 GB + i modelli | 40 GB | 27B = 17,5 + 0,6 GB · 9B = 9,5 GB · i log tengono fino a 200 run di screenshot |
 | CPU | 2 core | 8 core | Chromium, Xvfb e xdotool stanno nel container |
-| Sistema | Linux con Docker | idem | niente Windows/macOS: serve `docker exec` + display virtuale |
+| Sistema | Linux con Docker | idem | Windows 11: Docker Desktop (WSL2) con gli script in `scripts/windows/` ([sotto](#windows)); macOS no: serve `docker exec` + display virtuale |
 
 Con l'opzione B bastano **2 vCPU / 4 GB / 20 GB di disco** (è il taglio del free
 tier ARM di Oracle Cloud, su cui sono tarati gli script in `scripts/cloud/`).
@@ -198,6 +198,25 @@ docker stop fara-browser-pw fara-test      # ferma browser e modello
 > curl "localhost:9333/json/close/<id della vecchia scheda>"   # da /json/list
 > ./scripts/restart.sh                                                 # riconnette il bridge
 > ```
+
+### Windows
+
+Testato su Windows 11 con Docker Desktop (backend WSL2), Python 3.12 e una RTX 5090
+Laptop. I container sono gli stessi di Linux; cambiano solo gli script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1   # una tantum
+powershell -ExecutionPolicy Bypass -File scripts\windows\start.ps1   # avvio (-KeepAwake, -NoModel, -NoBrowser)
+powershell -ExecutionPolicy Bypass -File scripts\windows\stop.ps1    # spegne GUI e container
+```
+
+- Con `core.autocrlf=true` (default di Git per Windows) gli script `.sh` e i Dockerfile
+  diventano CRLF e i container non partono; `.gitattributes` li forza a LF.
+- I Python partono con `PYTHONUTF8=1` (`start.ps1` lo imposta): il codice apre file
+  UTF-8 senza `encoding=`.
+- `systemd-inhibit` non esiste su Windows: per non far sospendere il PC durante una run
+  usa `start.ps1 -KeepAwake`.
+- Il file mmproj puo' essere `mmproj-Fara1.5-27B-bf16.gguf` (`setup.ps1` lo trova da solo).
 
 ## Come si usa la GUI
 
