@@ -11,25 +11,25 @@
 </p>
 
 WebDolly is an agent that uses a real browser for you. You tell it who you are
-and what to do, in plain words, in a small web panel. There is no script to
-write: no selectors, no recorded steps.
+and what to do, in plain words, in a small web panel. It looks at the screen,
+decides, and works the page with the mouse and keyboard, the way a person does.
+There is nothing to script.
 
-- **It decides by looking at the screen.** A vision-language model
-  ([Fara 1.5](https://huggingface.co/microsoft/Fara1.5-27B)) reads each screenshot
-  and chooses where to click and what to type, so a page it has never seen, a
-  new layout or a pop-up is just the next screenshot.
-- **It reads the page's code where a picture is not enough:** the exact text,
-  the fields of a long form (answered in one go), whether the last click changed
-  anything.
-- **It acts like a person:** clicks and keystrokes arrive as from a real mouse
-  and keyboard, with a pointer that travels and typing that has a rhythm.
-- **It is made to run for days, unattended.** In loop mode it repeats the task
-  with a pause in between. With the local model a long run costs nothing per
-  step and hits no rate limit; its memory is trimmed so it never outgrows the
-  model; a failed cycle is retried instead of ending the run; Telegram lets you
-  follow and steer it from your phone.
-- **It runs on your machine:** model, browser and panel. A hosted model works
-  too, with no GPU.
+| When | WebDolly |
+|---|---|
+| the site is new to it, or has changed its layout | works from what is on the screen, so there is no selector to break |
+| a control is drawn rather than coded: a canvas, an image, a custom slider | sees it and uses it like any other |
+| a click misses a small checkbox | notices that nothing changed, finds the box in the page's code and clicks it again, on target |
+| it clicks a greyed-out button, or keeps repeating the same move | is told so, and looks for what it missed |
+| a long form appears | can read all its fields from the page and answer them in one go |
+| you correct it mid-run | follows the correction from the next step and remembers it for that site |
+| it is left running for days | repeats the task in a loop; with the local model every step is free and nothing leaves your PC; its memory stays within the model's limits and a failed cycle is retried, not fatal |
+
+Every click, scroll and keystroke comes from the system's mouse and keyboard,
+not from the browser's automation interface: the pointer travels to its target
+and typing has a rhythm. The model ([Fara 1.5](https://huggingface.co/microsoft/Fara1.5-27B))
+and the browser run on your machine; a hosted model works too, with no GPU.
+Telegram lets you follow and steer a run from your phone.
 
 It works on any website as it is. A **site profile** teaches it a particular
 platform (its task list, time limits, completion codes, rules); one is included,
