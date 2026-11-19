@@ -40,6 +40,7 @@ os.environ["FARA_STUDY_CACHE"] = os.path.join(_TMP, "study_cache.json")
 
 import sites                    # noqa: E402
 import agent_core as ac         # noqa: E402
+import behaviors.task_platform as tp  # noqa: E402
 import form_fill_pw as ff       # noqa: E402
 
 RESULTS = []
@@ -98,29 +99,29 @@ sites.use("generic")
 for u in URLS:
     tag = (u or "<empty>")[:40]
     check(f"not on a platform: {tag}", not ac._on_guarded_site(u))
-    check(f"no launch surface: {tag}", not ac._on_launch_surface(u))
+    check(f"no launch surface: {tag}", not tp._on_launch_surface(u))
     check(f"nothing forbidden: {tag}", not ac.is_forbidden_url(u))
     check(f"no wrong host: {tag}", not ac._off_app_host(u))
     check(f"no invented path: {tag}", not ac._unknown_app_path(u))
     check(f"no completion code in the URL: {tag}", ac.completion_code(u) == "")
     check(f"no task list: {tag}", ac.list_state_from(u, "Waiting for studies") == "unknown")
-check("no page-identity guess either", not ac._reached_in_launch_tab(PRO_DONE, 1, 1))
+check("no page-identity guess either", not tp._reached_in_launch_tab(PRO_DONE, 1, 1))
 check("no task list to go back to", ac.studies_url() == "")
 check("a loop returns to the page it started on", ac.loop_home_for(OTHER) == OTHER)
 check("no standing rules", ac._standing_rules() == "")
-check("no NOCODE refusal", ac.guarded_nocode_refusal("NOCODE", PRO_TASK, False, False, 0) == "")
+check("no NOCODE refusal", tp.guarded_nocode_refusal("NOCODE", PRO_TASK, False, False, 0) == "")
 check("no completion push-back on an ordinary page",
-      ac.completion_pushback("I am done", OTHER, [], [], False) == "")
+      tp.completion_pushback("I am done", OTHER, [], [], False) == "")
 check("no 'no completion code' panel decision",
-      ac.nocode_link_decision("NOCODE", PRO_TASK, True, False, [], [], 0, False) == "")
-check("no launch flow", ac._humanized_launch_reserved_study() == {"status": "unsupported"})
-check("no launch control to look for", ac._launch_control_visible() is False)
-check("no dead ends", ac._detect_dead_end("Sorry, you are not eligible to take part in this study.") == "")
-check("no reservation nudge", ac._reservation_nudge(True, "x") == "")
-check("no task title script", ac._study_title() == "")
-check("no completion-return control", ac._completion_return_box() is None
-      and ac._completion_return_near_miss(10, 10) is None and ac._nocode_link_box() is None)
-codes = ac.codes_on_page("Your Prolific code is ABCD1234. Completion code: ZX81AB")
+      tp.nocode_link_decision("NOCODE", PRO_TASK, True, False, [], [], 0, False) == "")
+check("no launch flow", tp._humanized_launch_reserved_study() == {"status": "unsupported"})
+check("no launch control to look for", tp._launch_control_visible() is False)
+check("no dead ends", tp._detect_dead_end("Sorry, you are not eligible to take part in this study.") == "")
+check("no reservation nudge", tp._reservation_nudge(True, "x") == "")
+check("no task title script", tp._study_title() == "")
+check("no completion-return control", tp._completion_return_box() is None
+      and tp._completion_return_near_miss(10, 10) is None and tp._nocode_link_box() is None)
+codes = tp.codes_on_page("Your Prolific code is ABCD1234. Completion code: ZX81AB")
 check("only generic code wording is read", codes == ["ZX81AB"], str(codes))
 check("a participant-ID field means nothing", ff._identity_kind(
     {"type": "text", "text": "Prolific ID", "id": ""}) is None)
@@ -142,11 +143,11 @@ check("no platform word in any generic text", not any(
 # ===================================================== switching back and forth
 print("\n--- switching profiles")
 sites.use("prolific")
-ac._learn_app_host("https://app.prolific.co/studies")
-check("the Prolific profile applies its rules", ac._on_launch_surface(PRO_LIST)
+tp._learn_app_host("https://app.prolific.co/studies")
+check("the Prolific profile applies its rules", tp._on_launch_surface(PRO_LIST)
       and ac.is_forbidden_url(PRO_FORBIDDEN) and ac.completion_code(PRO_DONE) == "C1NKBGUZ")
 sites.use("generic")
-check("switching away turns them off again", not ac._on_launch_surface(PRO_LIST))
+check("switching away turns them off again", not tp._on_launch_surface(PRO_LIST))
 sites.use("prolific")
 check("a fresh profile does not inherit state (the learnt app host)",
       sites.current.app_host == "app.prolific.com")
@@ -281,6 +282,11 @@ _words = ("timer", "guarded", "completion_code", "study_timer", "here_on_launch"
 check("run_agent's body names nothing of a task platform",
       not [w for w in _words if w in _loop.replace("timer=run.timer", "")],
       str([w for w in _words if w in _loop.replace("timer=run.timer", "")]))
+check("the task-platform helpers live with the behaviour, not in the loop",
+      not [n for n in ("StudyTimer", "WanderGuard", "terminate_refusal", "guarded_nocode_refusal",
+                       "_humanized_launch_reserved_study", "_detect_dead_end", "codes_on_page",
+                       "completion_pushback", "_click_hits_submit")
+           if hasattr(ac, n)] and hasattr(tp, "StudyTimer"))
 
 print(f"\n== SUMMARY ==  {sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

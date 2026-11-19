@@ -28,6 +28,7 @@ from pathlib import Path
 import os
 os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import agent_core as ac
+import behaviors.task_platform as tp  # noqa: E402
 import study_cache
 
 results = []
@@ -116,45 +117,45 @@ def offline():
 
         # --- study timer vetoes an early terminate -----------------------
         clock = [1000.0]
-        t = ac.StudyTimer(clock=lambda: clock[0])
-        record("idle timer never refuses terminate", ac.terminate_refusal(t) == "")
+        t = tp.StudyTimer(clock=lambda: clock[0])
+        record("idle timer never refuses terminate", tp.terminate_refusal(t) == "")
         t.start(600)                                    # 10-minute study
-        record("terminate refused at the start", "TERMINATE REFUSED" in ac.terminate_refusal(t))
+        record("terminate refused at the start", "TERMINATE REFUSED" in tp.terminate_refusal(t))
         clock[0] += 300
-        record("still refused halfway", "TERMINATE REFUSED" in ac.terminate_refusal(t))
+        record("still refused halfway", "TERMINATE REFUSED" in tp.terminate_refusal(t))
         record("status line tells the model to wait", "Do NOT submit yet" in (t.status_line() or ""))
         clock[0] += 275                                 # 25 s left: inside the grace window
-        record("allowed inside the last 30 s", ac.terminate_refusal(t) == "",
+        record("allowed inside the last 30 s", tp.terminate_refusal(t) == "",
                f"remaining={t.remaining():.0f}s")
         clock[0] += 60
-        record("allowed past the minimum", ac.terminate_refusal(t) == "")
+        record("allowed past the minimum", tp.terminate_refusal(t) == "")
         t.reset()
-        record("reset disarms the timer", not t.is_active() and ac.terminate_refusal(t) == "")
+        record("reset disarms the timer", not t.is_active() and tp.terminate_refusal(t) == "")
 
         # --- NOCODE guard: refuse a premature terminate on Prolific ----
         prol = "https://app.prolific.com/studies/abc123"
         host = "https://survey.example.com/page"
         # Non-NOCODE answers never trigger the guard.
         record("CODE answer never blocked",
-               ac.guarded_nocode_refusal("CODE:XYZ", prol, False, False, 0) == "")
+               tp.guarded_nocode_refusal("CODE:XYZ", prol, False, False, 0) == "")
         # NOCODE off Prolific never blocked (model is still on the survey host).
         record("NOCODE off Prolific never blocked",
-               ac.guarded_nocode_refusal("NOCODE", host, False, False, 0) == "")
+               tp.guarded_nocode_refusal("NOCODE", host, False, False, 0) == "")
         # The bug reproduction: on Prolific, never saw external, no cancel confirm.
-        refusal = ac.guarded_nocode_refusal("NOCODE", prol, False, False, 0)
+        refusal = tp.guarded_nocode_refusal("NOCODE", prol, False, False, 0)
         record("NOCODE on Prolific without external/cancel is refused",
                "NOCODE REFUSED" in refusal and "Cancel participation" in refusal)
         # Legit case A: external survey was visited (completed, no code shown).
         record("NOCODE after external survey visited passes",
-               ac.guarded_nocode_refusal("NOCODE", prol, True, False, 0) == "")
+               tp.guarded_nocode_refusal("NOCODE", prol, True, False, 0) == "")
         # Legit case B: Prolific-side cancel confirmation seen.
         record("NOCODE after cancel confirmation passes",
-               ac.guarded_nocode_refusal("NOCODE", prol, False, True, 0) == "")
+               tp.guarded_nocode_refusal("NOCODE", prol, False, True, 0) == "")
         # Safety valve: 3rd attempt always passes so a stale label can't wedge the loop.
         record("safety valve lets 3rd NOCODE attempt through",
-               ac.guarded_nocode_refusal("NOCODE", prol, False, False, 2) == "")
+               tp.guarded_nocode_refusal("NOCODE", prol, False, False, 2) == "")
         record("2nd NOCODE attempt still refused",
-               "NOCODE REFUSED" in ac.guarded_nocode_refusal("NOCODE", prol, False, False, 1))
+               "NOCODE REFUSED" in tp.guarded_nocode_refusal("NOCODE", prol, False, False, 1))
         # Confirmation detector: multilingual phrases.
         for text, want in [
             ("You have cancelled your participation in this study.", True),
@@ -166,7 +167,7 @@ def offline():
             ("Take part in this study", False),
             ("", False),
         ]:
-            got = ac.saw_submission_confirmation(text)
+            got = tp.saw_submission_confirmation(text)
             record(f"submission confirmation: {text[:34]!r}", got == want, f"got={got!r}")
 
         # --- dead-end / audio-video detection ----------------------------
@@ -179,7 +180,7 @@ def offline():
             ("Answer these 20 questions about your shopping habits.", ""),
             ("Are you eligible for a pension? Yes/No", ""),
         ]:
-            got = ac._detect_dead_end(text)
+            got = tp._detect_dead_end(text)
             record(f"dead end: {text[:34]!r}", got == expect, f"got={got!r}")
 
         for text, expect_hit in [
@@ -191,10 +192,10 @@ def offline():
             ("How many hours of video do you watch per week?", False),
             ("Rate the following statements about audio equipment brands.", False),
         ]:
-            got = ac._detect_av(text, check_text=True)
+            got = tp._detect_av(text, check_text=True)
             record(f"audio/video: {text[:34]!r}", bool(got) == expect_hit, f"got={got!r}")
         record("media check alone needs the DOM (no false positive from text)",
-               ac._detect_av("you will need headphones", check_text=False) == "")
+               tp._detect_av("you will need headphones", check_text=False) == "")
 
         # --- study cache --------------------------------------------------
         with tempfile.TemporaryDirectory() as td:
@@ -296,19 +297,19 @@ def offline():
             ("Your completion code will be shown on the next page.", []),
             ("Thank you for taking part in this study.", []),
         ]:
-            record(f"code on the study's page: {text[:30]!r}", ac.codes_on_page(text) == want,
-                   f"got={ac.codes_on_page(text)}")
+            record(f"code on the study's page: {text[:30]!r}", tp.codes_on_page(text) == want,
+                   f"got={tp.codes_on_page(text)}")
 
         for url, want in [("https://app.booktest.io/thanks?code=PLKXLQ&lang=it", ["PLKXLQ"]),
                           ("https://x.example/end?completion_code=C9X", ["C9X"]),
                           ("https://x.example/?page=2&id=55", [])]:
-            record(f"code in the study's URL: {url[8:45]!r}", ac.codes_in_url(url) == want)
+            record(f"code in the study's URL: {url[8:45]!r}", tp.codes_in_url(url) == want)
         for ans, seen, want in [("CODE: PLKXLQ", ["PLKXLQ"], "match"),
                                 ("CODE: PLKXLO", ["PLKXLQ"], "mismatch"),
                                 ("NOCODE", ["PLKXLQ"], "missed"),
                                 ("NOCODE", [], "not_found"),
                                 ("CODE: X1", [], "not_found")]:
-            record(f"code check {ans} vs {seen} -> {want}", ac.check_code(ans, seen) == want)
+            record(f"code check {ans} vs {seen} -> {want}", tp.check_code(ans, seen) == want)
 
         # --- list watching: only a clear "empty" may skip the model -------
         L = "https://app.prolific.com/studies"
@@ -530,25 +531,25 @@ def dom(force: bool, port: int):
     goto("test_two_cards.html")
     xa, ya = box("#a")
     xb, yb = box("#b")
-    da, db = ac._extract_study_duration(xa, ya), ac._extract_study_duration(xb, yb)
+    da, db = tp._extract_study_duration(xa, ya), tp._extract_study_duration(xb, yb)
     record("duration read from card A", da == 5.0, f"got={da}")
     record("duration read from card B", db == 23.0, f"got={db}")
     xf, yf = box("#far")
     record("click far from any card falls back to the page",
-           ac._extract_study_duration(xf, yf) in (5.0, 23.0), f"got={ac._extract_study_duration(xf, yf)}")
+           tp._extract_study_duration(xf, yf) in (5.0, 23.0), f"got={tp._extract_study_duration(xf, yf)}")
 
     # 4. media elements on the page
     goto("test_media.html")
-    record("a <video> element is detected", "video" in (ac._detect_av(check_text=False) or ""))
-    record("page title is readable for the cache", ac._study_title() == "Listening task",
-           ac._study_title())
+    record("a <video> element is detected", "video" in (tp._detect_av(check_text=False) or ""))
+    record("page title is readable for the cache", tp._study_title() == "Listening task",
+           tp._study_title())
     goto("test_nomedia.html")
-    record("a plain page is not flagged", ac._detect_av(check_text=False) == "")
+    record("a plain page is not flagged", tp._detect_av(check_text=False) == "")
 
     # 4b. codes on a custom end page: in a copy box and inside an iframe
     goto("test_code_end.html")
     time.sleep(0.5)
-    found = ac.codes_on_page(ac._end_page_text())
+    found = tp.codes_on_page(ac._end_page_text())
     record("code in a read-only field is found", "ZX81AB" in found, str(found))
     record("code inside an iframe is found", "IFR4ME" in found, str(found))
 

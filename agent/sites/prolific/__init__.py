@@ -726,8 +726,8 @@ class ProlificSite(Site):
     # run_20261108_181732 step 42 clicked "About you" in the top nav and the
     # harness started a study timer on /about-you, told the model it was
     # inside a running survey and pushed a "Studio iniziato" notification.
-    # The page-identity guard (agent_core._reached_in_launch_tab) covers the
-    # paths this tuple still does not name.
+    # The page-identity guard (_reached_in_launch_tab, in the task-platform
+    # behaviour) covers the paths this tuple still does not name.
     launch_chrome_prefixes = ("/submissions", "/account", "/settings",
                               "/about-you", "/balance-hub", "/messages",
                               "/desktop-app", "/referrals")

@@ -32,6 +32,7 @@ sys.modules.setdefault("playwright.sync_api", _pw_sync)
 
 import pw_bridge                      # noqa: E402
 import agent_core as ac               # noqa: E402
+import behaviors.task_platform as tp  # noqa: E402
 import form_fill_pw as ff             # noqa: E402
 
 # Prolific's launch selectors live on its site profile now (agent/sites/);
@@ -91,16 +92,16 @@ OFF = {"x": 600, "y": 940, "width": 200, "height": 48}
 section("surface vocabulary (the distinction behind four bugs)")
 # Four separate bugs came from asking "is this prolific.com?" when the real
 # question was "is a study running?" or "is this the app?".
-check("studies list is the launch surface", ac._on_launch_surface(APP + "/studies"))
+check("studies list is the launch surface", tp._on_launch_surface(APP + "/studies"))
 check("a study detail page is the launch surface",
-      ac._on_launch_surface(APP + "/studies/" + "a" * 24))
+      tp._on_launch_surface(APP + "/studies/" + "a" * 24))
 for p in ("/submissions", "/submissions/complete?cc=X", "/account", "/settings", "/"):
-    check(f"chrome is the launch surface: {p}", ac._on_launch_surface(APP + p))
-check("a Prolific-HOSTED task is NOT the launch surface", not ac._on_launch_surface(TASK))
+    check(f"chrome is the launch surface: {p}", tp._on_launch_surface(APP + p))
+check("a Prolific-HOSTED task is NOT the launch surface", not tp._on_launch_surface(TASK))
 check("...though it IS on the guarded domain (the trap)", ac._on_guarded_site(TASK))
 for u in EXTERNAL:
     check(f"external host is not the launch surface: {urlparse(u).hostname}",
-          not ac._on_launch_surface(u) and not ac._on_guarded_site(u))
+          not tp._on_launch_surface(u) and not ac._on_guarded_site(u))
 
 
 # ===================================================================== 2
@@ -117,11 +118,11 @@ check("rewrite keeps path and query",
 check("rewrite is a no-op on the app host", ac._to_app_host(APP + "/studies") == APP + "/studies")
 
 _saved = ac.sites.current.app_host
-ac._learn_app_host("https://app.prolific.co/studies")
+tp._learn_app_host("https://app.prolific.co/studies")
 check("app host is learnt from start_url", ac.sites.current.app_host == "app.prolific.co")
 check("...and then www on THAT domain is flagged",
       ac._off_app_host("https://www.prolific.co/x") and not ac._off_app_host("https://app.prolific.co/x"))
-ac._learn_app_host("https://eval.services/survey")
+tp._learn_app_host("https://eval.services/survey")
 check("a non-guarded start_url does not move it", ac.sites.current.app_host == "app.prolific.co")
 ac.sites.current.app_host = _saved
 
@@ -141,7 +142,7 @@ else:
 
 # ===================================================================== 3
 section("batch-fill gate (run_20261106_154221: 139 vision clicks, auto-returned)")
-allowed = lambda u: not ac._on_launch_surface(u)
+allowed = lambda u: not tp._on_launch_surface(u)
 for p in ("/studies", "/studies/" + "a" * 24, "/submissions", "/account", "/settings", "/"):
     check(f"blocked on chrome: {p}", not allowed(APP + p))
 check("runs inside a Prolific-hosted task", allowed(TASK))
@@ -169,7 +170,7 @@ else:
 section("wander guard")
 _LIST = APP + "/studies"
 check("fires nowhere but the launch surface",
-      ac._on_launch_surface(_LIST) and not ac._on_launch_surface(TASK))
+      tp._on_launch_surface(_LIST) and not tp._on_launch_surface(TASK))
 # The generic loop lives in agent_core, the task-platform rules it runs on
 # Prolific in the TaskPlatform behaviour, and the words and scripts used on
 # Prolific's pages in the Prolific site profile. Checks read all three.
@@ -186,13 +187,13 @@ else:
     check("that run really was on a Prolific-hosted task", bool(task_steps),
           f"{len(task_steps)} steps")
     check("none of those steps can arm the wander guard now",
-          all(not ac._on_launch_surface(s["url"]) for s in task_steps))
+          all(not tp._on_launch_surface(s["url"]) for s in task_steps))
 
 
 # ===================================================================== 5
 section("reserved-slot state and the humanised launcher")
-launch_nudge = ac._reservation_nudge(True, "a" * 24)
-cancel_nudge = ac._reservation_nudge(False, "a" * 24)
+launch_nudge = tp._reservation_nudge(True, "a" * 24)
+cancel_nudge = tp._reservation_nudge(False, "a" * 24)
 check("fresh nudge forbids cancelling", "do NOT cancel" in launch_nudge)
 check("fresh nudge covers an unscrollable dialog",
       "SCROLL DOWN" in launch_nudge and "Tab" in launch_nudge and "Enter" in launch_nudge)
@@ -200,7 +201,7 @@ check("orphan nudge keeps finish-or-cancel",
       "RESERVATION LOOP" in cancel_nudge and "Cancel participation" in cancel_nudge)
 check("the two branches differ", launch_nudge != cancel_nudge)
 check("state is keyed on the DOM control, not the banner",
-      "fresh_unlaunched = (core._launch_control_visible()" in src
+      "fresh_unlaunched = (_launch_control_visible()" in src
       and "not _saw_external_this_study and not orphan_visible" not in src)
 check("the held-slot nudge branches on launch state",
       "if orphan_visible and fresh_unlaunched:" in src)
@@ -253,7 +254,7 @@ def run_launch(pw, **kw):
     ac._wheel_scroll = lambda down, ticks: (_moves.append(("wheel", down, ticks)),
                                             pw.scrolled(ticks if down else -ticks))
     try:
-        return ac._humanized_launch_reserved_study(**kw)
+        return tp._humanized_launch_reserved_study(**kw)
     finally:
         ac.pw_bridge = _ORIG_PW
         ac._wheel_scroll = lambda down, ticks: _moves.append(("wheel", down, ticks))
@@ -354,23 +355,23 @@ for text, want in (("Study details\nTime remaining\n13 Mins 49 Secs\nProlific ID
                    ("3 mins\n53 places\nSurvey", None),
                    ("Time remaining", None)):
     ac._page_text = (lambda t: (lambda n=6000: t))(text)
-    got = ac._extract_time_remaining()
+    got = tp._extract_time_remaining()
     check(f"parse {text.splitlines()[0][:32]!r}", got == want, f"got={got}")
 
 class Clk:
     def __init__(self): self.t = 0.0
     def __call__(self): return self.t
 
-clk = Clk(); tm = ac.StudyTimer(clock=clk); tm.start(180, deadline_seconds=15 * 60)
+clk = Clk(); tm = tp.StudyTimer(clock=clk); tm.start(180, deadline_seconds=15 * 60)
 check("deadline known at start", tm.deadline_remaining() == 900)
 clk.t = 450; check("pressure 0.5 halfway", abs(tm.deadline_pressure() - 0.5) < 1e-9)
 clk.t = 1360; check("past the deadline -> pressure > 1 and remaining < 0",
                     tm.deadline_pressure() > 1 and tm.deadline_remaining() < 0)
-u = ac.StudyTimer(clock=Clk()); u.start(180)
+u = tp.StudyTimer(clock=Clk()); u.start(180)
 check("no countdown on the page -> nothing invented",
       u.deadline_remaining() is None and u.deadline_line() is None
       and "DEADLINE" not in (u.status_line() or ""))
-c2 = Clk(); d = ac.StudyTimer(clock=c2); d.start(180, deadline_seconds=900)
+c2 = Clk(); d = tp.StudyTimer(clock=c2); d.start(180, deadline_seconds=900)
 c2.t = 200;        check("plenty of time -> plain mention", "Deadline in 12 min" in d.status_line())
 c2.t = 900 - 420;  check("7 min left -> keep moving", "do not re-read" in d.status_line().lower())
 c2.t = 900 - 120;  check("2 min left -> submit now", "Finish and submit NOW" in d.status_line())
@@ -391,13 +392,13 @@ section("invented URLs and Prolific error pages (run_20261108_154719)")
 # "unknown path => a task is running", the harness started a study timer on
 # an error page and switched the wander guard off.
 for p_ in ("/404", "/403", "/500", "/error", "/not-found", "/maintenance"):
-    check(f"error page is NOT a running task: {p_}", ac._on_launch_surface(APP + p_))
+    check(f"error page is NOT a running task: {p_}", tp._on_launch_surface(APP + p_))
 check("a real first-party task is still a running task",
-      not ac._on_launch_surface(TASK))
+      not tp._on_launch_surface(TASK))
 check("...which is the exp303 behaviour that must not regress",
-      not ac._on_launch_surface(APP + "/data-collection-tool/collections/abc"))
+      not tp._on_launch_surface(APP + "/data-collection-tool/collections/abc"))
 check("an uncatalogued path still counts as a task (deliberate default)",
-      not ac._on_launch_surface(APP + "/some-new-first-party-tool/x"))
+      not tp._on_launch_surface(APP + "/some-new-first-party-tool/x"))
 
 INVENTED = APP + "/study/85023784-7114-4869-b0a1-300084006977"
 check("the invented URL is refused before it loads", ac._unknown_app_path(INVENTED))
@@ -433,7 +434,7 @@ else:
     err = [s_ for s_ in t if "/404" in s_["url"]]
     if err:
         check("and the 404 it landed on no longer reads as a running task",
-              all(ac._on_launch_surface(s_["url"]) for s_ in err),
+              all(tp._on_launch_surface(s_["url"]) for s_ in err),
               f"{len(err)} steps")
 
 
@@ -504,36 +505,36 @@ _NAV = ["/", "/balance-hub", "/studies", "/submissions", "/about-you",
         "/messages/unread", "/desktop-app", "/referrals",
         "/account/general", "/account/preferences"]
 _missed = [n for n in _NAV
-           if not ac._on_launch_surface("https://app.prolific.com" + n)]
+           if not tp._on_launch_surface("https://app.prolific.com" + n)]
 check("every in-app nav link reads as launch surface", not _missed, _missed)
 check("/about-you specifically (the run's regression)",
-      ac._on_launch_surface("https://app.prolific.com/about-you"))
+      tp._on_launch_surface("https://app.prolific.com/about-you"))
 check("a Prolific-hosted task still reads as a running task",
-      not ac._on_launch_surface(
+      not tp._on_launch_surface(
           "https://app.prolific.com/data-collection-tool/abc/task"))
 check("an external survey host still reads as a running task",
-      not ac._on_launch_surface("https://app.booktest.io/survey/x"))
+      not tp._on_launch_surface("https://app.booktest.io/survey/x"))
 
 # The page-identity guard: an UNCATALOGUED app path reached without opening
 # a new window is chrome; the same path in a window of its own is a task.
 _SAME, _OTHER = 111, 222
 check("unknown app path in the launch tab is chrome",
-      ac._reached_in_launch_tab(
+      tp._reached_in_launch_tab(
           "https://app.prolific.com/some-new-page", _SAME, _SAME))
 check("the same path in a NEW window stays a task",
-      not ac._reached_in_launch_tab(
+      not tp._reached_in_launch_tab(
           "https://app.prolific.com/some-new-page", _OTHER, _SAME))
 check("the known hosted-task tool is never reclassified",
-      not ac._reached_in_launch_tab(
+      not tp._reached_in_launch_tab(
           "https://app.prolific.com/data-collection-tool/x", _SAME, _SAME))
 check("an external host is never reclassified",
-      not ac._reached_in_launch_tab(
+      not tp._reached_in_launch_tab(
           "https://app.booktest.io/survey/x", _SAME, _SAME))
 check("inert until a launch surface has been seen",
-      not ac._reached_in_launch_tab(
+      not tp._reached_in_launch_tab(
           "https://app.prolific.com/some-new-page", _SAME, None))
 check("the guard is wired into the step loop",
-      "if not here_on_launch and core._reached_in_launch_tab(" in src
+      "if not here_on_launch and _reached_in_launch_tab(" in src
       and "self._launch_page_id = self._cur_page_id" in src)
 check("pw_bridge exposes the active page identity",
       "def active_page_id():" in
@@ -562,16 +563,16 @@ section("a validated study must not end unsubmitted")
 # run_20261109_102733: 45 trials, "Your submission has been validated",
 # then terminate NOCODE with the return button on screen. $3,00.
 check("NOCODE on the survey host is no longer exempt",
-      "NOT DONE YET" in ac.completion_pushback(
+      "NOT DONE YET" in tp.completion_pushback(
           "NOCODE", "https://eval.services/x", [], [], False))
 check("but it is still accepted back on Prolific",
-      ac.completion_pushback(
+      tp.completion_pushback(
           "NOCODE", "https://app.prolific.com/studies/a", [], [], False) == "")
 check("and when a code was seen anywhere",
-      ac.completion_pushback(
+      tp.completion_pushback(
           "NOCODE", "https://eval.services/x", ["ABC123"], [], False) == "")
 check("and the nudge stays one-shot, so a dead end can still end",
-      ac.completion_pushback(
+      tp.completion_pushback(
           "NOCODE", "https://eval.services/x", [], [], True) == "")
 check("the finder keys on Prolific's completion endpoint",
       "submissions" in ac.sites.current.completion_return_js
@@ -580,7 +581,7 @@ check("and on a label, for buttons that navigate in JS",
       "collect" in ac.sites.current.completion_return_js
       and "prolific" in ac.sites.current.completion_return_js.lower())
 check("the harness clicks it itself before nudging in prose",
-      "_rbox = core._scroll_box_into_view(core._completion_return_box)" in src
+      "_rbox = core._scroll_box_into_view(_completion_return_box)" in src
       and "_humanized_click_box(_rbox)" in src
       and "_completion_return_tried" in src)
 check("one attempt per study, reset on the studies list",
@@ -594,7 +595,7 @@ check("one attempt per study, reset on the studies list",
 section("a near-miss on the return control is re-aimed, not wasted")
 # run_20261109_120846 step 50: button y 566..601, clicked at y 609. Eight
 # pixels. The model then spent six steps deciding the button was broken.
-_njs = ac._completion_near_miss_js()
+_njs = tp._completion_near_miss_js()
 check("the near-miss test reuses the same finder",
       "submissions" in _njs and "collect" in _njs)
 check("a point already inside the control is not 'corrected'",
@@ -606,11 +607,11 @@ check("a click that landed on another control is never hijacked",
       and "'BUTTON'" in _njs and "'LABEL'" in _njs
       and "tabIndex >= 0" in _njs)
 check("the margin leaves room for a worse estimate than 8px",
-      20 <= ac._RETURN_NEAR_MISS_PX <= 60, ac._RETURN_NEAR_MISS_PX)
+      20 <= tp._RETURN_NEAR_MISS_PX <= 60, tp._RETURN_NEAR_MISS_PX)
 check("the snap only rewrites the coordinate, so dispatch stays humanised",
       'args["coordinate"] = [_nx, _ny]' in src)
 check("it runs before the minimum-time hold, which can still refuse it",
-      src.index("_sbox = core._completion_return_near_miss(")
+      src.index("_sbox = _completion_return_near_miss(")
       < src.index('submit_held = ""'))
 check("it never fires on Prolific's own pages",
       'if action_type == "left_click" and not here_guarded:\n'
@@ -630,7 +631,7 @@ section("the last inch on Prolific (run_20261110_184734: a finished survey, "
 # study never submitted. guarded_nocode_refusal exempts it (the survey WAS
 # opened) and completion_pushback is spent on the survey host.
 PRO = APP + "/studies/6af3550a148b4a6e6c385cdb"
-d = ac.nocode_link_decision
+d = tp.nocode_link_decision
 
 check("the panel's own link is the signal: press it",
       d("NOCODE", PRO, True, False, [], [], 0, False) == "click")
@@ -653,7 +654,7 @@ check("a code WAS seen on the study pages -> never submit without it",
 check("...including one only on the page in front of us",
       d("NOCODE", PRO, True, False, [], ["C1NKBGUZ"], 0, False) == "codes")
 check("and the refusal names that code instead of describing it",
-      "C1NKBGUZ" in ac.nocode_codes_refusal(["C1NKBGUZ"]))
+      "C1NKBGUZ" in tp.nocode_codes_refusal(["C1NKBGUZ"]))
 
 _ljs = ac.sites.current.nocode_link_js
 check("the probe reads the control's own label, in English and Italian",
@@ -670,11 +671,11 @@ check("the refusal names the link and the cancel branch, not just the rule",
       "I didn't receive a completion code" in ac.sites.current.nocode_link_refusal
       and "Cancel participation" in ac.sites.current.nocode_link_refusal)
 check("the harness presses it with the real cursor, scrolled into view",
-      "_lbox = core._scroll_box_into_view(core._nocode_link_box)" in src
+      "_lbox = core._scroll_box_into_view(_nocode_link_box)" in src
       and "_humanized_click_box(_lbox)" in src)
 check("it runs after the never-opened-the-study guard, not instead of it",
-      src.index("nocode_block = core.guarded_nocode_refusal(")
-      < src.index("_nc = core.nocode_link_decision("))
+      src.index("nocode_block = guarded_nocode_refusal(")
+      < src.index("_nc = nocode_link_decision("))
 check("the dialog it opens is left to the model to confirm",
       "confirm the submission in the" in src)
 check("the per-study state is cleared on the studies list",
@@ -699,35 +700,35 @@ _DESC = ("Before starting the study, you'll answer a few screening questions "
          "study, but we'll still provide a small bonus to compensate you for "
          "your time.")
 check("the in-study-screening boilerplate is not a dead end",
-      ac._detect_dead_end(_DESC) == "", repr(ac._detect_dead_end(_DESC)))
+      tp._detect_dead_end(_DESC) == "", repr(tp._detect_dead_end(_DESC)))
 check("nor is a screener described without the word 'if'",
-      ac._detect_dead_end("There is a screener, if you do not qualify for the "
+      tp._detect_dead_end("There is a screener, if you do not qualify for the "
                           "study, you will still receive a small incentive.") == "")
 check("nor 'you may be screened out'",
-      ac._detect_dead_end("You may be screened out based on your answers.") == "")
+      tp._detect_dead_end("You may be screened out based on your answers.") == "")
 check("a real screen-out banner still stops the study",
-      ac._detect_dead_end("You have been screened out of this study.") == "screened out")
+      tp._detect_dead_end("You have been screened out of this study.") == "screened out")
 check("past tense counts too",
-      ac._detect_dead_end("Unfortunately, you were screened out of this study.")
+      tp._detect_dead_end("Unfortunately, you were screened out of this study.")
       == "screened out")
 check("the two bare words alone are never enough",
-      ac._detect_dead_end("Submission\nScreened out\n£0.25") == "",
+      tp._detect_dead_end("Submission\nScreened out\n£0.25") == "",
       "a status chip can belong to another card in the same DOM")
 check("the sentence that fired is kept for the log",
-      (ac._detect_dead_end("You have been screened out of this study.") == "screened out"
-       and ac._last_dead_end_sentence == "You have been screened out of this study."))
+      (tp._detect_dead_end("You have been screened out of this study.") == "screened out"
+       and tp._last_dead_end_sentence == "You have been screened out of this study."))
 check("and cleared when nothing fires",
-      ac._detect_dead_end("Nothing to see here.") == "" and ac._last_dead_end_sentence == "")
+      tp._detect_dead_end("Nothing to see here.") == "" and tp._last_dead_end_sentence == "")
 check("the skip writes that sentence into the transcript",
-      '"type": "skip"' in src and '"matched": core._last_dead_end_sentence' in src)
+      '"type": "skip"' in src and '"matched": _last_dead_end_sentence' in src)
 check("the other markers are read the same way: a condition is not a status",
-      ac._detect_dead_end("If the study is full you will be returned to the list.") == "")
+      tp._detect_dead_end("If the study is full you will be returned to the list.") == "")
 check("while the banner itself still is",
-      ac._detect_dead_end("This study is no longer available.") == "non più disponibile")
+      tp._detect_dead_end("This study is no longer available.") == "non più disponibile")
 check("an already-done study is still recognised",
-      ac._detect_dead_end("You have already completed this study.") == "già svolto")
+      tp._detect_dead_end("You have already completed this study.") == "già svolto")
 check("a page with no marker at all stays empty",
-      ac._detect_dead_end("We're exploring different homepage styles.") == "")
+      tp._detect_dead_end("We're exploring different homepage styles.") == "")
 
 section("a screen-out bans one reservation, not every repost of the title")
 import tempfile                                            # noqa: E402

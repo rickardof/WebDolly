@@ -38,6 +38,7 @@ for mod_name in ("playwright", "playwright.sync_api"):
         sys.modules[mod_name] = m
 
 import agent_core as ac
+import behaviors.task_platform as tp  # noqa: E402
 
 _RESULTS: list[tuple[str, bool, str]] = []
 
@@ -75,12 +76,12 @@ PASSED = (
 
 section("qc_failure_in")
 
-hit = ac.qc_failure_in(FLAGGED)
+hit = tp.qc_failure_in(FLAGGED)
 check("the page that rejected the work is recognised", bool(hit))
 check("the researcher's own wording is kept, not just the word 'flagged'",
       "ground_truth" in hit or "Failed to correctly choose" in hit, hit[:90])
 check("the snippet stays short enough for a Telegram line", len(hit) <= 220, str(len(hit)))
-check("the page that accepted the work is left alone", ac.qc_failure_in(PASSED) == "")
+check("the page that accepted the work is left alone", tp.qc_failure_in(PASSED) == "")
 
 # False positives would be worse than the bug: every study that warns about
 # attention checks, or carries one, would be reported as a rejection.
@@ -93,7 +94,7 @@ for benign in (
     "Failed to load the image. Please refresh.",
     "",
 ):
-    check(f"not a rejection: {benign[:46]!r}", ac.qc_failure_in(benign) == "")
+    check(f"not a rejection: {benign[:46]!r}", tp.qc_failure_in(benign) == "")
 
 for real in (
     "You failed the attention check and cannot continue.",
@@ -101,7 +102,7 @@ for real in (
     "Your submission has been flagged for review.",
     "The comprehension check was not passed.",
 ):
-    check(f"a rejection: {real[:46]!r}", bool(ac.qc_failure_in(real)))
+    check(f"a rejection: {real[:46]!r}", bool(tp.qc_failure_in(real)))
 
 section("from the page to summary.json")
 
@@ -134,7 +135,7 @@ check("the dashboard row carries it as its last column",
       'r.get("gen_tps"), r.get("flagged") or ""' in gsrc)
 check("the per-cycle ping says so instead of a bare tick", "_last_run_flag()" in gsrc)
 check("a past rejection on Prolific's own pages is not read as this run's",
-      '"" if (self._qc_flag or self.here_guarded) else core.qc_failure_in' in
+      '"" if (self._qc_flag or self.here_guarded) else qc_failure_in' in
       open(os.path.join(HERE, "..", "agent", "behaviors", "task_platform.py")).read())
 check("the daily summary lists the flagged runs",
       "Segnalati dal ricercatore" in gsrc.split("def _daily_summary_text")[1])

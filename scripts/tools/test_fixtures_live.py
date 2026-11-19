@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "agent"))
 
 import pw_bridge          # noqa: E402
 import agent_core as ac   # noqa: E402
+import behaviors.task_platform as tp  # noqa: E402
 
 # Prolific's launch selectors live on its site profile now (agent/sites/);
 # keep the short names this script was written against.
@@ -345,7 +346,7 @@ def main():
             return _real_exec(*a)
         ac._human_move, ac.docker_exec = _spy_move, _spy_exec
         try:
-            res = ac._humanized_launch_reserved_study(include_take_part=False)
+            res = tp._humanized_launch_reserved_study(include_take_part=False)
         finally:
             ac._human_move, ac.docker_exec = _real_move, _real_exec
         target = pw_bridge.element_box(pw_bridge._SEL_START, scroll=False)
@@ -377,7 +378,7 @@ def main():
             continue
         load(state, stub)
         check(f"{state}: launch_control_present == {expect}",
-              ac._launch_control_visible() is expect)
+              tp._launch_control_visible() is expect)
 
     # ---- the banner does not track launchability ------------------------
     # Captured evidence, both directions:
@@ -394,7 +395,7 @@ def main():
         banner = fx[state]["meta"].get("orphan_banner")
         check(f"{state}: launchable is decided by the DOM, whatever the "
               f"banner says (banner={banner})",
-              ac._launch_control_visible() is True)
+              tp._launch_control_visible() is True)
 
     # ---- Prolific's deadline, read off the REAL captured page -----------
     # The study that was auto-returned showed "Time remaining 13 Mins 49
@@ -403,25 +404,25 @@ def main():
     # page as Prolific actually ships it.
     if "detail_reserved" in fx:
         load("detail_reserved", stub)
-        secs = ac._extract_time_remaining()
+        secs = tp._extract_time_remaining()
         print(f"   deadline scraped from the real page: {secs}s")
         check("the countdown is parsed from the real Prolific markup",
               secs is not None and 600 < secs < 1000, f"{secs}")
         meta_secs = None
         txt = fx["detail_reserved"]["meta"].get("url")
-        tm = ac.StudyTimer()
+        tm = tp.StudyTimer()
         tm.start(180, deadline_seconds=secs or 0)
         check("it reaches the timer and the model's status line",
               "Deadline in" in (tm.status_line() or ""), tm.status_line()[-36:])
         check("the estimated duration is still read separately",
-              ac._extract_study_duration() == 3.0, ac._extract_study_duration())
+              tp._extract_study_duration() == 3.0, tp._extract_study_duration())
     else:
         skip("deadline scraped from the real page", "fixture not captured yet")
 
     if "studies_list" in fx:
         load("studies_list", stub)
         check("no countdown on the studies list -> nothing invented",
-              ac._extract_time_remaining() is None)
+              tp._extract_time_remaining() is None)
 
     # ---- the dialog geometry the captures do not contain ----------------
     repro_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -448,7 +449,7 @@ def main():
                   "() => document.querySelector('[data-testid=dialog-start-study]')"
                   ".getAttribute('aria-disabled')")) == "true")
         before = len(pw_bridge.page_ids())
-        res = ac._humanized_launch_reserved_study(include_take_part=False)
+        res = tp._humanized_launch_reserved_study(include_take_part=False)
         active = pw_bridge.run(lambda b: b.active_page().url)
         check(f"{name}: launcher reaches the survey",
               (res or {}).get("status") == "launched" and "stub_survey" in active,
@@ -480,7 +481,7 @@ def main():
     #    Found by href, so the label is deliberately unhelpful.
     thankyou_page('<a class=cta href="https://app.prolific.com/submissions/'
                   'complete?cc=ABC123">Continue</a>')
-    box = ac._completion_return_box()
+    box = tp._completion_return_box()
     check("the completion-URL link is found by its href",
           box is not None and box.get("why") == "completion-url",
           f"{box and box.get('why')} {box and box.get('text')!r}")
@@ -490,14 +491,14 @@ def main():
     thankyou_page('<button class=cta onclick="location.href=\'%s\'">'
                   'Return to Prolific and collect your reward</button>' % stub,
                   pad=1400)
-    raw = ac._completion_return_box()
+    raw = tp._completion_return_box()
     vw, vh = ac._viewport_wh()
     check("a JS button is found by its label",
           raw is not None and raw.get("why") == "label", raw and raw.get("text"))
     check("and it starts below the fold",
           raw is not None and raw["y"] + raw["height"] > vh,
           f"y={raw and round(raw['y'])} vh={vh}")
-    box = ac._scroll_box_into_view(ac._completion_return_box)
+    box = ac._scroll_box_into_view(tp._completion_return_box)
     check("scrolling brings it on screen", ac._box_on_screen(box, vw, vh),
           f"y={box and round(box['y'])}")
     check("and the real cursor reaches it",
@@ -510,7 +511,7 @@ def main():
     # 3. A page with no such control must not invent one.
     thankyou_page('<button class=cta>Close window</button>')
     check("a page with no return control yields nothing",
-          ac._completion_return_box() is None)
+          tp._completion_return_box() is None)
     close_extra_tabs()
 
     # 4. The near-miss. run_20261109_120846 step 50 clicked 8px under a
@@ -520,18 +521,18 @@ def main():
     thankyou_page('<a class=cta id=ret href="https://app.prolific.com/'
                   'submissions/complete?cc=ABC123">Return to Prolific and '
                   'collect your reward</a>')
-    box = ac._completion_return_box()
+    box = tp._completion_return_box()
     bx = box["x"] + box["width"] / 2
     bottom = box["y"] + box["height"]
     check("the run_20261109_120846 miss (8px under the button) is caught",
-          (ac._completion_return_near_miss(bx, bottom + 8) or {}).get("miss") == 8,
+          (tp._completion_return_near_miss(bx, bottom + 8) or {}).get("miss") == 8,
           f"box y {round(box['y'])}..{round(bottom)}, clicked {round(bottom)+8}")
     check("a click inside the button is left alone (nothing to correct)",
-          ac._completion_return_near_miss(bx, box["y"] + box["height"] / 2) is None)
+          tp._completion_return_near_miss(bx, box["y"] + box["height"] / 2) is None)
     check("a click far from it is left alone",
-          ac._completion_return_near_miss(bx, bottom + 200) is None)
+          tp._completion_return_near_miss(bx, bottom + 200) is None)
     check("and so is one just past the margin",
-          ac._completion_return_near_miss(bx, bottom + 45) is None)
+          tp._completion_return_near_miss(bx, bottom + 45) is None)
 
     #    A second control right under the button: a click that really lands
     #    on it must never be hijacked, however close the return button is.
@@ -539,18 +540,18 @@ def main():
                   'submissions/complete?cc=ABC123">Return to Prolific and '
                   'collect your reward</a><div style="height:6px"></div>'
                   '<button id=other class=cta>Report a problem</button>')
-    box = ac._completion_return_box()
+    box = tp._completion_return_box()
     other = pw_bridge.run(lambda b: b.active_page().evaluate(
         "() => {const r = document.getElementById('other')"
         ".getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height};}"))
     gap = other["y"] - (box["y"] + box["height"])
     check("the neighbouring control is inside the snap margin",
-          0 < gap < ac._RETURN_NEAR_MISS_PX, f"gap {round(gap)}px")
+          0 < gap < tp._RETURN_NEAR_MISS_PX, f"gap {round(gap)}px")
     check("but a click ON it is not hijacked",
-          ac._completion_return_near_miss(
+          tp._completion_return_near_miss(
               other["x"] + other["w"] / 2, other["y"] + other["h"] / 2) is None)
     check("while the inert gap between the two still snaps back",
-          ac._completion_return_near_miss(
+          tp._completion_return_near_miss(
               box["x"] + 2, box["y"] + box["height"] + gap / 2) is not None)
     close_extra_tabs()
 
@@ -563,7 +564,7 @@ def main():
         pw_bridge.goto("file:///tmp/fixtures/survey_complete.mhtml")
         time.sleep(2.0)
         pw_bridge.front()
-        box = ac._completion_return_box()
+        box = tp._completion_return_box()
         check("REAL completion screen: the finder still matches its markup",
               box is not None,
               box and f"{box.get('why')} {box.get('text')!r}")
@@ -575,10 +576,10 @@ def main():
             bx = box["x"] + box["width"] / 2
             bottom = box["y"] + box["height"]
             check("an 8px miss under the real button is caught",
-                  ac._completion_return_near_miss(bx, bottom + 8) is not None,
+                  tp._completion_return_near_miss(bx, bottom + 8) is not None,
                   f"box y {round(box['y'])}..{round(bottom)}")
             check("a click on the real button is left alone",
-                  ac._completion_return_near_miss(
+                  tp._completion_return_near_miss(
                       bx, box["y"] + box["height"] / 2) is None)
         close_extra_tabs()
     else:

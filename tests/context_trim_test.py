@@ -61,6 +61,7 @@ for name, mod in _stubs.items():
     sys.modules.setdefault(name, mod)
 
 import agent_core
+import behaviors.task_platform as tp  # noqa: E402
 
 # For the mem:* tests we need the REAL study_memory (user_hints_for, _read,
 # _fresh, _lock, enter_hint_count). agent_core already imported the stub,
@@ -960,7 +961,7 @@ def _():
 
 @_t("complete:pushes_back_on_survey_host_thankyou")
 def _():
-    msg = agent_core.completion_pushback(
+    msg = tp.completion_pushback(
         "Completed the study successfully. Thank you for your participation!",
         "https://eval.services/?evaluation_id=abc&study_id=xyz",
         [], [], False)
@@ -971,7 +972,7 @@ def _():
 
 @_t("complete:accepts_code_answer")
 def _():
-    msg = agent_core.completion_pushback(
+    msg = tp.completion_pushback(
         "CODE: CSA95SMN", "https://surreyfbel.qualtrics.com/jfe/form/SV_x",
         [], [], False)
     assert msg == "", "a CODE: answer is a real outcome, not a false stop"
@@ -985,7 +986,7 @@ def _():
     # exemption is how run_20261109_102733 threw away a validated 45-trial
     # submission by terminating NOCODE in front of a "Return to Prolific and
     # collect your reward" button.
-    msg = agent_core.completion_pushback(
+    msg = tp.completion_pushback(
         "NOCODE", "https://eval.services/x", [], [], False)
     assert "NOT DONE YET" in msg, msg
     assert "Return to" in msg, msg
@@ -993,13 +994,13 @@ def _():
 
 @_t("complete:nocode_still_accepted_once_back_on_prolific")
 def _():
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "NOCODE", "https://app.prolific.com/studies/abc", [], [], False) == ""
 
 
 @_t("complete:nocode_still_accepted_when_a_code_was_seen")
 def _():
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "NOCODE", "https://eval.services/x", ["ABC123"], [], False) == ""
 
 
@@ -1007,36 +1008,36 @@ def _():
 def _():
     # A genuine dead end must still be able to end the run: the second
     # terminate is obeyed.
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "NOCODE", "https://eval.services/x", [], [], True) == ""
 
 
 @_t("complete:code_answers_stay_exempt")
 def _():
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "CODE: ABC123", "https://eval.services/x", [], [], False) == ""
 
 
 @_t("complete:no_pushback_when_back_on_prolific")
 def _():
-    msg = agent_core.completion_pushback(
+    msg = tp.completion_pushback(
         "Completed the study", "https://app.prolific.com/submissions", [], [], False)
     assert msg == "", "already back on Prolific: nothing to nudge"
 
 
 @_t("complete:no_pushback_when_a_code_was_seen")
 def _():
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "Completed the study", "https://eval.services/x", ["C1A2B3"], [], False) == "", \
         "a code seen earlier in the run counts as completion"
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "Completed the study", "https://eval.services/x", [], ["C1A2B3"], False) == "", \
         "a code on the end page counts as completion"
 
 
 @_t("complete:fires_at_most_once_per_study")
 def _():
-    assert agent_core.completion_pushback(
+    assert tp.completion_pushback(
         "Completed the study", "https://eval.services/x", [], [], True) == "", \
         "already pushed back once: must not loop"
 
