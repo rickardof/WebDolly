@@ -1,4 +1,14 @@
-# WebDolly
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="WebDolly: an AI agent that uses a real browser for you" width="100%">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-5b5cf0?style=flat-square"></a>
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-3b74f2?style=flat-square&logo=python&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/docker-required-3b74f2?style=flat-square&logo=docker&logoColor=white">
+  <img alt="Model: Fara 1.5" src="https://img.shields.io/badge/model-Fara%201.5-8b8cff?style=flat-square">
+  <img alt="Windows | Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-5b5cf0?style=flat-square">
+</p>
 
 WebDolly is an agent that uses a real browser for you. A vision-language model
 ([Fara 1.5](https://huggingface.co/microsoft/Fara1.5-27B)) looks at screenshots
@@ -274,3 +284,8 @@ Never share `var/profiles/` (cookies and logins) or `agent/telegram_config.py`.
 This tool automates a browser on your account. Check the terms of service of every
 site you point it at, and do not use it where automation is forbidden. You are
 responsible for what it does with your accounts.
+
+## License
+
+[MIT](LICENSE). The model weights are not part of this repository: Fara 1.5 is
+distributed by its authors under its own license.
