@@ -251,20 +251,20 @@ On Linux use `venv_pw/bin/python`. The other scripts in `agent/` and `tests/`
 ## Project layout
 
 ```
-agent/        agent code: agent_core.py (the generic loop), pw_bridge.py
-              (Playwright bridge), form_fill_pw.py (batch fill), gui_server.py and
-              gui_index.html (the panel)
-agent/sites/  site profiles: base.py (generic) and one directory per platform
+agent/            agent code: agent_core.py (the generic loop), pw_bridge.py
+                  (Playwright bridge), form_fill_pw.py (batch fill), gui_server.py and
+                  gui_index.html (the panel)
+agent/sites/      site profiles: base.py (generic) and one directory per platform
 agent/behaviors/  rule sets a profile plugs into the loop (task_platform.py)
-docker/       images: browser (Chromium + Xvfb + xdotool) and browser-pw (+ socat)
-scripts/      setup, start, stop and restart; windows/ has the PowerShell versions,
-              cloud/ the VM deployment
-fixtures/     test pages
-tests/        offline and end-to-end tests
-bench/        model benchmarks
-docs/         site profiles guide, detailed reference (Italian)
-models/       GGUF model files (not in git)
-var/          logs, screenshots and the browser profile (not in git, personal data)
+docker/           images: browser (Chromium + Xvfb + xdotool) and browser-pw (+ socat)
+scripts/          setup, start, stop and restart; windows/ has the PowerShell versions,
+                  cloud/ the VM deployment
+fixtures/         test pages
+tests/            offline and end-to-end tests
+bench/            model benchmarks
+docs/             site profiles guide, detailed reference (Italian)
+models/           GGUF model files (not in git)
+var/              logs, screenshots and the browser profile (not in git, personal data)
 ```
 
 Never share `var/profiles/` (cookies and logins) or `agent/telegram_config.py`.
