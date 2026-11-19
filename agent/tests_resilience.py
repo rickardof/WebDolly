@@ -164,7 +164,7 @@ def offline():
             ("Take part in this study", False),
             ("", False),
         ]:
-            got = ac.saw_prolific_submission_confirmation(text)
+            got = ac.saw_submission_confirmation(text)
             record(f"submission confirmation: {text[:34]!r}", got == want, f"got={got!r}")
 
         # --- dead-end / audio-video detection ----------------------------

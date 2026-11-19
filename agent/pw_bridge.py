@@ -436,22 +436,6 @@ def reload():
     return run(lambda b: b.active_page().reload(wait_until="domcontentloaded", timeout=30000))
 
 
-# Stable data-testid selectors captured from Prolific's live reserved-study
-# page + its "Start study" launch dialog (ds-dialog-panel). These are
-# first-party Prolific UI, identical across every external study, so the launch
-# is deterministic and does not depend on the vision model aiming a pixel click
-# at a small link that sits just above "Report study" and whose confirm control
-# can fall below the dialog fold. The CLICKS themselves are NOT done here: the
-# launcher in agent_core drives them with the same humanised xdotool cursor the
-# vision path uses, because CDP Input.dispatch* / DOM .click() are flagged by
-# Prolific's behavioural fraud scoring (see the input backend note in
-# agent_core). These helpers only READ the DOM to ground those real clicks.
-_SEL_RESERVE = '[data-testid="reserve"]'            # "Take part in this study"
-_SEL_OPEN_DIALOG = '[data-testid="open-study-in-new-window-button"]'
-_SEL_DIALOG = '[data-testid="start-study-dialog"]'
-_SEL_START = '[data-testid="dialog-start-study"]'   # <a href=<survey> target=_blank>
-
-
 def front() -> str:
     """Bring the tracked active page to the foreground and return its URL.
 
@@ -520,23 +504,27 @@ def viewport_size():
     return run(_v)
 
 
-def launch_control_present() -> bool:
-    """True when the page still offers a way INTO the study: 'Take part in
-    this study', 'Open study in new window', or an already-open 'Start study'
-    dialog.
+def launch_control_present(selectors=()) -> bool:
+    """True when the page still offers a way INTO the task: any of
+    `selectors` (the site profile's launch controls -- an open start dialog,
+    the control that opens it, the control that reserves) is visible.
 
-    THIS, not Prolific's "Please either finish or return this submission"
-    banner, tells a launchable study from a dead slot. Captured evidence says
-    the banner tracks neither: it was PRESENT on a reservation that had never
-    been launched and still offered 'Open study in new window'
-    (run_20261106_124620 screenshot_03, where reading it as "orphan" steered
-    the agent into cancelling a GBP 2,60 study), and ABSENT on a reserved
-    study with its Start dialog open (fixture study 6aec5848). Only the
-    presence of a control says whether there is still a way in.
+    THIS, not a "finish or return this submission" banner, tells a
+    launchable task from a dead slot. Captured evidence says the banner
+    tracks neither: it was PRESENT on a reservation that had never been
+    launched and still offered its open control (run_20261106_124620
+    screenshot_03, where reading it as "orphan" steered the agent into
+    cancelling a GBP 2,60 study), and ABSENT on a reserved task with its
+    start dialog open (fixture study 6aec5848). Only the presence of a
+    control says whether there is still a way in.
+
+    Read-only: the launch clicks themselves are made by agent_core with the
+    humanised xdotool cursor, never by CDP Input.dispatch* or DOM .click(),
+    which behavioural fraud scoring flags.
     """
     def _p(b):
         page = b.active_page()
-        for sel in (_SEL_DIALOG, _SEL_OPEN_DIALOG, _SEL_RESERVE):
+        for sel in selectors:
             el = page.query_selector(sel)
             if el is None:
                 continue

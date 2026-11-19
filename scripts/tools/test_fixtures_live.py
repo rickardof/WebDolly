@@ -34,6 +34,10 @@ sys.path.insert(0, os.path.join(ROOT, "agent"))
 import pw_bridge          # noqa: E402
 import agent_core as ac   # noqa: E402
 
+# Prolific's launch selectors live on its site profile now (agent/sites/);
+# keep the short names this script was written against.
+pw_bridge._SEL_START = ac.sites.current.launch_start_sel
+
 results = []
 def check(name, ok, detail=""):
     results.append(bool(ok))

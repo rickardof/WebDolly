@@ -63,6 +63,39 @@ class Site:
     empty_list_markers: tuple = ()
     empty_list_re = NEVER
 
+    # --- the platform's pages, as the agent sees them -----------------------
+    #: Extra words that introduce a completion code on a task's end page
+    #: ("Your <platform> code is ..."), besides completion/confirmation/survey/study.
+    code_keywords: tuple = ()
+    #: JS returning the task's name on its own page ("" elsewhere), and
+    #: lower-cased strings that are never a task's name.
+    task_title_js = ""
+    task_title_junk: tuple = ()
+    #: Banner shown while a task slot is held but not finished.
+    held_slot_banner_re = NEVER
+    #: (regex, short reason) pairs: a task page saying the task leads nowhere.
+    dead_end_markers: tuple = ()
+    #: The platform's own countdown for a held slot ("Time remaining 13 Mins").
+    deadline_re = NEVER
+    #: The page the platform shows once a task was submitted or cancelled.
+    submission_confirmation_re = NEVER
+    #: JS returning the box of a task's "return to the platform" control, or null.
+    completion_return_js = ""
+    #: JS returning the box of the platform's "I got no completion code" control.
+    nocode_link_js = ""
+    #: What the model is told while that control is still on screen.
+    nocode_link_refusal = ""
+    #: CSS selectors of the platform's task-launch flow: reserve the task, open
+    #: the launch dialog, the dialog itself, and its start control.
+    launch_reserve_sel = ""
+    launch_open_sel = ""
+    launch_dialog_sel = ""
+    launch_start_sel = ""
+
+    def reservation_nudge(self, fresh_unlaunched: bool, task_id: str) -> str:
+        """Guidance for a model stuck on a held task's detail page."""
+        return ""
+
     def home_url(self) -> str:
         """Where to go back to between tasks, or "" when there is no list."""
         return ""

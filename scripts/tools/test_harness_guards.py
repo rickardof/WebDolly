@@ -33,6 +33,14 @@ import pw_bridge                      # noqa: E402
 import agent_core as ac               # noqa: E402
 import form_fill_pw as ff             # noqa: E402
 
+# Prolific's launch selectors live on its site profile now (agent/sites/);
+# keep the short names this suite was written against.
+for _attr, _sel in (("_SEL_RESERVE", ac.sites.current.launch_reserve_sel),
+                    ("_SEL_OPEN_DIALOG", ac.sites.current.launch_open_sel),
+                    ("_SEL_DIALOG", ac.sites.current.launch_dialog_sel),
+                    ("_SEL_START", ac.sites.current.launch_start_sel)):
+    setattr(pw_bridge, _attr, _sel)
+
 RESULTS = []
 def check(name, ok, detail=""):
     RESULTS.append(bool(ok))
@@ -161,7 +169,10 @@ section("wander guard")
 _LIST = APP + "/studies"
 check("fires nowhere but the launch surface",
       ac._on_launch_surface(_LIST) and not ac._on_launch_surface(TASK))
-src = open(os.path.join(ROOT, "agent", "agent_core.py")).read()
+# The loop's wiring lives in agent_core; the words and scripts it uses on
+# Prolific's pages live in the Prolific site profile. Checks read both.
+src = (open(os.path.join(ROOT, "agent", "agent_core.py")).read()
+       + open(os.path.join(ROOT, "agent", "sites", "prolific", "__init__.py")).read())
 check("the guard keys on the launch surface, not the host",
       "if not _on_launch_surface(url) or sites.current.home_path.match(" in src)
 t = trail("run_20261106_084555")
@@ -558,11 +569,11 @@ check("and the nudge stays one-shot, so a dead end can still end",
       ac.completion_pushback(
           "NOCODE", "https://eval.services/x", [], [], True) == "")
 check("the finder keys on Prolific's completion endpoint",
-      "submissions" in ac._COMPLETION_RETURN_JS
-      and "complete" in ac._COMPLETION_RETURN_JS)
+      "submissions" in ac.sites.current.completion_return_js
+      and "complete" in ac.sites.current.completion_return_js)
 check("and on a label, for buttons that navigate in JS",
-      "collect" in ac._COMPLETION_RETURN_JS
-      and "prolific" in ac._COMPLETION_RETURN_JS.lower())
+      "collect" in ac.sites.current.completion_return_js
+      and "prolific" in ac.sites.current.completion_return_js.lower())
 check("the harness clicks it itself before nudging in prose",
       "_rbox = _scroll_box_into_view(_completion_return_box)" in src
       and "_humanized_click_box(_rbox)" in src
@@ -579,7 +590,7 @@ check("one attempt per study, reset on the studies list",
 section("a near-miss on the return control is re-aimed, not wasted")
 # run_20261109_120846 step 50: button y 566..601, clicked at y 609. Eight
 # pixels. The model then spent six steps deciding the button was broken.
-_njs = ac._COMPLETION_NEAR_MISS_JS
+_njs = ac._completion_near_miss_js()
 check("the near-miss test reuses the same finder",
       "submissions" in _njs and "collect" in _njs)
 check("a point already inside the control is not 'corrected'",
@@ -639,7 +650,7 @@ check("...including one only on the page in front of us",
 check("and the refusal names that code instead of describing it",
       "C1NKBGUZ" in ac.nocode_codes_refusal(["C1NKBGUZ"]))
 
-_ljs = ac._NOCODE_LINK_JS
+_ljs = ac.sites.current.nocode_link_js
 check("the probe reads the control's own label, in English and Italian",
       "receive" in _ljs and "non\\s+ho\\s+ricevuto" in _ljs)
 check("it only ever looks at controls, not at prose that mentions a code",
@@ -651,8 +662,8 @@ check("the probe is read-only: finding the link never clicks it",
       ".click()" not in _ljs and "dispatchEvent" not in _ljs)
 
 check("the refusal names the link and the cancel branch, not just the rule",
-      "I didn't receive a completion code" in ac._NOCODE_LINK_REFUSAL
-      and "Cancel participation" in ac._NOCODE_LINK_REFUSAL)
+      "I didn't receive a completion code" in ac.sites.current.nocode_link_refusal
+      and "Cancel participation" in ac.sites.current.nocode_link_refusal)
 check("the harness presses it with the real cursor, scrolled into view",
       "_lbox = _scroll_box_into_view(_nocode_link_box)" in src
       and "_humanized_click_box(_lbox)" in src)

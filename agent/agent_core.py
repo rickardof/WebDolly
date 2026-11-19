@@ -349,8 +349,6 @@ form_fill.set_real_input({
 })
 
 
-
-
 def take_screenshot(run_dir: Path, step: int) -> Image.Image:
     # _agent_live.png is distinct from the GUI's own _gui_live.png so the
     # two concurrent scrots never clobber the same file.
@@ -1123,17 +1121,32 @@ def _on_launch_surface(url: str) -> bool:
                for p in site.launch_chrome_prefixes)
 
 
-_FILLER = r"(?:is|below|here|in|on|into|to|prolific|please|enter|paste|copy|the|your|following|this)"
-_PAGE_CODE = re.compile(
-    r"(?:completion|confirmation|survey|prolific|study)\s*(?:code|id)\b"
-    r"(?:[\s:,.\-]+" + _FILLER + r"\b)*[\s:,.\-]*"
-    # the code itself can't be the next keyword ("Prolific code / completion
-    # code: X" must yield X, not swallow "completion")
-    r"(?!(?:completion|confirmation|survey|prolific|study)\b)"
-    r"([A-Za-z0-9][A-Za-z0-9_\-]{3,40})", re.IGNORECASE)
+_PAGE_CODE_CACHE: dict = {}
+
+
+def _page_code_re():
+    """The regex that finds a completion code printed on a page ("Your
+    completion code is: X"), with the active profile's own words added to the
+    keywords ("Your <platform> code is: X")."""
+    extra = tuple(sites.current.code_keywords)
+    rx = _PAGE_CODE_CACHE.get(extra)
+    if rx is None:
+        alt = "".join(re.escape(w) + "|" for w in extra)
+        filler = (r"(?:is|below|here|in|on|into|to|" + alt
+                  + r"please|enter|paste|copy|the|your|following|this)")
+        kw = r"(?:completion|confirmation|survey|" + alt + r"study)"
+        rx = re.compile(
+            kw + r"\s*(?:code|id)\b"
+            r"(?:[\s:,.\-]+" + filler + r"\b)*[\s:,.\-]*"
+            # the code itself can't be the next keyword ("<platform> code /
+            # completion code: X" must yield X, not swallow "completion")
+            r"(?!" + kw + r"\b)"
+            r"([A-Za-z0-9][A-Za-z0-9_\-]{3,40})", re.IGNORECASE)
+        _PAGE_CODE_CACHE[extra] = rx
+    return rx
+
+
 _NOT_A_CODE = {"will", "and", "when", "after", "must", "should", "has", "have"}
-
-
 def _end_page_text(limit: int = 40000) -> str:
     """Page text for code hunting: every frame (iframes included, through
     Playwright, which can enter cross-origin ones) plus the values of text
@@ -1169,11 +1182,11 @@ def _end_page_text(limit: int = 40000) -> str:
 
 def codes_on_page(text: str) -> list:
     """Completion codes printed on a custom end page ("Your completion code
-    is: C1A2B3"). Many studies end on their own page instead of redirecting
-    to Prolific, so the code lives only on screen. Used to double-check what
-    the model read, never to replace it."""
+    is: C1A2B3"). Many tasks end on their own page instead of redirecting
+    back to the platform, so the code lives only on screen. Used to
+    double-check what the model read, never to replace it."""
     out = []
-    for m in _PAGE_CODE.finditer(text or ""):
+    for m in _page_code_re().finditer(text or ""):
         c = m.group(1)
         if c.lower() in _NOT_A_CODE or (c.isalpha() and c.islower()) or c in out:
             continue          # an ordinary word, or already seen
@@ -1392,82 +1405,35 @@ def _page_text(limit: int = 20000) -> str:
         return ""
 
 
-# Prolific shows this banner at the top of every page while any slot is
-# reserved and still pending. The wording is stable across study types and
-# languages are not localised for the warning text. If the DOM contains it,
-# the account is in a 'held submission' state that must be resolved via
-# 'I'm finished' (with a real code) or 'Cancel participation'. Used by the
-# orphan-reservation guard so the model does not hallucinate a 'Take part'
-# button when it is really looking at 'I'm finished'.
-_ORPHAN_BANNER_RE = re.compile(
-    r"(?:please\s+)?either\s+finish\s+or\s+return\s+(?:this|your)\s+submission",
-    re.IGNORECASE,
-)
-
-
 def _orphan_reservation_visible() -> bool:
     try:
-        return bool(_ORPHAN_BANNER_RE.search(_page_text(4000) or ""))
+        return bool(sites.current.held_slot_banner_re.search(_page_text(4000) or ""))
     except Exception:
         return False
 
 
 def _reservation_nudge(fresh_unlaunched: bool, detail_id: str) -> str:
-    """One-shot guidance when the agent has lingered on a reserved
-    /studies/<id> detail page without progress (see the reservation-loop
-    detector). Branches on launch state so a study that is merely *not yet
-    launched* is never steered toward abandonment:
+    """One-shot guidance for a model stuck on a held task's detail page,
+    branched on whether the task was ever launched (see the profile)."""
+    return sites.current.reservation_nudge(fresh_unlaunched, detail_id)
 
-    - fresh_unlaunched: the slot was reserved THIS run and the external survey
-      was never opened (no orphan banner, never left prolific.com). The model
-      is still working through Prolific's launch flow, whose 'Start study'
-      dialog hides its confirm button below the fold -- push the LAUNCH and
-      forbid cancelling. Abandoning here returns a completable study
-      (run_20261105_181001 lost a GBP 4 eval exactly this way: it opened the
-      'Start study' dialog, could not reach the below-the-fold confirm button,
-      and cancelled).
-    - otherwise: an orphan/held slot, or a survey already attempted with no
-      code -- the legitimate exits are 'I'm finished' (with a code) or 'Cancel
-      participation'.
-    """
-    if fresh_unlaunched:
-        return (
-            "LAUNCH THIS STUDY -- do NOT cancel it. You reserved "
-            f"/studies/{detail_id} and have NOT opened the survey yet (you "
-            "never left prolific.com this run), so the study is completable "
-            "and simply not started.\n"
-            "To start it: click the button that opens the study -- 'Open study "
-            "in new window' (or 'Take part' / 'Start study'). A 'Start study' "
-            "dialog then appears with a confidentiality checkbox and a confirm "
-            "button. That confirm button is at the BOTTOM of the dialog and is "
-            "often BELOW the visible area: SCROLL DOWN to bring it on screen "
-            "(the dialog moves with the page), then click it. If scrolling "
-            "does not move it at all, press Tab until the 'Start study' button "
-            "is focused and press Enter. Do NOT click outside the dialog (that "
-            "only closes it) and do NOT click 'Report study'. Click 'Cancel "
-            "participation' ONLY if the task is genuinely impossible (it needs "
-            "a microphone or camera, or a CAPTCHA blocks you)."
-        )
-    return (
-        f"RESERVATION LOOP on /studies/{detail_id}: you have been stuck on "
-        "this reserved slot without progress. Prolific will keep redirecting "
-        "you back to this detail page as long as the slot is held. The ONLY "
-        "legitimate exits are: (a) 'I'm finished' AFTER you actually completed "
-        "the external survey (with its completion code to paste), or (b) "
-        "'Cancel participation' (red outline button on the right panel) -> "
-        "confirm 'Yes, cancel participation' in the modal. Do NOT press back / "
-        "forward / address bar / Ctrl+Tab / click on the top Prolific nav tabs "
-        "again -- those cannot release the slot. Pick one of the two panel "
-        "buttons now."
-    )
+
+def _launch_selectors() -> tuple:
+    """The profile's launch controls, most-advanced state first: an open
+    start dialog, the control that opens it, the control that reserves."""
+    s = sites.current
+    return tuple(x for x in (s.launch_dialog_sel, s.launch_open_sel, s.launch_reserve_sel) if x)
 
 
 def _launch_control_visible() -> bool:
-    """Is a way INTO the study still on the page? See
+    """Is a way INTO the task still on the page? See
     pw_bridge.launch_control_present. Safe-false so a bridge hiccup never
     turns into a cancellation."""
+    sels = _launch_selectors()
+    if not sels:
+        return False
     try:
-        return bool(pw_bridge.launch_control_present())
+        return bool(pw_bridge.launch_control_present(sels))
     except Exception:
         return False
 
@@ -1567,20 +1533,21 @@ def _humanized_click_box(box, pre=(0.25, 0.7), settle=(0.05, 0.18)) -> bool:
 
 
 def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
-    """Launch the external survey of a Prolific study the model has opened,
-    with humanised xdotool clicks grounded on stable data-testid selectors:
-    (optionally) 'Take part in this study' to reserve -> 'Open study in new
-    window' -> tick the dialog checkbox(es) -> 'Start study', then follow the
-    survey tab. The model chose the study; this only performs the mechanical
-    launch it keeps fumbling (the confirm link sits below the dialog fold).
+    """Launch the task the model has opened on the platform, with humanised
+    xdotool clicks grounded on the profile's launch selectors: (optionally)
+    the reserve control -> the control that opens the launch dialog -> tick
+    the dialog checkbox(es) -> its start control, then follow the task tab it
+    opens. The model chose the task; this only performs the mechanical launch
+    it keeps fumbling (the confirm link sits below the dialog fold).
 
     Returns {'status': ...}. Never raises (except on cancellation). status:
-      launched           -- survey tab is open and now the active/front page
-      no-reserve-control -- un-reserved but no 'Take part' button found
-      no-launch-control  -- reserved but no 'Open study in new window'
-      no-dialog          -- 'Open' clicked but the Start dialog never appeared
-      no-start-control   -- dialog open but no 'Start study' link
-      clicked-no-tab     -- Start clicked but no survey tab appeared
+      launched           -- task tab is open and now the active/front page
+      unsupported        -- the active profile has no launch flow
+      no-reserve-control -- un-reserved but no reserve control found
+      no-launch-control  -- reserved but no control that opens the dialog
+      no-dialog          -- that control clicked but the dialog never appeared
+      no-start-control   -- dialog open but no start control
+      clicked-no-tab     -- start clicked but no task tab appeared
       error              -- unexpected failure (detail included)
 
     Every control is wheel-scrolled into view before it is clicked
@@ -1589,22 +1556,25 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
     it (the page behind is already at its scroll end, as in
     run_20261106_124620), the link is focused and activated with a real Enter.
     """
+    site = sites.current
+    if not site.launch_start_sel:
+        return {"status": "unsupported"}
     try:
         pw_bridge.front()   # pin the study tab to the foreground for xdotool
         # 1. Reserve, if still on the un-reserved detail page.
         if (include_take_part
-                and not pw_bridge.has_selector(pw_bridge._SEL_OPEN_DIALOG)
-                and not pw_bridge.has_selector(pw_bridge._SEL_DIALOG)):
-            rbox = _box_into_view(pw_bridge._SEL_RESERVE)
+                and not pw_bridge.has_selector(site.launch_open_sel)
+                and not pw_bridge.has_selector(site.launch_dialog_sel)):
+            rbox = _box_into_view(site.launch_reserve_sel)
             if rbox is None or not _humanized_click_box(rbox):
                 return {"status": "no-reserve-control"}
-            pw_bridge.wait_selector(pw_bridge._SEL_OPEN_DIALOG, 9000)
+            pw_bridge.wait_selector(site.launch_open_sel, 9000)
         # 2. Open the 'Start study' dialog.
-        if not pw_bridge.has_selector(pw_bridge._SEL_DIALOG):
-            obox = _box_into_view(pw_bridge._SEL_OPEN_DIALOG)
+        if not pw_bridge.has_selector(site.launch_dialog_sel):
+            obox = _box_into_view(site.launch_open_sel)
             if obox is None or not _humanized_click_box(obox):
                 return {"status": "no-launch-control"}
-            if not pw_bridge.wait_selector(pw_bridge._SEL_DIALOG, 6000):
+            if not pw_bridge.wait_selector(site.launch_dialog_sel, 6000):
                 return {"status": "no-dialog"}
         # 3. Tick every unchecked checkbox (device + any confidentiality one);
         #    the 'Start study' link stays disabled until they are ticked. Taken
@@ -1612,7 +1582,7 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
         #    dialog and invalidate the boxes measured for the others.
         def _first_unchecked():
             boxes = pw_bridge.unchecked_checkbox_boxes(
-                pw_bridge._SEL_DIALOG, scroll=False)
+                site.launch_dialog_sel, scroll=False)
             return boxes[0] if boxes else None
 
         for _ in range(6):
@@ -1624,13 +1594,13 @@ def _humanized_launch_reserved_study(include_take_part: bool = True) -> dict:
             cancel.sleep(random.uniform(0.15, 0.4))
         # 4. Activate 'Start study' and follow the survey tab it opens.
         before = pw_bridge.page_ids()
-        sbox = _box_into_view(pw_bridge._SEL_START)
+        sbox = _box_into_view(site.launch_start_sel)
         clicked = bool(sbox) and _humanized_click_box(sbox)
         if not clicked:
             # Nothing scrolls and the confirm link stays off-screen. Focus it
             # in the DOM and press Enter with a REAL xdotool keystroke: the
             # activation event is genuine, only the focus is programmatic.
-            if not pw_bridge.focus_element(pw_bridge._SEL_START):
+            if not pw_bridge.focus_element(site.launch_start_sel):
                 return {"status": "no-start-control"}
             cancel.sleep(random.uniform(0.2, 0.5))
             docker_exec("xdotool", "key", "--clearmodifiers", "Return")
@@ -2097,64 +2067,22 @@ def _study_title() -> str:
     names, never ids, so a cached entry without a title is useless to it.
     Returns "" on any non-study page so junk headings (the sidebar account
     name was ending up cached as the study title) can't poison the cache.
+    The script that reads it is the profile's task_title_js.
     """
-    _JS = """() => {
-        // Only trust what we see on a study detail page -- /studies/<24hex>.
-        if (!/\\/studies\\/[0-9a-f]{24}\\b/.test(location.pathname)) return '';
-        // Prolific's own study-name slot comes first. The generic
-        // `[data-testid*="title"]` match used to grab the sidebar user
-        // greeting on this account, so it is no longer in the fallback list.
-        const sel = ['[data-testid="study-name"]',
-                     '[data-testid*="study-name"]',
-                     '[data-testid="study-title"]',
-                     'main h1', 'main h2'];
-        for (const s of sel) {
-            const el = document.querySelector(s);
-            const t = el && (el.innerText || '').trim();
-            if (t && t.length > 3 && t.length < 120) return t;
-        }
-        // Document title pattern on Prolific is "<Study> | Prolific" — pick
-        // the segment that is NOT just the product name.
-        const parts = (document.title || '').split(/\\s[|–—-]\\s/)
-            .map(s => s.trim()).filter(s => s && s.toLowerCase() !== 'prolific');
-        return parts[0] || '';
-    }"""
+    js = sites.current.task_title_js
+    if not js:
+        return ""
     try:
-        title = (pw_bridge.run(lambda b: b.active_page().evaluate(_JS)) or "").strip()[:100]
+        title = (pw_bridge.run(lambda b: b.active_page().evaluate(js)) or "").strip()[:100]
     except Exception:
         return ""
     # Belt-and-braces: common non-title strings that have slipped into the
     # cache before. Add anything else you see here as a false positive.
     low = title.lower()
-    if not title or low in ("prolific", "studies", "my submissions"):
+    if not title or low in sites.current.task_title_junk:
         return ""
     return title
 
-
-# Studies that are listed but lead nowhere. Matched on the guarded site only
-# (a study detail page): on an external questionnaire the same words can be
-# part of a question, and aborting a survey halfway on a false positive costs
-# far more than reopening a dead study once more.
-_DEAD_END_MARKERS = (
-    (r"you are not eligible|not eligible (?:to|for) (?:take part|participate|this)"
-     r"|you do not (?:meet|match) the (?:requirements|criteria)", "non idoneo"),
-    (r"no longer available|no longer accepting|is full|places? (?:are |have been )?"
-     r"(?:full|taken)|study (?:is|has been) (?:closed|completed)", "non più disponibile"),
-    (r"you have already (?:completed|taken part|submitted)", "già svolto"),
-    # Only as a STATUS about this account, never as the two bare words. Every
-    # study tagged "Includes in-study screening" says in its own description
-    # "If you don't meet the requirements, you'll be screened out of the
-    # study, but we'll still provide a small bonus" -- run_20261111_164730
-    # matched that sentence on five consecutive steps (the cache entry has
-    # hits 5, steps 9 to 13), with the reservation timer running and nothing
-    # else on screen but the description. The study was then banned by title
-    # for 14 days. 20 of the 21 entries in the cache were studies this
-    # account was never screened out of: submissions.json has one "Screened
-    # Out" row among them.
-    (r"you(?:'ve| have| had)? been screened out|you were screened out"
-     r"|we(?:'ve| have)? screened you out",
-     "screened out"),
-)
 
 # A dead-end marker only counts in a sentence that states something that has
 # already happened. The same words in the researcher's description are a
@@ -2195,7 +2123,7 @@ def _detect_dead_end(text: str) -> str:
     """
     global _last_dead_end_sentence
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
-        for pattern, reason in _DEAD_END_MARKERS:
+        for pattern, reason in sites.current.dead_end_markers:
             if re.search(pattern, sentence, re.IGNORECASE):
                 if _HYPOTHETICAL_RE.search(sentence):
                     break      # the description, not a status
@@ -2347,14 +2275,6 @@ def _extract_study_duration(x: float | None = None, y: float | None = None) -> f
     return None
 
 
-_TIME_REMAINING_RE = re.compile(
-    r"time\s+remaining\W{0,12}"
-    r"(?:(\d+)\s*(?:hours?|hrs?|h)\W{0,4})?"
-    r"(?:(\d+)\s*(?:minutes?|mins?|m)\W{0,4})?"
-    r"(?:(\d+)\s*(?:seconds?|secs?|s)\b)?",
-    re.IGNORECASE)
-
-
 def _extract_time_remaining() -> float | None:
     """Seconds left on Prolific's own countdown for the reserved slot, read
     from the study detail page ("Time remaining  13 Mins 49 Secs"), or None.
@@ -2367,7 +2287,7 @@ def _extract_time_remaining() -> float | None:
     var/fixtures/prolific/detail_reserved.mhtml).
     """
     try:
-        m = _TIME_REMAINING_RE.search(_page_text(6000) or "")
+        m = sites.current.deadline_re.search(_page_text(6000) or "")
         if not m or not any(m.groups()):
             return None
         h, mi, se = (float(g or 0) for g in m.groups())
@@ -2485,20 +2405,8 @@ def terminate_refusal(timer: "StudyTimer") -> str:
     return ""
 
 
-# Phrases shown by Prolific after a cancel-participation confirmation or after
-# clicking "I didn't receive a completion code". Multilingual, matched loosely
-# so a small layout change doesn't break detection.
-_PROLIFIC_SUBMITTED_RE = re.compile(
-    r"(?i)(you have cancelled your participation|participation (?:has been )?cancelled|"
-    r"partecipazione (?:è stata )?annullata|hai annullato la partecipazione|"
-    r"your (?:submission|response) (?:has been |was )?(?:received|recorded|submitted)|"
-    r"risposta (?:è stata )?(?:ricevuta|registrata)|"
-    r"thanks for taking part|grazie per (?:aver|la) partecipa|"
-    r"study submitted without a completion code|senza codice di completamento)")
-
-
-def saw_prolific_submission_confirmation(text: str) -> bool:
-    """True if the Prolific page shows a post-submit/post-cancel confirmation.
+def saw_submission_confirmation(text: str) -> bool:
+    """True if the platform page shows a post-submit/post-cancel confirmation.
 
     Used by the NOCODE guard: a legit NOCODE either comes AFTER having visited
     the external survey, or AFTER the Prolific-side 'I didn't receive a code' /
@@ -2506,7 +2414,7 @@ def saw_prolific_submission_confirmation(text: str) -> bool:
     refuses NOCODE only when BOTH signals are absent -- i.e. the model is
     still on the study-detail page, having done neither.
     """
-    return bool(text) and bool(_PROLIFIC_SUBMITTED_RE.search(text))
+    return bool(text) and bool(sites.current.submission_confirmation_re.search(text))
 
 
 def _is_nocode_answer(answer: str) -> bool:
@@ -2630,64 +2538,15 @@ def _reading_dwell(text: str) -> float:
     return max(1.5, min(25.0, base * jitter))
 
 
-# -- the control that actually submits the study ---------------------------
-#
-# run_20261109_102733 finished and PASSED a 45-trial evaluation on
-# eval.services -- "Your submission has been validated", every check green --
-# and then emitted `terminate NOCODE` while a black button reading "Return to
-# Prolific and collect your reward" sat in the middle of the screen. Nothing
-# was registered. $3,00.
-#
-# A prose nudge alone is not enough here (it is also one-shot, and the model
-# had already decided it was done), so the harness finds and clicks the
-# control itself. Two signals, generic on purpose:
-#   1. an href pointing at Prolific's own completion endpoint. That URL,
-#      app.prolific.com/submissions/complete?cc=..., is Prolific's documented
-#      contract with every researcher, so it identifies the control on any
-#      survey platform without knowing anything about the platform.
-#   2. failing that, a label that says it goes back to Prolific -- needed
-#      because a button that navigates in JS carries no href.
-_COMPLETION_RETURN_JS = r"""
-(() => {
-  const vis = el => {
-    const r = el.getBoundingClientRect();
-    if (!(r.width > 0 && r.height > 0)) return null;
-    const cs = getComputedStyle(el);
-    if (cs.visibility === 'hidden' || cs.display === 'none') return null;
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
-    return r;
-  };
-  const box = (el, why) => {
-    const r = vis(el);
-    return r ? {x: r.x, y: r.y, width: r.width, height: r.height, why: why,
-                text: (el.innerText || el.value || '').trim().slice(0, 80)} : null;
-  };
-  for (const a of document.querySelectorAll('a[href]')) {
-    if (/prolific\.(com|co\.uk)\/submissions\/complete/i.test(
-          a.getAttribute('href') || '')) {
-      const b = box(a, 'completion-url');
-      if (b) return b;
-    }
-  }
-  const re = /(return|back|continue|go)\s+to\s+prolific|collect\s+your\s+reward/i;
-  for (const el of document.querySelectorAll(
-         'a, button, [role="button"], input[type="submit"]')) {
-    const t = (el.innerText || el.value || '').trim();
-    if (t && re.test(t)) {
-      const b = box(el, 'label');
-      if (b) return b;
-    }
-  }
-  return null;
-})()
-"""
-
-
 def _completion_return_box():
-    """Viewport box of the control that returns this survey to Prolific, or
-    None. Read-only: finding it never clicks anything."""
+    """Viewport box of the control that returns this task to the platform
+    (the profile's completion_return_js finds it), or None. Read-only:
+    finding it never clicks anything."""
+    js = sites.current.completion_return_js
+    if not js:
+        return None
     try:
-        return pw_bridge.evaluate(_COMPLETION_RETURN_JS) or None
+        return pw_bridge.evaluate(js) or None
     except Exception:
         return None
 
@@ -2698,8 +2557,7 @@ def _completion_return_box():
 # test below is what actually makes the snap safe, not this number).
 _RETURN_NEAR_MISS_PX = 40
 
-_COMPLETION_NEAR_MISS_JS = r"""([x, y, margin]) => {
-  const box = """ + _COMPLETION_RETURN_JS.strip() + r""";
+_NEAR_MISS_JS_TAIL = r""";
   if (!box) return null;
   const x0 = box.x, y0 = box.y, x1 = box.x + box.width, y1 = box.y + box.height;
   if (x >= x0 && x <= x1 && y >= y0 && y <= y1) return null;   // already on it
@@ -2724,20 +2582,31 @@ _COMPLETION_NEAR_MISS_JS = r"""([x, y, margin]) => {
 }"""
 
 
+def _completion_near_miss_js() -> str:
+    """The near-miss probe: the profile's return-control finder, wrapped in a
+    test of how far the click landed from it. "" when the profile has no
+    such control."""
+    finder = sites.current.completion_return_js
+    if not finder:
+        return ""
+    return r"""([x, y, margin]) => {
+  const box = """ + finder.strip() + _NEAR_MISS_JS_TAIL
+
+
 def _completion_return_near_miss(x: float, y: float,
                                  margin: int = _RETURN_NEAR_MISS_PX):
-    """Box of the return-to-Prolific control when the click at (x, y) was
-    plainly aimed at it and missed, else None.
+    """Box of the return-to-the-platform control when the click at (x, y)
+    was plainly aimed at it and missed, else None.
 
-    run_20261109_120846 step 50: a 36px-tall "Return to Prolific and collect
-    your reward" button (y 566..601), clicked at y=609 -- eight pixels under
-    its bottom edge. The click hit the page background, nothing happened, and
-    the model concluded the button was broken: it waited, switched tab back to
-    Prolific, pressed "I'm finished" with no code in hand, read the resulting
-    spinner as a disabled button, and sat one click away from "I didn't
-    receive a completion code" before coming back and hitting the same button
-    correctly (same screenshot, y=584). Six wasted steps at the one moment of
-    a run where a wrong click costs the whole study.
+    run_20261109_120846 step 50: a 36px-tall "return and collect your reward"
+    button (y 566..601), clicked at y=609 -- eight pixels under its bottom
+    edge. The click hit the page background, nothing happened, and the model
+    concluded the button was broken: it waited, switched tab back to the
+    platform, pressed its finish control with no code in hand, read the
+    resulting spinner as a disabled button, and sat one click away from the
+    "no completion code" control before coming back and hitting the same
+    button correctly (same screenshot, y=584). Six wasted steps at the one
+    moment of a run where a wrong click costs the whole task.
 
     Same remedy as the checkbox retry in dispatch_action: trust the DOM box
     over the pixel estimate and re-aim. The snap fires only when the point is
@@ -2745,68 +2614,25 @@ def _completion_return_near_miss(x: float, y: float,
     never hijacked -- and because it only rewrites the coordinate, the
     minimum-time hold still sees (and can still refuse) the corrected click.
     """
+    js = _completion_near_miss_js()
+    if not js:
+        return None
     try:
         return pw_bridge.run(lambda b: b.active_page().evaluate(
-            _COMPLETION_NEAR_MISS_JS, [x, y, margin])) or None
+            js, [x, y, margin])) or None
     except Exception:
         return None
 
 
-# -- Prolific's own "I didn't receive a completion code" control -----------
-#
-# run_20261110_184734: a 1-minute Google Form study whose confirmation screen
-# ("La tua risposta e stata registrata") carried no completion code. The model
-# did everything right up to the last inch -- filled the form, submitted it,
-# switched back to the Prolific tab, clicked "I'm finished", even went hunting
-# through the form's page source for a hidden code -- and then, with
-# Prolific's "Confirm submission" panel open and a blue link reading
-# "I didn't receive a completion code" one click below the greyed-out
-# "Complete study" button, called terminate NOCODE. Twice. The slot stayed
-# reserved and the finished survey was never submitted.
-#
-# Neither existing guard covers that inch. guarded_nocode_refusal exempts any
-# run that reached the external survey -- it exists for the opposite bug, a
-# NOCODE emitted without ever opening the study -- and completion_pushback is
-# spent on the survey host and returns "" as soon as we are back on Prolific.
-#
-# The discriminating signal is the control itself, not the run's history:
-# while that link is on screen the submission has NOT been made, because
-# Prolific replaces the whole panel with "Awaiting review" the moment it has.
-# So the harness probes for it (read-only: only input is scored) and, like the
-# return-to-Prolific control above, presses it with the real cursor instead of
-# arguing with a model that has already decided it is finished. The dialog it
-# opens is left to the model, with the screenshot in view: confirming a
-# submission, or deciding the survey was never really done and cancelling
-# participation instead, is a judgment the harness must not make blind.
-_NOCODE_LINK_JS = r"""
-(() => {
-  const vis = el => {
-    const r = el.getBoundingClientRect();
-    if (!(r.width > 0 && r.height > 0)) return null;
-    const cs = getComputedStyle(el);
-    if (cs.visibility === 'hidden' || cs.display === 'none') return null;
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
-    return r;
-  };
-  const re = /(did\s*n.{0,2}t|have\s*n.{0,2}t|not)\s+receive(d)?\s+(a|the|any)?\s*(completion\s+)?code|non\s+ho\s+ricevuto\s+(il\s+|un\s+)?codice/i;
-  for (const el of document.querySelectorAll(
-         'a, button, [role="button"], input[type="submit"]')) {
-    const t = (el.innerText || el.value || '').trim();
-    if (!t || t.length > 120 || !re.test(t)) continue;
-    const r = vis(el);
-    if (r) return {x: r.x, y: r.y, width: r.width, height: r.height,
-                   text: t.slice(0, 80)};
-  }
-  return null;
-})()
-"""
-
-
 def _nocode_link_box():
-    """Viewport box of Prolific's "I didn't receive a completion code"
-    control, or None. Read-only: finding it never clicks anything."""
+    """Viewport box of the platform's "I didn't receive a completion code"
+    control (the profile's nocode_link_js), or None. Read-only: finding it
+    never clicks anything."""
+    js = sites.current.nocode_link_js
+    if not js:
+        return None
     try:
-        return pw_bridge.evaluate(_NOCODE_LINK_JS) or None
+        return pw_bridge.evaluate(js) or None
     except Exception:
         return None
 
@@ -2848,17 +2674,6 @@ def nocode_codes_refusal(seen: list) -> str:
             "'Completion Code' field of this panel, click 'Complete study', and "
             f"terminate with CODE:{code}. Only if Prolific rejects that code should "
             "you fall back to 'I didn't receive a completion code'.")
-
-
-_NOCODE_LINK_REFUSAL = (
-    "NOCODE REFUSED: Prolific's 'Confirm submission' panel is still open on this "
-    "page, which means the study has NOT been submitted -- the slot stays reserved "
-    "and the survey you just filled in is lost. On that panel, under the greyed-out "
-    "'Complete study' button, there is a link reading 'I didn't receive a completion "
-    "code': left_click it, confirm in the dialog that follows, and call terminate "
-    "NOCODE only once the page says the submission was saved ('Awaiting review'). "
-    "If instead you never actually completed the survey, press 'Cancel' and use "
-    "'Cancel participation' before terminating.")
 
 
 def completion_pushback(answer: str, url: str, seen_codes: list,
@@ -2935,8 +2750,6 @@ def _nearest_checkbox(x: float, y: float, radius: float = 140.0):
         return pw_bridge.run(lambda b: b.active_page().evaluate(_JS, [x, y, radius]))
     except Exception:
         return None
-
-
 
 
 def _check_disabled_near(x: float, y: float) -> bool:
@@ -3692,7 +3505,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # Prolific / a code, at most once per study so a re-terminate is obeyed.
         _completion_pushed_back: bool = False
         # One shot per study at clicking the survey's own return-to-Prolific
-        # control ourselves (see _COMPLETION_RETURN_JS).
+        # control ourselves (see the profile's completion_return_js).
         _completion_return_tried: bool = False
         # NOCODE guard: refuse a terminate NOCODE emitted while still on the
         # Prolific detail page without having visited the external survey or
@@ -3702,7 +3515,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _saw_cancel_confirm: bool = False
         _nocode_guard_attempts: int = 0
         # Sibling guard, Prolific side: a no-code terminate while the
-        # 'Confirm submission' panel is still open. See _NOCODE_LINK_JS.
+        # 'Confirm submission' panel is still open. See _nocode_link_box.
         _nocode_link_attempts: int = 0
         _nocode_link_tried: bool = False
         # The scenario / instruction / stimulus pages of the study in
@@ -4146,7 +3959,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # page without ever submitting.
             if here_guarded and not _saw_cancel_confirm:
                 try:
-                    if saw_prolific_submission_confirmation(_end_page_text()):
+                    if saw_submission_confirmation(_end_page_text()):
                         _saw_cancel_confirm = True
                 except Exception:
                     pass
@@ -4804,7 +4617,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 # gives up with the 'Confirm submission' panel still open and
                 # 'I didn't receive a completion code' one click away. The
                 # link's presence is proof the study is unsubmitted; press it
-                # rather than argue. See _NOCODE_LINK_JS.
+                # rather than argue. See _nocode_link_box.
                 if (_is_nocode_answer(answer) and _on_guarded_site(here)
                         and not _saw_cancel_confirm
                         and _nocode_link_attempts < 2):
@@ -4847,14 +4660,14 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             continue
                         _nc = "retry"
                     if _nc == "retry":
-                        pending_user_response = _NOCODE_LINK_REFUSAL
+                        pending_user_response = sites.current.nocode_link_refusal
                         continue
                 # Ending on the survey host's own thank-you/validation page
                 # with the final "submit & return to Prolific" control
                 # skipped. Before saying anything to the model, try to finish
                 # the job: find that control and click it with the real
-                # cursor. See _COMPLETION_RETURN_JS for why prose alone was
-                # not enough.
+                # cursor. Prose alone was not enough: run_20261109_102733
+                # emitted NOCODE with that control in the middle of the screen.
                 _page_codes_now = codes_on_page(_end_page_text())
                 if (not _completion_return_tried
                         and not answer.startswith("CODE:")
