@@ -2,13 +2,22 @@
 
 The agent loop (`agent/agent_core.py`) is a generic browser agent: it takes a
 screenshot, asks the model what to do, and does it with a human-like mouse and
-keyboard. It knows nothing about any particular website.
+keyboard. It knows nothing about any particular website, nor about any kind of
+website.
 
-Everything specific to one website lives in a **site profile** under
-`agent/sites/`. A profile describes a *task platform*: a site that lists units
-of work, opens one (often on another host), and takes a completion back. The
-loop asks the active profile every question that depends on the site, for
-example:
+Two things sit on top of it:
+
+- a **site profile** (`agent/sites/`) says what one website looks like: its
+  hosts, its pages, its buttons, the texts the model is given there;
+- a **behaviour** (`agent/behaviors/`) is a set of rules the loop runs with,
+  hooked into fixed points of every step. A profile lists the behaviours its
+  site needs.
+
+The behaviour that ships is `TaskPlatform`
+([agent/behaviors/task_platform.py](../agent/behaviors/task_platform.py)), for a
+*task platform*: a site that lists units of work, opens one (often on another
+host), times it and takes a completion back. It asks the active profile every
+question that depends on the site, for example:
 
 - is this URL part of the platform, and which section of it?
 - what does an empty task list look like?
@@ -18,10 +27,10 @@ example:
 
 Two profiles ship with the code:
 
-| Profile | What it is |
-|---|---|
-| `generic` | no platform. Every platform rule is switched off and nothing platform-specific reaches the model. Use it for any ordinary website. |
-| `prolific` | the participant side of [Prolific](https://www.prolific.com): its URLs, launch dialog, completion codes, minimum and maximum time per study, account history, and the rules the model follows there. |
+| Profile | Behaviours | What it is |
+|---|---|---|
+| `generic` | none | no platform. The loop runs as a plain browser agent and nothing platform-specific reaches the model. Use it for any ordinary website. |
+| `prolific` | `TaskPlatform` | the participant side of [Prolific](https://www.prolific.com): its URLs, launch dialog, completion codes, minimum and maximum time per study, account history, and the rules the model follows there. |
 
 ## Which profile is used
 
@@ -40,7 +49,7 @@ The panel shows which profile a run is using in its activity feed
 
 ## What the generic profile changes
 
-With `generic` the loop is a plain browser agent:
+With `generic` the loop runs with no behaviour, so it is a plain browser agent:
 
 - no task timer, no minimum time hold on submit buttons, no deadline;
 - no task list: a loop run goes back to the page it started from and waits
@@ -99,6 +108,13 @@ If Prolific changes its pages, these are the places to update. After a change,
 run the offline tests (see the README); `scripts/tools/test_harness_guards.py`
 covers most of this file.
 
+**What the agent does** on a task platform (when the timer starts, when a
+submit is held, how a reserved slot is launched, when a terminate is refused)
+is not in the profile but in the `TaskPlatform` behaviour,
+[agent/behaviors/task_platform.py](../agent/behaviors/task_platform.py). It is
+shared by every task-platform profile, so change it only for a rule that holds
+on all of them.
+
 ## Adding a platform
 
 1. Create `agent/sites/<name>/__init__.py` with a subclass of `sites.base.Site`.
@@ -125,6 +141,17 @@ covers most of this file.
            return "\n\nRULES: ..."            # appended to every run's task
    ```
 
+   If the site is a task platform like Prolific, have the profile run the
+   task-platform rules:
+
+   ```python
+       def behaviors(self):
+           from behaviors.task_platform import TaskPlatform
+           return (TaskPlatform,)
+   ```
+
+   Leave `behaviors()` out for a site that only needs its pages described.
+
 2. Register it in `agent/sites/__init__.py`:
 
    ```python
@@ -145,9 +172,50 @@ The main groups of attributes in `Site`:
 | Identity | `participant_id_label_re`, `participant_id_params`, `participant_id_format` |
 | Account history | `history_url`, `parse_history_rows()`, `parse_history_header()`, `history_paid_statuses` |
 | Texts for the model | `standing_rules()`, `identity_hint()`, `unattended_answer()`, the refusal and notice methods |
+| Rules the loop runs with | `behaviors()` |
+
+## Writing a behaviour
+
+When a site needs the loop to *do* something different, not just to know its
+pages, write a behaviour: a subclass of `behaviors.Behavior` in
+`agent/behaviors/`, overriding only the hooks it needs. The module docstring of
+[agent/behaviors/\_\_init\_\_.py](../agent/behaviors/__init__.py) lists the
+hooks in the order the loop calls them. In short:
+
+| Hook | When | Can |
+|---|---|---|
+| `start` | before the start URL is opened | set up per-run state |
+| `arrive` | the step's page is known | move the browser, end the run, yield notices |
+| `settle` | after batch fill | per-step bookkeeping, yield notices |
+| `after_screenshot` | with the page's text | read it |
+| `first_prompt`, `prompt_hints`, `prompt_suffix` | building the model's prompt | add text |
+| `before_action` | before the model's action runs | hold it back, re-aim it |
+| `after_action` | after it ran | set a reply for the next step |
+| `diag` | the step's diagnostic line | add fields |
+| `terminate` | the model wants to stop | refuse, with a reply |
+| `finish_record`, `finished` | the run is over | add fields, notify |
+
+Everything a hook needs is on the `run` object it receives: the URL
+(`run.here`), the reply for the model's next step (`run.pending`), the action
+(`run.action_type`, `run.args`), the transcript (`run.write`) and the run's
+options. Generic parts of the loop that a behaviour may switch off or on are
+named features (`batch_fill`, `reading_dwell`, `prescroll`, ...): override
+`allows()` to veto one, `wants()` to ask for one.
 
 ## Tests
 
 The suites under `tests/` and `scripts/tools/` that test platform behaviour pin
 `FARA_SITE=prolific` at the top; `tests/site_profiles_test.py` covers profile
-selection and the generic profile, and needs no browser or model.
+selection, the generic profile and the behaviour hooks, and needs no browser or
+model.
+
+`tests/loop_scenarios.py` drives whole runs with the browser, the model, the
+clock and the notifications replaced at their boundaries, and records
+everything the loop sends out (prompts, events, navigations, input, the
+transcript). Record it before a change to the loop or to a behaviour and
+compare after:
+
+```
+python tests/loop_scenarios.py --record before.json
+python tests/loop_scenarios.py --compare before.json
+```

@@ -170,9 +170,11 @@ section("wander guard")
 _LIST = APP + "/studies"
 check("fires nowhere but the launch surface",
       ac._on_launch_surface(_LIST) and not ac._on_launch_surface(TASK))
-# The loop's wiring lives in agent_core; the words and scripts it uses on
-# Prolific's pages live in the Prolific site profile. Checks read both.
+# The generic loop lives in agent_core, the task-platform rules it runs on
+# Prolific in the TaskPlatform behaviour, and the words and scripts used on
+# Prolific's pages in the Prolific site profile. Checks read all three.
 src = (open(os.path.join(ROOT, "agent", "agent_core.py")).read()
+       + open(os.path.join(ROOT, "agent", "behaviors", "task_platform.py")).read()
        + open(os.path.join(ROOT, "agent", "sites", "prolific", "__init__.py")).read())
 check("the guard keys on the launch surface, not the host",
       "if not _on_launch_surface(url) or sites.current.home_path.match(" in src)
@@ -198,7 +200,7 @@ check("orphan nudge keeps finish-or-cancel",
       "RESERVATION LOOP" in cancel_nudge and "Cancel participation" in cancel_nudge)
 check("the two branches differ", launch_nudge != cancel_nudge)
 check("state is keyed on the DOM control, not the banner",
-      "fresh_unlaunched = (_launch_control_visible()" in src
+      "fresh_unlaunched = (core._launch_control_visible()" in src
       and "not _saw_external_this_study and not orphan_visible" not in src)
 check("the held-slot nudge branches on launch state",
       "if orphan_visible and fresh_unlaunched:" in src)
@@ -378,7 +380,7 @@ check("dwell yields to a tight deadline",
       "_dwell_ok = _dl_pressure is None or _dl_pressure < 0.75" in src)
 check("the countdown is scraped while still on Prolific",
       "_extract_time_remaining()" in src and "_last_guarded_deadline = _pcd" in src)
-check("and handed to the timer", "deadline_seconds=_last_guarded_deadline or 0" in src)
+check("and handed to the timer", "deadline_seconds=self._last_guarded_deadline or 0" in src)
 check("and cleared between studies", src.count("_last_guarded_deadline = None") >= 2)
 
 
@@ -479,15 +481,17 @@ check("a failing sink never breaks the run", ok)
 # ===================================================================== 10
 section("the remaining surface gates")
 check("skip_av gates on the launch surface",
-      "elif skip_av and not here_on_launch and study_timer.is_active():" in src
+      "elif self.skip_av and not self.here_on_launch and study_timer.is_active():" in src
       and "elif skip_av and not here_guarded" not in src)
 check("reading dwell gates on the launch surface",
-      "not on_list and not here_on_launch and _dwell_ok" in src
+      "not self.on_list and not self.here_on_launch and _dwell_ok" in src
       and "not on_list and not here_guarded" not in src)
 check("batch-fill gates on the launch surface",
-      "if batch_fill and not here_on_launch and not _user_inject_pending:" in src)
+      'if batch_fill and run.allow("batch_fill") and not run.user_inject_pending:' in src
+      and src.split('if feature == "batch_fill":')[1].split("if feature")[0]
+             .rstrip().endswith("return not self.here_on_launch"))
 check("Prolific-side confirmations still key on the host (correctly)",
-      "if here_guarded and not _saw_cancel_confirm:" in src)
+      "if here_guarded and not self._saw_cancel_confirm:" in src)
 
 
 
@@ -529,8 +533,8 @@ check("inert until a launch surface has been seen",
       not ac._reached_in_launch_tab(
           "https://app.prolific.com/some-new-page", _SAME, None))
 check("the guard is wired into the step loop",
-      "if not here_on_launch and _reached_in_launch_tab(" in src
-      and "_launch_page_id = _cur_page_id" in src)
+      "if not here_on_launch and core._reached_in_launch_tab(" in src
+      and "self._launch_page_id = self._cur_page_id" in src)
 check("pw_bridge exposes the active page identity",
       "def active_page_id():" in
       open(os.path.join(ROOT, "agent", "pw_bridge.py"),
@@ -576,12 +580,11 @@ check("and on a label, for buttons that navigate in JS",
       "collect" in ac.sites.current.completion_return_js
       and "prolific" in ac.sites.current.completion_return_js.lower())
 check("the harness clicks it itself before nudging in prose",
-      "_rbox = _scroll_box_into_view(_completion_return_box)" in src
+      "_rbox = core._scroll_box_into_view(core._completion_return_box)" in src
       and "_humanized_click_box(_rbox)" in src
       and "_completion_return_tried" in src)
 check("one attempt per study, reset on the studies list",
-      "_completion_return_tried: bool = False" in src
-      and "_completion_return_tried = False\n" in src
+      src.count("self._completion_return_tried = False\n") >= 2
       and "_completion_return_tried = True" in src)
 
 
@@ -607,13 +610,14 @@ check("the margin leaves room for a worse estimate than 8px",
 check("the snap only rewrites the coordinate, so dispatch stays humanised",
       'args["coordinate"] = [_nx, _ny]' in src)
 check("it runs before the minimum-time hold, which can still refuse it",
-      src.index("_sbox = _completion_return_near_miss(")
+      src.index("_sbox = core._completion_return_near_miss(")
       < src.index('submit_held = ""'))
 check("it never fires on Prolific's own pages",
       'if action_type == "left_click" and not here_guarded:\n'
-      '                _coord = args.get("coordinate")' in src)
+      '            _coord = args.get("coordinate")' in src)
 check("and the correction is written into the step result",
-      "dispatch_action(action_type, args) + snap_note" in src)
+      "dispatch_action(action_type, args) + run.action_note" in src
+      and 'run.action_note = (f" [re-aimed' in src)
 
 
 # --------------------------------------------------------------------------
@@ -666,11 +670,11 @@ check("the refusal names the link and the cancel branch, not just the rule",
       "I didn't receive a completion code" in ac.sites.current.nocode_link_refusal
       and "Cancel participation" in ac.sites.current.nocode_link_refusal)
 check("the harness presses it with the real cursor, scrolled into view",
-      "_lbox = _scroll_box_into_view(_nocode_link_box)" in src
+      "_lbox = core._scroll_box_into_view(core._nocode_link_box)" in src
       and "_humanized_click_box(_lbox)" in src)
 check("it runs after the never-opened-the-study guard, not instead of it",
-      src.index("nocode_block = guarded_nocode_refusal(")
-      < src.index("_nc = nocode_link_decision("))
+      src.index("nocode_block = core.guarded_nocode_refusal(")
+      < src.index("_nc = core.nocode_link_decision("))
 check("the dialog it opens is left to the model to confirm",
       "confirm the submission in the" in src)
 check("the per-study state is cleared on the studies list",
@@ -715,7 +719,7 @@ check("the sentence that fired is kept for the log",
 check("and cleared when nothing fires",
       ac._detect_dead_end("Nothing to see here.") == "" and ac._last_dead_end_sentence == "")
 check("the skip writes that sentence into the transcript",
-      '"type": "skip"' in src and '"matched": _last_dead_end_sentence' in src)
+      '"type": "skip"' in src and '"matched": core._last_dead_end_sentence' in src)
 check("the other markers are read the same way: a condition is not a status",
       ac._detect_dead_end("If the study is full you will be returned to the list.") == "")
 check("while the banner itself still is",

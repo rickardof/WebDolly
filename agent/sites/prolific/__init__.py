@@ -668,6 +668,12 @@ class ProlificSite(Site):
     name = "prolific"
     title = "Prolific"
 
+    def behaviors(self):
+        # Prolific is a task platform: studies are listed, launched, timed
+        # and handed back with a completion code.
+        from behaviors.task_platform import TaskPlatform
+        return (TaskPlatform,)
+
     def __init__(self):
         # Only on the site that has such a section: a third-party survey that
         # happens to have an /about-you page must not be hijacked.

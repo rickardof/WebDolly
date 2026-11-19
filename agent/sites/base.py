@@ -30,6 +30,11 @@ class Site:
     #: Human-readable name, used in prompts and notices ("back on {title}").
     title = "the website"
 
+    def behaviors(self) -> tuple:
+        """Behaviour classes (see the `behaviors` package) the agent loop runs
+        with on this site. None: a plain browser agent."""
+        return ()
+
     # --- where the platform lives ------------------------------------------
     #: Registrable domains the platform owns. A URL on one of them (or on a
     #: subdomain) is "on the platform"; everything else is a third-party site.

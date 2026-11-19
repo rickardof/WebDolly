@@ -154,8 +154,10 @@ agent/telegram_config.py.example ->  agent/telegram_config.py  Telegram bot, see
 ### Site profiles
 
 A site profile is what the agent knows about one website: its pages, its
-buttons, the rules the model follows there. Two come with the code: `generic`
-(any website, no special rules) and one for an online research-study platform.
+buttons, the rules the model follows there, and the behaviours the loop runs
+with on it (for example the timing and hand-back rules of a task platform).
+Two come with the code: `generic` (any website, no special rules) and one for
+an online research-study platform.
 The full guide is
 [docs/site-profiles.md](docs/site-profiles.md):
 
@@ -164,7 +166,9 @@ The full guide is
 - [what the generic profile does](docs/site-profiles.md#what-the-generic-profile-changes);
 - [customise an included profile](docs/site-profiles.md#customising-an-included-profile):
   the rules the model follows, the domains and URLs it uses;
-- [add a profile for another site](docs/site-profiles.md#adding-a-platform).
+- [add a profile for another site](docs/site-profiles.md#adding-a-platform);
+- [write a behaviour](docs/site-profiles.md#writing-a-behaviour) when a site
+  needs the loop to act differently.
 
 ### Telegram (optional)
 
@@ -251,6 +255,7 @@ agent/        agent code: agent_core.py (the generic loop), pw_bridge.py
               (Playwright bridge), form_fill_pw.py (batch fill), gui_server.py and
               gui_index.html (the panel)
 agent/sites/  site profiles: base.py (generic) and one directory per platform
+agent/behaviors/  rule sets a profile plugs into the loop (task_platform.py)
 docker/       images: browser (Chromium + Xvfb + xdotool) and browser-pw (+ socat)
 scripts/      setup, start, stop and restart; windows/ has the PowerShell versions,
               cloud/ the VM deployment

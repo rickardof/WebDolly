@@ -17,6 +17,7 @@ true:
 Offline: no browser, no model. Run from anywhere:
     python tests/site_profiles_test.py
 """
+import inspect
 import json
 import os
 import sys
@@ -32,6 +33,10 @@ sys.path.insert(0, os.path.join(HERE, "..", "agent"))
 _TMP = tempfile.mkdtemp()
 os.environ["FARA_LAST_SITE_FILE"] = os.path.join(_TMP, "last_site")
 os.environ.setdefault("FARA_LOG_ROOT", os.path.join(_TMP, "logs"))
+# The stubbed runs below finish studies: keep their records out of the real
+# study memory and skip cache.
+os.environ["FARA_STUDY_MEMORY"] = os.path.join(_TMP, "study_memory.json")
+os.environ["FARA_STUDY_CACHE"] = os.path.join(_TMP, "study_cache.json")
 
 import sites                    # noqa: E402
 import agent_core as ac         # noqa: E402
@@ -233,6 +238,49 @@ check("prolific (control): the same run starts the task timer",
 check("prolific (control): and sends Prolific's rules", prompts and "STANDING RULES" in prompts[0])
 check("prolific (control): and pushes back once on a free-text terminate off Prolific",
       len(prompts) == 3 and "NOT DONE YET" in prompts[2], f"{len(prompts)} model calls")
+
+
+# ---------------------------------------------------------------- behaviours
+import behaviors                                  # noqa: E402
+from behaviors.task_platform import TaskPlatform  # noqa: E402
+
+check("generic runs the loop with no behaviour", sites.get("generic").behaviors() == ())
+check("prolific runs it with the task-platform behaviour",
+      tuple(sites.get("prolific").behaviors()) == (TaskPlatform,))
+check("every hook of the base behaviour is a no-op",
+      all(callable(getattr(behaviors.Behavior, h)) for h in
+          ("start", "arrive", "settle", "after_screenshot", "first_prompt", "prompt_hints",
+           "prompt_suffix", "before_action", "after_action", "diag", "terminate",
+           "finish_record", "finished")))
+
+
+class _Veto(behaviors.Behavior):
+    def allows(self, run, feature):
+        return feature != "batch_fill"
+
+
+class _Wants(behaviors.Behavior):
+    def wants(self, run, feature):
+        return feature == "prescroll"
+
+
+_r = behaviors.Run("t", None, None, [], [], {})
+check("with no behaviour everything generic is allowed and nothing extra wanted",
+      _r.allow("batch_fill") and _r.allow("reading_dwell") and not _r.want("prescroll"))
+_r = behaviors.Run("t", None, None, [], [_Veto(), _Wants()], {})
+check("one veto is enough to switch a feature off",
+      not _r.allow("batch_fill") and _r.allow("reading_dwell"))
+check("one behaviour asking is enough to switch a feature on",
+      _r.want("prescroll") and not _r.want("auto_enter"))
+
+# The loop itself must not know about task platforms: no timer, no guarded
+# host, no completion code, no study.
+_loop = inspect.getsource(ac.run_agent).split('"""', 2)[2]
+_words = ("timer", "guarded", "completion_code", "study_timer", "here_on_launch",
+          "nocode", "reserv", "wander", "skip_av", "telegram")
+check("run_agent's body names nothing of a task platform",
+      not [w for w in _words if w in _loop.replace("timer=run.timer", "")],
+      str([w for w in _words if w in _loop.replace("timer=run.timer", "")]))
 
 print(f"\n== SUMMARY ==  {sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

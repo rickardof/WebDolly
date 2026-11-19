@@ -134,8 +134,8 @@ check("the dashboard row carries it as its last column",
       'r.get("gen_tps"), r.get("flagged") or ""' in gsrc)
 check("the per-cycle ping says so instead of a bare tick", "_last_run_flag()" in gsrc)
 check("a past rejection on Prolific's own pages is not read as this run's",
-      '"" if (_qc_flag or here_guarded) else qc_failure_in' in
-      open(os.path.join(HERE, "..", "agent", "agent_core.py")).read())
+      '"" if (self._qc_flag or self.here_guarded) else core.qc_failure_in' in
+      open(os.path.join(HERE, "..", "agent", "behaviors", "task_platform.py")).read())
 check("the daily summary lists the flagged runs",
       "Segnalati dal ricercatore" in gsrc.split("def _daily_summary_text")[1])
 
@@ -370,6 +370,7 @@ check("only the last few pages are kept", len(pages) == ac._STUDY_PAGES_KEPT, st
 check("a scrap of text is not a page", (ac._remember_study_page(pages, "Next"), len(pages))[1] == ac._STUDY_PAGES_KEPT)
 
 acsrc = open(os.path.join(HERE, "..", "agent", "agent_core.py")).read()
+tpsrc = open(os.path.join(HERE, "..", "agent", "behaviors", "task_platform.py")).read()
 check("every batch-filled question and answer reaches the transcript",
       '"batch_fill_qa"' in acsrc and '"qa": qa,' in acsrc)
 check("a page with an unreadable question is never auto-advanced",
@@ -379,11 +380,14 @@ check("the recap is handed over only when something was deferred",
 check("and the deferring step is told to answer from it, not from plausibility",
       "not from what sounds" in acsrc)
 check("the pages are remembered off the fingerprint the step already computes",
-      "_remember_study_page(_study_pages, curr_page_fp)" in acsrc)
+      "_remember_study_page(run.study_pages, curr_page_fp)" in acsrc)
 check("they are never kept from Prolific's own pages",
-      "if not here_guarded:\n                _remember_study_page" in acsrc)
+      'if run.allow("remember_page"):\n                _remember_study_page' in acsrc
+      and 'if feature == "remember_page":' in tpsrc
+      and "return not self.here_guarded" in
+          tpsrc.split('if feature == "remember_page":')[1].split("def wants")[0])
 check("and are dropped when the study ends",
-      "_study_pages = []" in acsrc)
+      "run.study_pages = []" in tpsrc)
 
 if __name__ == "__main__":
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
