@@ -96,6 +96,111 @@ class Site:
         """Guidance for a model stuck on a held task's detail page."""
         return ""
 
+    # --- what the model is told -------------------------------------------
+    def standing_rules(self, compact: bool = False) -> str:
+        """Rules appended to every run's task on this site ("" = none)."""
+        return ""
+
+    def identity_hint(self, idv: dict) -> str:
+        """The account identifiers the model may type when a page asks."""
+        if not (idv or {}).get("email"):
+            return ""
+        return ("\n\nYOUR ACCOUNT DETAILS (known, from file -- use the EXACT value, never alter or "
+                f"invent): email is exactly {idv['email']}. When a page asks for your email, "
+                "type exactly this value.")
+
+    # Every text the loop shows the model (or the GUI) about the platform.
+    # The generic wording below is used by any profile that does not supply
+    # its own; texts that only make sense on a platform with a completion
+    # contract return "", which the loop reads as "nothing to say".
+
+    def nocode_refusal(self) -> str:
+        """A NOCODE terminate on a task page whose task was never opened."""
+        return ""
+
+    def nocode_codes_refusal_text(self, code: str) -> str:
+        return (f"NOCODE REFUSED: you are ending this task as 'no completion code', but "
+                f"{code} was shown on the task's own pages. Enter {code} where the site "
+                f"asks for the completion code and terminate with CODE:{code}.")
+
+    def completion_pushback_text(self, host: str) -> str:
+        """A free-text terminate that never got the task back to the platform."""
+        return ""
+
+    def refuse_forbidden_visit(self) -> str:
+        return "visit_url REFUSED: that page is off limits."
+
+    def refuse_unknown_path(self) -> str:
+        return ("visit_url REFUSED: there is no such page on this site. Use the site's own "
+                "links instead of typing an address.")
+
+    def corrected_unknown_path(self, home: str, target: str, app_host: str) -> str:
+        return (f"visit_url {home} (CORRECTED: {target} is not a real page -- wrong host AND "
+                f"no such path. You are back on the site's main page.)")
+
+    def corrected_host(self, fixed: str, target: str, app_host: str) -> str:
+        return (f"visit_url {fixed} (CORRECTED: you asked for {target}, which is a different "
+                f"site on the same domain. The work happens on {app_host} -- always use that host.)")
+
+    def history_back_refusal(self) -> str:
+        return ("history_back REFUSED: going back would leave this site (you would be logged "
+                "out). Use the page's own navigation instead.")
+
+    def forbidden_notice(self) -> str:
+        return ("You ended up in a section of the site that is off limits, so you were taken "
+                "back to the main page. Never open it.")
+
+    def forbidden_live_notice(self) -> str:
+        return "Aperta una sezione vietata: riportato alla pagina principale."
+
+    def wander_notice(self, n) -> str:
+        return (f"You spent more than {n} seconds away from the site's main page without "
+                "working on a task, so you were taken back to it.")
+
+    def wander_live_notice(self, n) -> str:
+        return f"Più di {n} s fuori dalla pagina principale senza un compito: riportato all'inizio."
+
+    def off_host_notice(self, back: str, app_host: str) -> str:
+        return (f"You had navigated to a different website that only shares this site's "
+                f"domain. You have been returned to {back}. The work only ever happens on "
+                f"{app_host} -- stay on it.")
+
+    def chrome_guard_live_notice(self, here: str) -> str:
+        return (f"[guard] {here} is account chrome reached in the launch tab, not a task: "
+                f"no timer started")
+
+    def resume_on_task_page(self) -> str:
+        return ("You are resuming on a task's page. A previous run was working on this task. "
+                "Continue it.")
+
+    def resume_in_task(self) -> str:
+        return ("You are resuming in the middle of a task. A previous run was working "
+                "through it. Continue where you left off.")
+
+    def in_task_framing(self) -> str:
+        """Said on every step while a platform-hosted task is running."""
+        return ""
+
+    def held_slot_notice(self) -> str:
+        return ""
+
+    def launched_notice(self) -> str:
+        return ("The task has just been opened for you in a new window. You are now IN it: "
+                "read the current page and continue.")
+
+    def nocode_link_live_notice(self, label: str, after: str) -> str:
+        return f"[completion] the task was not submitted: clicked {label!r} -> {after}"
+
+    def nocode_link_clicked(self, label: str) -> str:
+        return (f"HARNESS ACTION: the task was not submitted yet, so the control {label!r} "
+                "has been clicked for you. Look at the screenshot and confirm the submission "
+                "in the dialog that opened before you terminate.")
+
+    def completion_return_clicked(self, label: str, after: str) -> str:
+        return (f"HARNESS ACTION: the control that returns this task ({label!r}) has been "
+                f"clicked for you and the page is now {after}. Look at the screenshot and "
+                "terminate with the code if one is shown.")
+
     def home_url(self) -> str:
         """Where to go back to between tasks, or "" when there is no list."""
         return ""

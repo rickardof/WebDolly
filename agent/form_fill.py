@@ -716,7 +716,7 @@ def _is_question_like(f: dict) -> bool:
         return len(f.get("options", [])) >= 2
     # A one-line text box counts only when it is phrased as a question
     # ("In what year were you born?"), so pages made only of short-answer
-    # questions are filled -- while bare identity fields like "Prolific ID"
+    # questions are filled -- while bare identity fields like "participant ID"
     # or "Email" (no question mark) still never trigger a batch-fill.
     if f["type"] == "text":
         return (f.get("text") or "").strip().endswith("?")

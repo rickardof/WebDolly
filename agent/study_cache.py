@@ -1,6 +1,6 @@
 """Studies the agent must not open again.
 
-Prolific drops a *completed* study from the list by itself, but one the
+The platform drops a *completed* study from the list by itself, but one the
 agent was screened out of -- or that turned out to be full, closed, or (with
 `skip_av`) to need audio/video -- stays listed and gets clicked again on the
 next cycle. At several steps per dead end, a 24/7 loop spends a good part of

@@ -290,7 +290,7 @@ def _human_type(text: str):
         return
     # NB: no fast path for short text. A single `xdotool type` fires its
     # keystrokes at a uniform cadence with no variance, which is exactly the
-    # "typing speed consistent with software, not a human" signal Prolific's
+    # "typing speed consistent with software, not a human" signal the platform's
     # bot check looks for. Short answers (an age like "34", a ZIP, yes/no, a
     # single word) are the common case in surveys, so they must be typed with
     # the same per-key human timing as long ones -- go through the loop below
@@ -963,9 +963,9 @@ def _trim_to_budget(messages: list, budget: int | None = None,
     # index 0 (system prompt) AND index 1 (the step-1 user turn:
     # persona/profile + standing rules + identity hint). Dropping index 1
     # evicted the persona on long studies -- the model then no longer knew
-    # demographics that ARE in the profile (age, nationality, Prolific ID)
+    # demographics that ARE in the profile (age, nationality, participant ID)
     # and invented them, e.g. typing age 34 when the profile says 25,
-    # contradicting Prolific prescreening and getting the submission flagged.
+    # contradicting the platform's prescreening and getting the submission flagged.
     #
     # Instead of `del messages[2]` iteratively (which shifted every later
     # token and invalidated llama-server's prompt cache on every call),
@@ -1200,7 +1200,7 @@ _CODE_PARAM = re.compile(r"(^|[_\-])(cc|code|completion[_\-]?code|completioncode
 def codes_in_url(url: str) -> list:
     """Codes carried in an external page's URL (?code=PLKXLQ). Seen on 13 Oct:
     a survey's thank-you page had the code only in its own address, and the
-    model typed it into Prolific from there."""
+    model typed it into the platform from there."""
     try:
         out = []
         for k, vals in parse_qs(urlparse(url or "").query).items():
@@ -1231,10 +1231,10 @@ def check_code(answer: str, seen: list) -> str:
 
 
 def completion_code(url: str) -> str:
-    """The completion code Prolific carries in its own redirect, or "".
+    """The completion code the platform carries in its own redirect, or "".
 
     A finished survey sends the participant to
-    app.prolific.com/submissions/complete?cc=XXXX. Reading it from there is
+    <app host>/submissions/complete?cc=XXXX. Reading it from there is
     exact; reading it off the screen is the model's job only when there is
     nothing in the URL. Not every study has a code (some complete without
     one and the model answers NOCODE): an empty result here means "no
@@ -1466,7 +1466,7 @@ def _scroll_box_into_view(getter, max_ticks: int = _SCROLL_TICK_BUDGET):
     """Box from `getter()`, wheel-scrolled into view with REAL xdotool ticks if
     it starts off-screen. None if it cannot be brought in.
 
-    Prolific's 'Start study' dialog is taller than this 900px kiosk viewport,
+    the platform's 'Start study' dialog is taller than this 900px kiosk viewport,
     so its confirm link sits below the fold. It DOES scroll -- but barely: in
     run_20261106_124620 four wheel ticks moved it 36px (measured by diffing
     that run's screenshot_06 against screenshot_07), so a fixed handful of
@@ -1619,7 +1619,7 @@ _WS_RE = re.compile(r"\s+")
 
 # A researcher's own words when their automatic checks reject the work that was
 # just submitted. These pages are the only place the verdict ever appears: the
-# study still returns a completion code, Prolific still shows "awaiting review",
+# study still returns a completion code, the platform still shows "awaiting review",
 # so without this the run looks like a clean success on every surface and the
 # failure is found weeks later in a rejection -- or never.
 #
@@ -1849,7 +1849,7 @@ def _page_change_hint(prev_fp: str, prev_action: str, curr_fp: str) -> str:
 # This JS pre-step moves the viewport (does not click or submit) so the
 # screenshot the model sees already has selectable options in frame.
 # It is idempotent: when a candidate is already in-view it returns
-# 'in-view' and does nothing. When nothing matches (e.g. on the Prolific
+# 'in-view' and does nothing. When nothing matches (e.g. on the platform
 # dashboard, or a non-survey page) it returns 'nothing' and does nothing.
 # Selectors are narrow -- unselected radio/checkbox/aria-radio inputs and
 # likert/choice/option/answer button classes -- so a stray page button
@@ -1953,7 +1953,7 @@ def _prescroll_to_controls() -> str:
 # Gated hard so this never fires outside the intended pattern:
 #   - URL's domain has >= 1 Enter hint (user asked for it explicitly)
 #   - speed mode is not 'normal' (opt-in: 'normal' keeps old behaviour)
-#   - study_timer is active (we are inside a Prolific study)
+#   - study_timer is active (we are inside a platform study)
 #   - click did not land on a disabled control (pending_user_response
 #     branch handles that path; we skip auto-Enter there)
 # Even then, pressing Enter on a page with no selection is a benign
@@ -2167,14 +2167,14 @@ def _detect_av(text: str = "", check_text: bool = True) -> str:
 class WanderGuard:
     """Brings the agent back to the list of studies if it lingers elsewhere.
 
-    The clock runs only while the active tab LINGERS on the Prolific launch
+    The clock runs only while the active tab LINGERS on the platform launch
     surface without a task running: a study detail page, account pages,
     results... It resets whenever the agent is on the list, or anywhere a
     study is actually in progress -- that must never be cut short. "In
     progress" is two cases, and both reset the clock:
-      * an external survey host (off prolific.com), and
-      * a Prolific-HOSTED task such as /data-collection-tool/..., which is
-        still on prolific.com and is NOT the list, so the old
+      * an external survey host (off the platform's domain), and
+      * a platform-HOSTED task such as /data-collection-tool/..., which is
+        still on the platform's domain and is NOT the list, so the old
         `_on_guarded_site` test let the clock keep running straight through
         it. Measured in run_20261106_084555: the clock started on the detail
         page, never reset while the agent worked the data-collection-tool
@@ -2211,15 +2211,15 @@ def safe_page_for(url: str) -> str:
 
 def loop_home_for(url: str) -> str:
     """The page a loop cycle must return to between studies: always the
-    Prolific studies list.
+    the platform studies list.
 
     A study detail page, a submission/completion page, or an external survey
-    host (a finished study's own "thank you / Return to Prolific" page) is
+    host (a finished study's own "thank you / Return to the platform" page) is
     never a valid home. Returning there each cycle makes the loop re-open a
     completed study and re-read its code instead of looking for a new one.
     This also protects against the loop being (re)started while the browser
     sits on such a page: the home resolves to the studies list wherever it was
-    started from, so only an actual guarded (Prolific) studies list is kept."""
+    started from, so only an actual guarded (platform) studies list is kept."""
     pr = urlparse(url or "")
     if _on_guarded_site(url) and sites.current.home_path.match(pr.path or ""):
         return safe_page_for(url)
@@ -2276,15 +2276,15 @@ def _extract_study_duration(x: float | None = None, y: float | None = None) -> f
 
 
 def _extract_time_remaining() -> float | None:
-    """Seconds left on Prolific's own countdown for the reserved slot, read
+    """Seconds left on the platform's own countdown for the reserved slot, read
     from the study detail page ("Time remaining  13 Mins 49 Secs"), or None.
 
     This is the deadline that decides whether the work is paid: overrun it
-    and Prolific auto-returns the submission. Nothing used to read it -- the
+    and the platform auto-returns the submission. Nothing used to read it -- the
     harness tracked only the MINIMUM duration -- so a study answered
     correctly but slowly was lost with no warning (run_20261106_154221,
     22m40s against a ~15m window; the page text is kept in
-    var/fixtures/prolific/detail_reserved.mhtml).
+    a captured fixture page).
     """
     try:
         m = sites.current.deadline_re.search(_page_text(6000) or "")
@@ -2300,8 +2300,8 @@ def _extract_time_remaining() -> float | None:
 class StudyTimer:
     """Tracks minimum completion time for the current study.
 
-    Started when the agent leaves the Prolific study detail page toward an
-    external survey. The duration is read from the Prolific page before the
+    Started when the agent leaves the platform study detail page toward an
+    external survey. The duration is read from the platform page before the
     click. If `min_seconds` has not elapsed when the agent tries to submit,
     the status_line injected into the agent's turn tells it to wait.
     """
@@ -2310,7 +2310,7 @@ class StudyTimer:
         self.clock = clock
         self.start_time: float | None = None
         self.min_seconds: float = 0
-        # Prolific's OWN countdown for the reserved slot ("Time remaining:
+        # the platform's OWN countdown for the reserved slot ("Time remaining:
         # 13 Mins 49 Secs" on the study detail page). Overrun it and the
         # submission is auto-returned however well the study was answered:
         # run_20261106_154221 answered a 3-minute questionnaire correctly in
@@ -2328,14 +2328,14 @@ class StudyTimer:
         self.deadline_seconds = 0
 
     def deadline_remaining(self) -> float | None:
-        """Seconds before Prolific takes the slot back, or None if unknown."""
+        """Seconds before the platform takes the slot back, or None if unknown."""
         if self.start_time is None or self.deadline_seconds <= 0:
             return None
         return self.deadline_seconds - self.elapsed()
 
     def deadline_pressure(self) -> float | None:
         """0.0 at the start of the window, 1.0 at the deadline, >1 past it.
-        None when Prolific showed no countdown."""
+        None when the platform showed no countdown."""
         rem = self.deadline_remaining()
         if rem is None:
             return None
@@ -2369,24 +2369,24 @@ class StudyTimer:
         return line + (self.deadline_line() or "")
 
     def deadline_line(self) -> str | None:
-        """The hard half of the clock: how long before Prolific takes the slot
+        """The hard half of the clock: how long before the platform takes the slot
         back. Appended to the status line so the model sees both bounds, not
         only the minimum it must not undercut."""
         left = self.deadline_remaining()
         if left is None:
             return None
         if left <= 0:
-            return (f" DEADLINE PASSED: Prolific's countdown for this slot ran "
+            return (f" DEADLINE PASSED: {sites.current.title}'s countdown for this slot ran "
                     f"out {abs(left) / 60:.0f} min ago. Submit whatever you can "
                     f"right now; do not start new sections.")
         mins = left / 60
         if mins <= 3:
-            return (f" DEADLINE {mins:.1f} min away: Prolific returns this "
+            return (f" DEADLINE {mins:.1f} min away: {sites.current.title} returns this "
                     f"submission automatically when its countdown ends, and the "
                     f"work is lost. Finish and submit NOW -- answer the quickest "
                     f"acceptable way, skip anything optional.")
         if mins <= 8:
-            return (f" Deadline in {mins:.0f} min (Prolific auto-returns the "
+            return (f" Deadline in {mins:.0f} min ({sites.current.title} auto-returns the "
                     f"submission then). Keep moving and do not re-read pages.")
         return f" Deadline in {mins:.0f} min."
 
@@ -2409,7 +2409,7 @@ def saw_submission_confirmation(text: str) -> bool:
     """True if the platform page shows a post-submit/post-cancel confirmation.
 
     Used by the NOCODE guard: a legit NOCODE either comes AFTER having visited
-    the external survey, or AFTER the Prolific-side 'I didn't receive a code' /
+    the external survey, or AFTER the platform-side 'I didn't receive a code' /
     'Cancel participation' flow landed on a confirmation screen. The guard
     refuses NOCODE only when BOTH signals are absent -- i.e. the model is
     still on the study-detail page, having done neither.
@@ -2435,13 +2435,13 @@ def _is_nocode_answer(answer: str) -> bool:
 
 def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
                            saw_cancel_confirm: bool, attempts: int) -> str:
-    """Refuse a NOCODE emitted on Prolific without having done the study.
+    """Refuse a NOCODE emitted on the platform without having done the study.
 
     Narrow conjunctive guard that reproduces exactly the bug in
-    run_20261029_184717: the agent is still on a Prolific study-detail page,
-    the external survey was never opened, and no Prolific-side submission /
+    run_20261029_184717: the agent is still on a platform study-detail page,
+    the external survey was never opened, and no platform-side submission /
     cancel confirmation ever appeared -- yet the model calls terminate NOCODE.
-    That marks the study DONE on our side while Prolific still has it in
+    That marks the study DONE on our side while the platform still has it in
     'awaiting submission', and the next cycle's _wait_for_studies sits forever
     on an empty list.
 
@@ -2449,7 +2449,7 @@ def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
     completion code): same root cause, same guard.
 
     Returns the refusal string, or "" to let the terminate through. A safety
-    valve lets the 3rd attempt pass regardless so a stale Prolific label can
+    valve lets the 3rd attempt pass regardless so a stale platform label can
     never genuinely wedge the loop.
     """
     if not _is_nocode_answer(answer):
@@ -2460,20 +2460,12 @@ def guarded_nocode_refusal(answer: str, url: str, saw_external: bool,
         return ""
     if attempts >= 2:
         return ""                      # safety valve: 3rd try passes
-    return ("NOCODE REFUSED: you are still on the Prolific study detail page, "
-            "you never opened the external survey, and no 'cancelled' or "
-            "'submitted' confirmation has appeared. Clicking 'I'm finished' on "
-            "the detail page does NOT submit the study. To close it properly: "
-            "click the red 'Cancel participation' button, confirm in the modal, "
-            "and only after the confirmation page appears call terminate NOCODE. "
-            "If instead you did complete the survey and no code was shown, "
-            "switch to the Prolific tab, click 'I'm finished', then "
-            "'I didn't receive a completion code', confirm, and terminate.")
+    return sites.current.nocode_refusal()
 
 
 # A forward control whose label matches this SUBMITS/FINISHES the whole survey,
 # as opposed to a "next page"/"continue" that only advances within it. Clicking
-# it redirects to Prolific with the completion code, which returns the study
+# it redirects to the platform with the completion code, which returns the study
 # irreversibly -- so while the study timer is still under its minimum this one
 # click must be held, even though intermediate next/continue advances are free.
 # Stems (no trailing boundary) so complet->complete/completa, termin->termina,
@@ -2649,7 +2641,7 @@ def nocode_link_decision(answer: str, url: str, link_found: bool,
     "retry"  the link is still there after we pressed it: say so in words.
     ""       let the terminate through -- no panel open (so the submission is
              already made, or there is nothing left to press), the study was
-             closed on Prolific, the answer is not a no-code one, or the
+             closed on the platform, the answer is not a no-code one, or the
              safety valve has been reached.
     """
     if not _is_nocode_answer(answer):
@@ -2657,7 +2649,7 @@ def nocode_link_decision(answer: str, url: str, link_found: bool,
     if not _on_guarded_site(url):
         return ""
     if saw_cancel_confirm:
-        return ""                      # already submitted/cancelled on Prolific
+        return ""                      # already submitted/cancelled on the platform
     if not link_found:
         return ""
     if attempts >= 2:
@@ -2669,26 +2661,22 @@ def nocode_link_decision(answer: str, url: str, link_found: bool,
 
 def nocode_codes_refusal(seen: list) -> str:
     code = next((c for c in seen if c), "")
-    return (f"NOCODE REFUSED: you are ending this study as 'no completion code', but "
-            f"{code} was shown on the study's own pages. Type {code} into the "
-            "'Completion Code' field of this panel, click 'Complete study', and "
-            f"terminate with CODE:{code}. Only if Prolific rejects that code should "
-            "you fall back to 'I didn't receive a completion code'.")
+    return sites.current.nocode_codes_refusal_text(code)
 
 
 def completion_pushback(answer: str, url: str, seen_codes: list,
                         page_codes: list, already_pushed: bool) -> str:
     """One-shot nudge when a free-text `terminate` has not actually reached
-    Prolific, or "" if the termination may stand.
+    the platform, or "" if the termination may stand.
 
-    A Prolific study is only really finished once you are back on Prolific
+    A platform study is only really finished once you are back on the platform
     with a completion code (that case is caught earlier, from the URL) or a
     code was shown on the study's own pages. A free-text "I completed the
     study" while still on the survey host, with no code seen anywhere, almost
     always means the model stopped on the host's own "thank you"/validation
     screen and never clicked the final control that submits and returns to
-    Prolific -- so nothing was registered. Generic on purpose: it keys off the
-    invariant (back on Prolific OR a code), not on any one platform, trial
+    the platform -- so nothing was registered. Generic on purpose: it keys off the
+    invariant (back on the platform OR a code), not on any one platform, trial
     count or button label. Fires at most once per study; if the model still
     terminates after it, that judgment is obeyed.
     """
@@ -2703,20 +2691,11 @@ def completion_pushback(answer: str, url: str, seen_codes: list,
     # run_20261109_102733 threw away a validated submission. Still one-shot:
     # a model that genuinely faces a dead end terminates again and is obeyed.
     if _on_guarded_site(url):
-        return ""                      # already back on Prolific
+        return ""                      # already back on the platform
     if seen_codes or page_codes:
         return ""                      # a code did appear somewhere
     host = urlparse(url or "").hostname or "this site"
-    return (
-        f"NOT DONE YET: you are ending the task but you are still on {host}, not back "
-        "on Prolific, and no completion code has appeared anywhere. A study only counts "
-        "as submitted once you return to Prolific (the page URL becomes "
-        "app.prolific.com/.../complete) or a completion code is shown on screen. A "
-        "'thank you' or validation screen on the survey site is NOT the end by itself. "
-        "Look on this page for the final control that submits or returns you to Prolific "
-        "-- a button or link such as Submit, Finish, Done, Continue, or Return to "
-        "Prolific -- and click it, then wait. Only if there is truly no such control and "
-        "no code anywhere should you end the task again.")
+    return sites.current.completion_pushback_text(host)
 
 
 def _nearest_checkbox(x: float, y: float, radius: float = 140.0):
@@ -2824,7 +2803,7 @@ def dispatch_action(action_type: str, args: dict) -> str:
             after = _nearest_checkbox(x, y)
             if after is not None and after.get("checked") == cb.get("checked"):
                 # The click did not toggle the box. A blind ±3px nudge is
-                # useless when the aim was off by more (seen on Prolific's
+                # useless when the aim was off by more (seen on the platform's
                 # "confidential" confirm box, indented inside a padded panel:
                 # the model kept clicking the panel's left padding, ~27px off
                 # the control). Retry aimed at the checkbox's real DOM centre
@@ -2932,44 +2911,31 @@ def dispatch_action(action_type: str, args: dict) -> str:
         else:
             target = "https://" + url
         if is_forbidden_url(target):
-            return ("visit_url REFUSED: that page (About you / logout) is off limits. Your only job is to "
-                    "take part in studies, or wait on the studies list for new ones.")
-        # www.prolific.com is the public marketing site, not the app: typing
+            return sites.current.refuse_forbidden_visit()
+        # the platform's public marketing site is not the app: typing
         # the wrong subdomain used to strand the agent there for a whole
         # cycle. Same path, correct host.
         if _unknown_app_path(target):
-            return ("visit_url REFUSED: there is no such page on Prolific. "
-                    "Study pages are /studies/<id> with the id exactly as the "
-                    "list links it -- do NOT build a URL from a study's name or "
-                    "from an id you saw elsewhere. Go back to the studies list "
-                    "and click the study, rather than typing an address.")
+            return sites.current.refuse_unknown_path()
         if _off_app_host(target):
             fixed = _to_app_host(target)
             # Correcting the host must not launder a path that does not
-            # exist: run_20261108_154719 typed www.prolific.com/study/<uuid>,
+            # exist: run_20261108_154719 typed <marketing host>/study/<uuid>,
             # the host guard rewrote it faithfully, and the agent landed on
             # the app's 404 instead of the marketing site's. Send it where it
             # was actually trying to go.
             if _unknown_app_path(fixed):
                 home = sites.current.app_home_url()
                 pw_bridge.goto(home)
-                return (f"visit_url {home} (CORRECTED: {target} is not a real "
-                        f"page -- wrong host AND no such path. Study pages are "
-                        f"{sites.current.app_host}/studies/<id> with the id exactly as the "
-                        f"list links it; never build one from a name or a UUID. "
-                        f"You are back on the studies list: click the study.)")
+                return sites.current.corrected_unknown_path(home, target, sites.current.app_host)
             pw_bridge.goto(fixed)
-            return (f"visit_url {fixed} (CORRECTED: you asked for {target}, which is "
-                    f"Prolific's public marketing site. The studies only exist on "
-                    f"{sites.current.app_host} -- always use that host.)")
+            return sites.current.corrected_host(fixed, target, sites.current.app_host)
         pw_bridge.goto(target)
         return f"visit_url {target}"
 
     if action_type == "history_back":
         if not pw_bridge.go_back():
-            return ("history_back REFUSED: going back would leave this site (you would "
-                    "be logged out). Use the page's own navigation instead, e.g. the "
-                    "Studies tab in the top bar.")
+            return sites.current.history_back_refusal()
         return "history_back"
 
     if action_type == "web_search":
@@ -3173,151 +3139,20 @@ def _maybe_batch_fill(task: str, attempted_signatures: dict, memory: list = None
     return step_event, next_text, summary
 
 
-# Appended to every run's task, whatever preset or text the user started
-# with. Kept short and placed last-but-prominent: rules buried deep in a
-# long preset were measured to be ignored (pay rate considered in 1 of 436
-# study-list steps when it was rule #12 of a ~2500-token preset).
-_STANDING_RULES_FULL = (
-    "\n\nSTANDING RULES (always apply):\n"
-    "1. ATTENTION CHECKS — HARDEST RULE, READ FIRST. Before answering ANY question, scan its "
-    "FULL text (title AND option labels) for an embedded instruction. Patterns to catch: "
-    "'to show you are paying attention select X', 'this is an attention check', "
-    "'please select [specific option]', 'choose the [third/second/last] option', "
-    "'select strongly agree/disagree for this one', 'what colour is the sky', "
-    "'ignore the question above and answer Z', 'if you are reading this select Y'. "
-    "If you find one, obey it EXACTLY — override persona, context, consistency, and what feels "
-    "natural. Failing ONE attention check rejects the whole study and loses the reward. On "
-    "repetitive Likert/A-B batteries, do NOT speed-click past the question text: scan every "
-    "single question's text for a hidden instruction before clicking any option.\n"
-    "2. Choosing a study: compare ALL study cards first; among the eligible ones open the "
-    "one with the highest reward rate per hour (the £/hr or $/hr shown), not just the first.\n"
-    "2a. ONLY a study that shows a clickable 'Take part in this study' button is available. A "
-    "study or submission row labelled Returned, Approved, Completed, Rejected, Cancelled, "
-    "Timed-out, or Awaiting review is a PAST participation — it has NO 'Take part' button and "
-    "CANNOT be opened or re-taken. Do NOT click it, its title, or its row hoping it will launch. "
-    "If you click a study and no 'Take part' button appears (and it is not merely loading) after "
-    "one or two tries, treat it as not available: stop retrying, go back to the Studies list, and "
-    "look at other studies. Never spend many steps trying to launch the same un-openable study.\n"
-    "3. NO AUDIO, EVER: a study that requires LISTENING to audio (sounds, speech, music, "
-    "recordings, 'audio playback', headphones or speakers) is not eligible. An 'Audio' "
-    "icon/label on the card means skip it. Videos are OK as long as the study does not "
-    "require hearing their sound — you can watch silent or muted videos. Microphone or "
-    "camera requirements alone do NOT disqualify a study. "
-    "Before pressing 'Take part in this study', read the requirements section; if it "
-    "mentions listening or audio playback, do not take part.\n"
-    "4. Answer quality: read every question and its FULL text carefully before answering. "
-    "Keep every answer consistent with the persona and with your earlier answers in the same "
-    "survey. Write specific, relevant open-ended answers in the survey's language, never "
-    "generic filler.\n"
-    "5. Scope: your only job is to take part in studies that meet the criteria and, when none "
-    "is available, to wait and re-check the list of studies for new ones. Never open the "
-    "'About you' section of the site or answer profile questionnaires outside a study.\n"
-    "5a. After clicking 'Take part in this study', the button turns grey/disabled while loading — "
-    "this is NORMAL. Wait a few seconds for the study to open; do NOT go back or assume it failed.\n"
-    "5b. After finishing a survey: ALWAYS switch back to the Prolific tab before calling "
-    "terminate. On the Prolific tab: (a) click 'I'm finished'; (b) if a completion-code field "
-    "appears, enter the code you received, or if no code was given click 'I didn't receive a "
-    "completion code' (or type NOCODE in the field if that link is absent); (c) confirm/submit. "
-    "Only after this Prolific-side step call terminate with CODE:<code> or NOCODE.\n"
-    "5c. Broken / screened-out studies: if the external survey is stuck, broken, or you were "
-    "screened out and cannot finish, use Ctrl+Shift+Tab to switch to the Prolific tab (do NOT "
-    "use history_back — the survey is in a separate tab). On the Prolific tab click "
-    "'Cancel participation' (a red button), confirm in the modal, then terminate with NOCODE. "
-    "Do NOT keep refreshing or waiting — cancel and move on.\n"
-    "6. Minimum study time: the estimated completion time shown on the study page is a minimum "
-    "you must respect. A 'Study timer' line will appear in your status once you enter a study. "
-    "If you reach what looks like the final submit/finish page and the timer says time remains, "
-    "use the `wait` action to wait (e.g. wait 30s at a time), then check the status line again. "
-    "Submit only once the timer says 'OK to submit now'.\n"
-    "7. Screener questions: before and during a study, read the description and requirements "
-    "carefully to understand what profile the researcher is looking for. When answering screener "
-    "questions, emphasise whichever TRUE aspects of the persona best match those criteria — the "
-    "goal is to avoid being excluded for a trivially wrong answer when the persona genuinely "
-    "qualifies. You may present a truth selectively or adapt phrasing to fit the screener "
-    "(e.g. 'I use AI tools every day' if the persona does). You must NEVER invent facts that "
-    "directly contradict the given persona (age, nationality, profession, stated experience), "
-    "and never claim qualifications the persona does not have.\n"
-    "8. Repetitive trials: when a survey has many identical repeated trials (e.g. 60 A/B "
-    "comparisons, repeated Likert scales), work through them efficiently with normal clicks — "
-    "develop a fast rhythm: select option, scroll to submit, click submit, wait for next trial. "
-    "Do NOT use run_js (it is disabled). DECIDE EACH TRIAL FROM WHAT IT SHOWS: look at both "
-    "options before clicking. Many comparison studies plant ground-truth trials among the "
-    "ordinary ones — one option is obviously broken, distorted, or does not match the stated "
-    "prompt — and getting those wrong fails the researcher's automatic checks even when every "
-    "other answer is fine. So never choose by position: neither always the same side "
-    "(straight-lining) nor a left-right-left alternation, which is just as mechanical and just "
-    "as detectable. Variety is the RESULT of judging each pair, not a goal of its own; when the "
-    "two options really look equivalent, pick either one and move on. "
-    "Follow any guidance from past user corrections shown in the [Things the user told you] "
-    "section — they carry across studies on the same domain; but a correction that tells you to "
-    "answer fast or without inspecting the stimuli never covers a trial where one option is "
-    "obviously wrong or where the text carries an instruction: those are planted checks and "
-    "rule 1 wins. "
-    "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction.\n"
-    "9. NEVER ask_user_question — this run is unattended and nobody will reply. The USER PROFILE "
-    "block at the top of this task counts as 'explicitly provided' for the critical-point rule, "
-    "so any demographic (age, gender, nationality, native language, education, employment, "
-    "household, income band, political view, lifestyle habit, …) is already supplied. If a "
-    "survey field is required but not in the profile, invent a value that is plausible AND "
-    "consistent with the profile and with every answer you already gave in this same survey; "
-    "re-use the same invented value within the survey. The ONLY time you may stop is to call "
-    "terminate — never to ask."
-)
-
-_STANDING_RULES_COMPACT = (
-    "\n\nRULES: "
-    "1. ATTENTION CHECKS — HARDEST RULE. Scan every question's FULL text (title + options) for an "
-    "embedded instruction: 'select X to show you are paying attention', 'this is an attention check', "
-    "'please pick [option]', 'choose the third option', 'what colour is the sky', 'if reading this select Y'. "
-    "If found, obey EXACTLY — override persona, consistency, everything. One failure rejects the whole study. "
-    "On repetitive Likert/A-B trials, scan each trial's text before clicking; do NOT speed-click past it. "
-    "2. Pick the highest £/hr study. Only a study with a clickable 'Take part' button is open-able; a row "
-    "marked Returned/Approved/Completed/Cancelled/Awaiting-review is a PAST participation (no Take-part, "
-    "can't reopen). If no Take-part appears after 1-2 clicks (and it's not just loading), stop, go back to "
-    "the list, try others. "
-    "3. NO AUDIO — skip studies requiring listening/speakers/headphones. Videos OK if no audio needed. "
-    "4. Read FULL question text before answering. Stay consistent with persona; no filler. "
-    "5. Only do studies, nothing else. After 'Take part' button goes grey, WAIT — it's loading. "
-    "After survey: Prolific tab → 'I'm finished' → enter the code → 'Complete study' → terminate. "
-    "If the survey gave NO code, click 'I didn't receive a completion code' on that same "
-    "panel, confirm, and terminate NOCODE only once Prolific says the submission is saved "
-    "('Awaiting review'). NEVER terminate with the 'Confirm submission' panel still open. "
-    "If study is broken/screened out: Ctrl+Shift+Tab to Prolific tab → 'Cancel participation' → confirm → terminate NOCODE. "
-    "6. Respect minimum time — wait if timer says time remains. "
-    "7. Screener: emphasise true persona traits that match; never invent contradicting facts. "
-    "8. Repetitive trials: work through them efficiently with normal clicks. "
-    "Do NOT use run_js. Judge EACH trial from what it shows — look at both options. Studies "
-    "plant ground-truth trials where one option is obviously broken/off-prompt, and missing "
-    "them fails the automatic checks. Never answer by position: not the same side every time, "
-    "not a left-right alternation. A past user correction about answering fast never covers a "
-    "trial with an obviously wrong option or an embedded instruction. "
-    "Rule 1 still applies — scan EACH trial's text for an embedded attention-check instruction. "
-    "9. NEVER ask_user_question — unattended run. Treat the USER PROFILE above as 'explicitly provided'; "
-    "for any demographic not in it, invent a value consistent with the profile and your prior answers in this survey."
-)
-
-
+# The rules appended to every run's task come from the site profile: what a
+# participant must and must not do on that platform. Kept short and placed
+# last-but-prominent: rules buried deep in a long preset were measured to be
+# ignored. Speed modes get the compact version.
 def _standing_rules() -> str:
-    if _speed_mode == "normal":
-        return _STANDING_RULES_FULL
-    return _STANDING_RULES_COMPACT
+    return sites.current.standing_rules(compact=_speed_mode != "normal")
 
 
 def _identity_hint_text(idv: dict) -> str:
-    """The line that gives the model its EXACT Prolific ID / email (from
-    identity.json or the task) so it types them when a study asks, instead of
-    refusing as 'not provided'. Empty when nothing is known."""
-    parts = []
-    if (idv or {}).get("prolific_id"):
-        parts.append(f"Prolific ID is exactly {idv['prolific_id']}")
-    if (idv or {}).get("email"):
-        parts.append(f"Prolific email is exactly {idv['email']}")
-    if not parts:
-        return ""
-    return ("\n\nYOUR ACCOUNT DETAILS (known, from file -- use the EXACT value, never alter or "
-            "invent): " + "; ".join(parts) + ". When a study or survey asks for your Prolific ID "
-            "or email, type exactly this value. It is already available, so never say it is "
-            "missing and never refuse, cancel, or return a study over a Prolific ID / email field.")
+    """The line that gives the model the account's EXACT identifiers (from
+    identity.json or the task) so it types them when a task asks, instead of
+    refusing as 'not provided'. Empty when nothing is known; worded by the
+    site profile."""
+    return sites.current.identity_hint(idv)
 
 
 # Bumped whenever summarize_transcript classifies a run differently, so the
@@ -3332,7 +3167,7 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
 
     Where the steps went is read from the per-step diag lines: on the
     studies list, inside a study (the external questionnaire, timer
-    running), or elsewhere on Prolific.
+    running), or elsewhere on the platform.
     """
     steps, answer, source = 0, "", None
     flagged = ""
@@ -3484,12 +3319,12 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         wander = WanderGuard(wander_seconds)
         study_timer = StudyTimer()
         _last_guarded_duration: float | None = None  # persists across clicks within a study entry
-        # Prolific's remaining-time countdown, read off the detail page
+        # the platform's remaining-time countdown, read off the detail page
         # before the launch click. See _extract_time_remaining.
         _last_guarded_deadline: float | None = None
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
         _model_moved_viewport: bool = False  # last action was the model's own scroll/page key
-        _prev_on_launch: bool = True  # prev step was on the Prolific launch surface (list/detail/chrome)
+        _prev_on_launch: bool = True  # prev step was on the platform launch surface (list/detail/chrome)
         # Page object the launch surface was last seen in, and the chrome
         # URLs we have already explained once (see _reached_in_launch_tab).
         _launch_page_id = None
@@ -3497,31 +3332,31 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _chrome_guard_noticed: set = set()
         _prev_here: str = ""  # URL at the previous step, for detecting navigation landings
         _current_study_id: str | None = None  # id of the study being looked at / taken
-        _current_study_title: str = ""  # its name, read on Prolific while we can still see it
+        _current_study_title: str = ""  # its name, read on the platform while we can still see it
         _seen_codes: list = []  # completion codes spotted on the study's own pages
         # _used_run_js removed — run_js is disabled for anti-detection
         _survey_url: str = ""  # URL of the external survey (for study_memory)
         # Completion guard: nudge a free-text "I'm done" that never got back to
-        # Prolific / a code, at most once per study so a re-terminate is obeyed.
+        # the platform / a code, at most once per study so a re-terminate is obeyed.
         _completion_pushed_back: bool = False
-        # One shot per study at clicking the survey's own return-to-Prolific
+        # One shot per study at clicking the survey's own return-to-the-platform
         # control ourselves (see the profile's completion_return_js).
         _completion_return_tried: bool = False
         # NOCODE guard: refuse a terminate NOCODE emitted while still on the
-        # Prolific detail page without having visited the external survey or
-        # seen a Prolific-side cancel/submit confirmation. See
+        # the platform detail page without having visited the external survey or
+        # seen a platform-side cancel/submit confirmation. See
         # guarded_nocode_refusal for the full rationale.
         _saw_external_this_study: bool = False
         _saw_cancel_confirm: bool = False
         _nocode_guard_attempts: int = 0
-        # Sibling guard, Prolific side: a no-code terminate while the
+        # Sibling guard, platform side: a no-code terminate while the
         # 'Confirm submission' panel is still open. See _nocode_link_box.
         _nocode_link_attempts: int = 0
         _nocode_link_tried: bool = False
         # The scenario / instruction / stimulus pages of the study in
         # progress. See _remember_study_page.
         _study_pages: list = []
-        # Reservation-loop guard: once a slot is reserved on Prolific the URL
+        # Reservation-loop guard: once a slot is reserved on the platform the URL
         # becomes /studies/{id} and stays there — the only legitimate exits
         # are 'Start study' or 'Cancel participation'. The model sometimes
         # tries to escape with history_back / visit_url instead (seen in
@@ -3570,10 +3405,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         # the model is told explicitly to break the loop instead of
         # continuing. maxlen must be >= the largest threshold. Reset per run.
         _recent_action_sigs: deque = deque(maxlen=_SCROLL_STUCK_THRESHOLD + 1)
-        # Identity (Prolific ID / email) the user put in identity.json or the
+        # Identity (participant ID / email) the user put in identity.json or the
         # task, surfaced to the model so it can TYPE the exact value when a study
         # asks for it. The DOM identity-fill stays primary; this is the fallback
-        # for pages the extractor can't tag (e.g. a Prolific-ID page the vision
+        # for pages the extractor can't tag (e.g. a participant-ID page the vision
         # model otherwise refused, believing the ID "was not provided"). Fetched
         # once: these values are account-level constants.
         _identity_hint = ""
@@ -3627,7 +3462,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if not here:
                 # An empty URL is not "no page": it is the bridge failing to
                 # read one, and every rule below keys off this string. Read as
-                # "not on Prolific" it silently switches off the guarded-site
+                # "not on the platform" it silently switches off the guarded-site
                 # rules, the wander guard, the study timer and the batch-fill
                 # suppression, and the run carries on blind -- which is exactly
                 # what happened with a tab whose renderer had wedged. Give the
@@ -3647,28 +3482,20 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 back = safe_page_for(here)
                 pw_bridge.goto(back)
                 pw_bridge.wait_for_content()
-                pending_user_response = (
-                    "You ended up in the 'About you' section, which is off limits, so you were "
-                    "taken back to the list of studies. Never open it. Your only job is to take "
-                    "part in studies that meet the criteria and, if none is available, to wait "
-                    "and check the list again for new ones.")
+                pending_user_response = sites.current.forbidden_notice()
                 yield {"type": "notice",
-                       "text": "Aperta la sezione «About you»: riportato all'elenco degli studi.",
+                       "text": sites.current.forbidden_live_notice(),
                        "messages": messages}
             elif wander.check(here):
                 pw_bridge.goto(safe_page_for(here))
                 pw_bridge.wait_for_content()
                 n = int(wander.seconds)
-                pending_user_response = (
-                    f"You spent more than {n} seconds away from the list of studies without taking "
-                    "part in a study, so you were taken back to it. Stay on the list of studies and "
-                    "do not browse other pages. If no eligible study is listed, follow your task "
-                    "instructions for that case (refresh, wait or finish).")
+                pending_user_response = sites.current.wander_notice(n)
                 yield {"type": "notice",
-                       "text": f"Più di {n} s fuori dall'elenco studi senza svolgerne uno: riportato a /studies.",
+                       "text": sites.current.wander_live_notice(n),
                        "messages": messages}
 
-            # Back on Prolific with the completion code in the URL: the
+            # Back on the platform with the completion code in the URL: the
             # submission is already made, so finish here instead of asking the
             # model to read the code off the screen.
             cc = completion_code(here)
@@ -3708,7 +3535,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 yield {"type": "done", "answer": answer, "messages": messages}
                 return
 
-            # Stateful transition check: if previous step was on Prolific and now we're
+            # Stateful transition check: if previous step was on the platform and now we're
             # external, start the timer regardless of HOW the navigation happened
             # (left_click, key press, Enter in a modal, JS redirect, etc.).
             # Done BEFORE the batch-fill block so the timer is already active when
@@ -3718,7 +3545,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             here_guarded = _on_guarded_site(here)
             # Stranded on the marketing site (a click on its logo/nav, or a
             # redirect, not just a mistyped visit_url): walk straight back to
-            # the app. Nothing on www.prolific.com can advance a study, and
+            # the app. Nothing on the platform's marketing site can advance a study, and
             # the model does not recognise it as the wrong site -- it treated
             # /ai-task-builder as a broken studies list for 23 steps
             # (run_20261106_142347). Never fires inside a study: an external
@@ -3736,16 +3563,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     here = back
                 here_guarded = _on_guarded_site(here)
                 if not pending_user_response:
-                    pending_user_response = (
-                        f"You had navigated to Prolific's PUBLIC MARKETING SITE "
-                        f"(www.prolific.com), which is a different website: it "
-                        f"advertises Prolific to researchers and has no studies, no "
-                        f"study list and no account of yours on it. You have been "
-                        f"returned to {back}. The studies only ever live on "
-                        f"{sites.current.app_host} -- stay on it.")
+                    pending_user_response = sites.current.off_host_notice(back, sites.current.app_host)
             _timer_started_this_step = False
             # Proactive, cache-aware compaction at natural checkpoints: when
-            # we cross the Prolific/external boundary (either direction),
+            # we cross the platform/external boundary (either direction),
             # most of the history for the OTHER side (list browsing, old
             # studies, prior survey pages) is no longer useful. Collapse it
             # once BEFORE this step grows the context further, so the model
@@ -3764,12 +3585,11 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if here not in _chrome_guard_noticed:
                     _chrome_guard_noticed.add(here)
                     _live({"type": "notice", "text":
-                           f"[guard] {here} is Prolific account chrome reached "
-                           f"in the launch tab, not a study: no timer started"})
+                           sites.current.chrome_guard_live_notice(here)})
             # "Inside a task" = off the launch surface: an external survey host
-            # OR a Prolific-hosted task tool (e.g. /data-collection-tool/...).
+            # OR a platform-hosted task tool (e.g. /data-collection-tool/...).
             # The study timer and in-task framing key on THIS transition, not on
-            # "left prolific.com", so first-party Prolific surveys are treated as
+            # "left the platform's domain", so first-party platform surveys are treated as
             # the running task they are instead of looking like the reservation
             # page (which made the model cancel completable studies).
             entered_task = _prev_on_launch and not here_on_launch
@@ -3789,7 +3609,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     _live({"type": "timer_start", "min_seconds": 0, "min_minutes": 0})
                 _timer_started_this_step = True
                 _survey_url = here
-                dest = "external" if not here_guarded else "prolific-hosted task"
+                dest = "external" if not here_guarded else f"{sites.current.name}-hosted task"
                 _live({"type": "notice", "text": f"[timer] transition detected: launch→{dest} | duration={effective_duration}min"})
                 dur_str = f" (~{effective_duration:.0f} min)" if effective_duration else ""
                 _notify_telegram(f"📝 Studio iniziato{dur_str}\n{here}")
@@ -3802,13 +3622,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # step, not here, or the check never sees a different value.
 
             # Gate on the LAUNCH SURFACE, not on the host. Batch-fill must
-            # never touch Prolific's own chrome (the studies list, a detail
-            # page, submissions/account) -- but a Prolific-HOSTED task
+            # never touch the platform's own chrome (the studies list, a detail
+            # page, submissions/account) -- but a platform-HOSTED task
             # (/data-collection-tool/...) is a running questionnaire like any
             # other, and `here_guarded` locked it out of batch-fill purely
             # because it shares the domain. run_20261106_154221 answered a
             # 3-minute dropdown questionnaire with 139 separate vision clicks
-            # at 8.3s each, took 22m40s against Prolific's ~15m window, and
+            # at 8.3s each, took 22m40s against the platform's ~15m window, and
             # the submission was auto-returned. Same confusion the wander
             # guard had in 1ffb26d.
             if batch_fill and not here_on_launch and not _user_inject_pending:
@@ -3875,7 +3695,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if m_study:
                 _current_study_id = m_study.group(1)
                 capture_page("study")
-                # Read the name here, on Prolific: once the agent is inside the
+                # Read the name here, on the platform: once the agent is inside the
                 # external questionnaire the page title is the survey tool's,
                 # which is no use for telling the model what to skip.
                 _current_study_title = _study_title() or _current_study_title
@@ -3894,7 +3714,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         av = _detect_av(page_text, check_text=True)
                         if av:
                             skip_reason = f"audio/video: {av}"
-            # Gated on the launch surface, not the host: a Prolific-HOSTED
+            # Gated on the launch surface, not the host: a platform-HOSTED
             # task (/data-collection-tool/...) that turns out to need a
             # microphone or webcam has to be abandoned exactly like an
             # external one. `here_guarded` excluded it for sharing the
@@ -3945,14 +3765,14 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pending_user_response += "\n\n" + injected
 
             # Codes shown on the study's own pages, collected as they appear:
-            # by the time the model reports one it is back on Prolific, where
+            # by the time the model reports one it is back on the platform, where
             # the original page can no longer be checked.
             if study_timer.is_active() and not here_guarded:
                 for c in codes_in_url(here) + codes_on_page(_end_page_text()):
                     if c not in _seen_codes:
                         _seen_codes.append(c)
 
-            # Flag Prolific-side submit/cancel confirmations so the NOCODE
+            # Flag platform-side submit/cancel confirmations so the NOCODE
             # guard knows this terminate came after a legitimate close
             # ("I didn't receive a code" confirmation OR Cancel participation
             # confirmation), not from clicking "I'm finished" on the detail
@@ -3970,24 +3790,24 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             if not on_list:
                 nav_hint = _dom_nav_hint()
                 # User corrections apply on any study page (survey or the
-                # Prolific study detail), so they surface whenever we are off
+                # the platform study detail), so they surface whenever we are off
                 # the list. The run_js batch hint is survey-specific, so it
                 # stays gated on an active study timer.
                 mem_hint = study_memory.user_hints_for(here)
 
             # Reading dwell: simulate the time a human spends scanning the
-            # page before acting. Only on survey pages (not the Prolific list
+            # page before acting. Only on survey pages (not the platform list
             # where there is no question to "read") and only from step 2
             # onward (step 1 has its own resume delay). Proportional to
             # visible text length, capped at 8s.
             # Gated on the launch surface, not the host. Skipping the dwell
-            # on a Prolific-HOSTED questionnaire made the agent answer real
+            # on a platform-HOSTED questionnaire made the agent answer real
             # questions with no reading time at all -- the exact behavioural
             # signature the humanised input path exists to avoid -- purely
-            # because the task shares Prolific's domain. `on_list` stays:
+            # because the task shares the platform's domain. `on_list` stays:
             # there is nothing to read on the studies list.
             # ...but never at the cost of the slot: reading dwell is the
-            # first thing to drop once Prolific's countdown is inside its
+            # first thing to drop once the platform's countdown is inside its
             # last quarter. A page read like a human but submitted after the
             # deadline is auto-returned and pays nothing.
             _dl_pressure = study_timer.deadline_pressure()
@@ -4011,7 +3831,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         cancel.sleep(random.uniform(0.6, 1.6))
                         # Micro-scroll with a bell-curve of small deltas,
                         # then a smaller reversal (humans often overshoot
-                        # and come back). Skipped on the Prolific list via
+                        # and come back). Skipped on the platform list via
                         # the outer guard.
                         if random.random() < 0.75:
                             total_down = random.randint(60, 150)
@@ -4050,7 +3870,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
 
             _live({"type": "phase", "phase": "observe", "step": step})
             # Pre-screenshot viewport nudge: in speed modes, inside a study,
-            # on non-guarded pages (Prolific dashboard is excluded), bring
+            # on non-guarded pages (the platform dashboard is excluded), bring
             # the first unselected response control into view BEFORE scrot
             # captures. Saves 1-3 model-driven scroll steps per trial on
             # long-content surveys. Safe no-op when nothing matches, when
@@ -4089,7 +3909,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # step's action moved the page. Done after screenshot so the
             # action-settle delay has already run.
             curr_page_fp = _page_fingerprint()
-            # Prolific's own pages list past rejections with their reasons; reading
+            # the platform's own pages list past rejections with their reasons; reading
             # one there would stamp this run with someone else's verdict. The
             # researcher's end page is never on a guarded host.
             qc_hit = "" if (_qc_flag or here_guarded) else qc_failure_in(curr_page_fp)
@@ -4109,17 +3929,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 if not on_list:
                     resume_hint = f"\n\nCurrent URL: {here}\n"
                     if here_guarded and m_study:
-                        resume_hint += (
-                            "You are resuming on a Prolific study page. A previous run was "
-                            "working on this study. Continue it — open the survey if needed, "
-                            "or enter the completion code if the survey is done. "
-                            "Do NOT go back to the studies list.")
+                        resume_hint += sites.current.resume_on_task_page()
                     else:
-                        resume_hint += (
-                            "You are resuming inside an external survey. A previous run was "
-                            "working through it. Continue where you left off — complete the "
-                            "current question and proceed. Do NOT navigate back to Prolific "
-                            "until the survey is complete.")
+                        resume_hint += sites.current.resume_in_task()
                 text = task + _standing_rules() + _identity_hint + (f"\n\n{skip_hint}" if skip_hint else "") + resume_hint
                 if pending_user_response:
                     text += f"\n\n[User (mid-run instruction)]: {pending_user_response}"
@@ -4131,21 +3943,13 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 prefix += page_signal
                 prefix += _stuck_warning(_recent_action_sigs)
                 prefix += skip_hint + nav_hint + mem_hint
-                # Prolific-hosted task surface (e.g. the data-collection-tool):
-                # it lives on app.prolific.com, so the model keeps mistaking a
+                # platform-hosted task surface (e.g. the data-collection-tool):
+                # it lives on the app host, so the model keeps mistaking a
                 # trial it is actively doing for the studies list / reservation
                 # page and cancels a study it is completing. State plainly where
                 # it is. (Guarded + off the launch surface == a first-party task.)
                 if here_guarded and not here_on_launch:
-                    prefix += (
-                        "[You are INSIDE the study task right now — this is a "
-                        "Prolific-hosted survey, NOT the studies list and NOT the "
-                        "reservation/detail page. A study is open and in progress. "
-                        "Keep answering the trials and advancing. Do NOT click "
-                        "'Cancel participation' or 'Back to studies', and do NOT "
-                        "terminate as if no study were open. Only leave if the task "
-                        "itself is genuinely impossible (needs a microphone/camera, "
-                        "or a CAPTCHA blocks you).]\n")
+                    prefix += sites.current.in_task_framing()
                 timer_line = study_timer.status_line()
                 if timer_line:
                     prefix += timer_line + "\n"
@@ -4233,7 +4037,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 target["pixels"] = args.get("pixels")
             _live(target)
             _live({"type": "phase", "phase": "act", "step": step, "action": action_type})
-            # Read study duration from the Prolific page BEFORE dispatch so we
+            # Read study duration from the platform page BEFORE dispatch so we
             # capture the exact study about to be joined (not generic browsing).
             # Pass click coordinates so elementFromPoint targets that specific card.
             pre_click_duration: float | None = None
@@ -4243,7 +4047,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 pre_click_duration = _extract_study_duration(cx, cy)
                 if pre_click_duration is not None:
                     _last_guarded_duration = pre_click_duration
-                # Prolific's countdown is only on the detail page, so it has
+                # the platform's countdown is only on the detail page, so it has
                 # to be read before the click that leaves it.
                 _pcd = _extract_time_remaining()
                 if _pcd is not None:
@@ -4262,7 +4066,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # Minimum-time guard, model-driven path: on an external survey, while
             # the study timer is still below its minimum, a left_click that lands
             # on a submit/finish control is held and turned into a wait instead of
-            # being dispatched. Once submitted the survey redirects to Prolific
+            # being dispatched. Once submitted the survey redirects to the platform
             # with the completion code and the study is returned irreversibly, so
             # the hold has to happen here, before dispatch. Next/Continue clicks
             # (and every click off a submit control) are not affected. Setting
@@ -4375,7 +4179,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         "or unchecked mandatory checkboxes. Fill them in first, then "
                         "try clicking the button again.")
 
-            # Reservation-loop guard: on a Prolific /studies/{id} detail page
+            # Reservation-loop guard: on a platform /studies/{id} detail page
             # where the orphan banner is visible, the slot is held and the only
             # way out is 'I'm finished' (with a real code) or 'Cancel
             # participation'. Two independent signals feed one nudge:
@@ -4403,7 +4207,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 # that STILL OFFERS a way in ('Take part', 'Open study in new
                 # window', or an open 'Start study' dialog) is mid-launch, not
                 # a dead slot: both nudges must push the LAUNCH, never 'Cancel
-                # participation', because Prolific's dialog hides its confirm
+                # participation', because the platform's dialog hides its confirm
                 # link below the fold and abandoning there returns a
                 # completable study (run_20261105_181001 lost a GBP 4 eval,
                 # run_20261106_124620 a GBP 2,60 one, exactly this way).
@@ -4413,7 +4217,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 # reservation that still offered 'Open study in new window'
                 # (run_20261106_124620 screenshot_03), ABSENT on a reserved
                 # study with its Start dialog open (fixture study 6aec5848,
-                # var/fixtures/prolific/). Keying fresh_unlaunched off it made
+                # the captured fixtures). Keying fresh_unlaunched off it made
                 # the flag permanently False on the pages it was meant to
                 # protect, which silently disabled the auto-launcher and
                 # routed every stuck launch to the cancel steer. The DOM
@@ -4433,28 +4237,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             True, detail_id)
                     elif orphan_visible:
                         _orphan_nudged = True
-                        pending_user_response = (
-                            "RESERVED-SLOT STATE on this Prolific study: the "
-                            "'Please either finish or return this submission' "
-                            "banner is visible, which means the slot is HELD "
-                            "(possibly from a PREVIOUS run that did not clean "
-                            "up). The right-hand panel in this state shows:\n"
-                            "  - 'I'm finished' (blue): click ONLY if you "
-                            "personally completed the external survey this run "
-                            "and have a completion code to paste. Clicking it "
-                            "otherwise lands you on a dead Confirm-submission "
-                            "screen with no code to enter.\n"
-                            "  - 'Cancel participation' (red outline): releases "
-                            "the slot. Opens a modal; confirm with the red "
-                            "'Yes, cancel participation' button.\n"
-                            "  - 'Open study in new window' (link): reopens the "
-                            "external survey in a new tab, if there is one.\n"
-                            "There is NO 'Take part in this study' button in "
-                            "this state. If you did not open+complete the "
-                            "external survey this run, click 'Cancel "
-                            "participation' -> 'Yes, cancel participation', "
-                            "then terminate with NOCODE."
-                        )
+                        pending_user_response = sites.current.held_slot_notice()
 
                 # (B) Loop detector. Normalise keys to a lowered '+'-joined
                 # string so patterns like 'alt+left' match regardless of how
@@ -4470,7 +4253,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         "ctrl+prior", "ctrl+pagedown", "ctrl+pageup",
                     ))
                 )
-                # Clicks on the top Prolific nav header (the Studies /
+                # Clicks on the top the platform nav header (the Studies /
                 # Submissions / About you / Messages tabs all sit within the
                 # first ~50px) are escape attempts too. The reserved banner is
                 # at y<=30 so the primary nav is roughly y 30..100 depending on
@@ -4516,13 +4299,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                                "text": f"[launch] humanised launch: {status}"})
                         if launched:
                             _survey_url = (res or {}).get("survey_url") or _survey_url
-                            pending_user_response = (
-                                "The study's external survey has just been opened "
-                                "for you in the survey window (the 'Start study' "
-                                "dialog was confirmed automatically). You are now "
-                                "IN the survey: read the current page and answer "
-                                "the questions/trials, then proceed. Do NOT go back "
-                                "to the Prolific tab to cancel.")
+                            pending_user_response = sites.current.launched_notice()
                             _notify_telegram("🚀 Survey aperta automaticamente\n" + str(_survey_url))
                     if not launched:
                         # Launch not possible (still un-reserved, control
@@ -4599,9 +4376,9 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pending_user_response = refusal
                     continue
                 answer = args.get("answer", "")
-                # NOCODE emitted while still on Prolific without ever visiting
+                # NOCODE emitted while still on the platform without ever visiting
                 # the external survey or seeing a cancel/submit confirmation
-                # means the study is still "assigned" on Prolific. Letting
+                # means the study is still "assigned" on the platform. Letting
                 # that NOCODE through wedges the next cycle in
                 # _wait_for_studies (empty list, slot still held). Narrow
                 # conjunctive guard; see guarded_nocode_refusal.
@@ -4613,7 +4390,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     pending_user_response = nocode_block
                     continue
                 # The other half of the same mistake, one page later: the
-                # survey WAS done, we are back on Prolific, and the model
+                # survey WAS done, we are back on the platform, and the model
                 # gives up with the 'Confirm submission' panel still open and
                 # 'I didn't receive a completion code' one click away. The
                 # link's presence is proof the study is unsubmitted; press it
@@ -4643,27 +4420,15 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                             except Exception:
                                 _after = here
                             _live({"type": "notice", "text":
-                                   "[completion] the study was not submitted: clicked "
-                                   f"Prolific's {_lbox.get('text')!r} -> {_after}"})
-                            pending_user_response = (
-                                "HARNESS ACTION: you were ending this study as 'no "
-                                "completion code' with Prolific's 'Confirm submission' "
-                                "panel still open, so the study was NOT submitted. The "
-                                f"link {_lbox.get('text')!r} has been clicked for you. "
-                                "Look at the screenshot: confirm the submission in the "
-                                "dialog that opened (the button that submits / "
-                                "continues), wait for the page to say the submission "
-                                "was saved ('Awaiting review'), and only then terminate "
-                                "NOCODE. If you did NOT actually complete the survey, "
-                                "dismiss the dialog and use 'Cancel participation' "
-                                "instead.")
+                                   sites.current.nocode_link_live_notice(_lbox.get('text'), _after)})
+                            pending_user_response = sites.current.nocode_link_clicked(_lbox.get('text'))
                             continue
                         _nc = "retry"
                     if _nc == "retry":
                         pending_user_response = sites.current.nocode_link_refusal
                         continue
                 # Ending on the survey host's own thank-you/validation page
-                # with the final "submit & return to Prolific" control
+                # with the final "submit & return to the platform" control
                 # skipped. Before saying anything to the model, try to finish
                 # the job: find that control and click it with the real
                 # cursor. Prose alone was not enough: run_20261109_102733
@@ -4686,16 +4451,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                                    "[completion] the study was not submitted: clicked "
                                    f"the survey's return control ({_rbox.get('why')}, "
                                    f"{_rbox.get('text')!r}) -> {_after}"})
-                            pending_user_response = (
-                                "HARNESS ACTION: you were ending the task on the survey "
-                                "site without ever submitting the study. The control "
-                                "that returns it to Prolific "
-                                f"({_rbox.get('text')!r}) has been clicked for you and "
-                                f"the page is now {_after}. Look at the screenshot: if "
-                                "a completion code is shown, terminate with it; if you "
-                                "are back on Prolific with the submission registered, "
-                                "terminate NOCODE; if the click went nowhere, find and "
-                                "click the right control yourself.")
+                            pending_user_response = sites.current.completion_return_clicked(_rbox.get('text'), _after)
                             continue
                 # Prose fallback: no such control was found, or clicking it
                 # failed. Nudge once.
@@ -4712,7 +4468,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                 check = None
                 if answer.startswith("CODE:") or answer == "NOCODE":
                     # Compare what the model reported with every code seen on
-                    # the study's pages, plus the one Prolific shows after the
+                    # the study's pages, plus the one the platform shows after the
                     # submission ("Completion code: PLKXLQ"). Never overrides
                     # the model: it only flags what needs a human look.
                     seen = _seen_codes + [c for c in codes_on_page(_end_page_text())

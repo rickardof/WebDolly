@@ -169,7 +169,7 @@ def user_hints_for(url: str) -> str:
     directives: an old hint like "cancel the study and go back" was given to
     resolve one stuck run, and if re-read as a blanket rule it makes the model
     cancel every future study on the domain (seen in run_20261103_194847,
-    where the model hallucinated every Prolific study as 'ruled-out').
+    where the model hallucinated every platform study as 'ruled-out').
 
     Stale hints (> USER_HINT_TTL_SECONDS old) are dropped so situational
     guidance doesn't linger into contexts where it no longer applies.

@@ -7,7 +7,7 @@ Parts (all measured, nothing taken from the paper):
   B. grounding: "click <description>" on live fixture pages; hit = the
      returned click lands inside the element's real DOM bounding box.
      Includes deliberately hard targets (16px scale circles, ARIA divs).
-  C. judgement on REAL saved Prolific screenshots (study list choice)
+  C. judgement on REAL saved platform screenshots (study list choice)
   D. batch-fill decision quality/speed (text-only calls to the same model)
   E. DOM pipeline on the Qualtrics-like survey (answer sanity)
 """

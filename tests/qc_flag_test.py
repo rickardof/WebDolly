@@ -144,7 +144,8 @@ check("the page reads the verdict from the column the server writes",
 
 section("the rule that stops it happening again")
 
-for name, rules in (("full", ac._STANDING_RULES_FULL), ("compact", ac._STANDING_RULES_COMPACT)):
+for name, rules in (("full", ac.sites.current.standing_rules(compact=False)),
+                    ("compact", ac.sites.current.standing_rules(compact=True))):
     low = rules.lower()
     check(f"{name}: planted ground-truth trials are named",
           "ground-truth" in low or "ground truth" in low)

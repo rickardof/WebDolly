@@ -407,7 +407,7 @@ def goto(url: str):
 def go_back() -> bool:
     """Browser Back that can't walk out of the logged-in site. Back from
     the first page after login lands on the pre-login page (measured:
-    app.prolific.com/studies/<id> -> www.prolific.com, a logged-out
+    the app host/studies/<id> -> the platform's marketing site, a logged-out
     marketing page), and that navigation also hung until the 15s timeout,
     which killed the whole run. So: don't wait for load events (commit is
     enough, the next screenshot shows the result), and if the host changed,
@@ -597,7 +597,7 @@ def unchecked_checkbox_boxes(dialog_sel: str, scroll: bool = True) -> list:
 def active_page_id():
     """Identity of the tab Fara is actually looking at. The harness uses it
     to tell "a task opened in its own window" from "we navigated in place",
-    which is what separates a Prolific-hosted study from account chrome at a
+    which is what separates a platform-hosted study from account chrome at a
     path we have not catalogued (see _reached_in_launch_tab)."""
     return run(lambda b: id(b.active_page()))
 
@@ -670,7 +670,7 @@ def reset_to(url: str):
 
 def wait_for_content(max_s: float = 5.0, quiet_s: float = 0.4) -> float:
     """Wait until the visible page has rendered something and stopped
-    changing, instead of a fixed sleep. SPAs like Prolific are
+    changing, instead of a fixed sleep. SPAs like a task platform are
     "DOMContentLoaded" long before the studies list appears (seen in logs:
     the agent's first screenshot showed a blank page with only the cookie
     banner, costing it extra `wait` steps). Returns seconds waited."""

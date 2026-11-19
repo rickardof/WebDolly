@@ -675,8 +675,8 @@ check("the dialog it opens is left to the model to confirm",
 check("the per-study state is cleared on the studies list",
       "_nocode_link_attempts = 0" in src and "_nocode_link_tried = False" in src)
 check("the compact rules (the live ones) now carry the no-code branch",
-      "I didn't receive a completion code" in ac._STANDING_RULES_COMPACT
-      and "I didn't receive a completion code" in ac._STANDING_RULES_FULL)
+      "I didn't receive a completion code" in ac.sites.current.standing_rules(compact=True)
+      and "I didn't receive a completion code" in ac.sites.current.standing_rules(compact=False))
 
 
 # ===================================================================== 15
