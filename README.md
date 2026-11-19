@@ -23,10 +23,11 @@ write: no selectors, no recorded steps.
   anything.
 - **It acts like a person:** clicks and keystrokes arrive as from a real mouse
   and keyboard, with a pointer that travels and typing that has a rhythm.
-- **It keeps going on its own.** In loop mode it repeats the task with a pause
-  in between, for days: its memory is trimmed to fit the model, a failed cycle
-  is retried instead of ending the run, and Telegram lets you follow and steer
-  it from your phone.
+- **It is made to run for days, unattended.** In loop mode it repeats the task
+  with a pause in between. With the local model a long run costs nothing per
+  step and hits no rate limit; its memory is trimmed so it never outgrows the
+  model; a failed cycle is retried instead of ending the run; Telegram lets you
+  follow and steer it from your phone.
 - **It runs on your machine:** model, browser and panel. A hosted model works
   too, with no GPU.
 
