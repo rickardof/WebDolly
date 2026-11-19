@@ -331,8 +331,8 @@ section("identity fields (a Prolific ID must never be invented)")
 for typ in ("text", "textarea"):
     for label in ("Prolific ID", "Please enter your PROLIFIC_PID",
                   "participant id", "What is your Prolific id?"):
-        check(f"{typ} {label[:28]!r} -> prolific_id",
-              ff._identity_kind({"type": typ, "text": label, "id": ""}) == "prolific_id")
+        check(f"{typ} {label[:28]!r} -> participant_id",
+              ff._identity_kind({"type": typ, "text": label, "id": ""}) == "participant_id")
 check("textarea email is an identity field",
       ff._identity_kind({"type": "textarea", "text": "Your e-mail", "id": ""}) == "email")
 for f in ({"type": "text", "text": "How old are you?", "id": "age"},

@@ -1160,7 +1160,7 @@ def _():
 @_t("identity:hint_includes_id_and_email")
 def _():
     out = agent_core._identity_hint_text(
-        {"prolific_id": "6577185f506eacce0e8de1ed", "email": "a@b.co"})
+        {"participant_id": "6577185f506eacce0e8de1ed", "email": "a@b.co"})
     assert "6577185f506eacce0e8de1ed" in out and "a@b.co" in out, out
     assert "exactly" in out.lower()          # tells the model to copy, not invent
     assert "never" in out.lower()            # and never fabricate / refuse

@@ -11,6 +11,7 @@ import os
 import re
 
 from ..base import Site
+from . import submissions as _subs
 
 
 # == what Prolific's pages look like ==========================================
@@ -631,8 +632,8 @@ def identity_hint(idv: dict) -> str:
     identity.json or the task) so it types them when a study asks, instead of
     refusing as 'not provided'. Empty when nothing is known."""
     parts = []
-    if (idv or {}).get("prolific_id"):
-        parts.append(f"Prolific ID is exactly {idv['prolific_id']}")
+    if (idv or {}).get("participant_id"):
+        parts.append(f"Prolific ID is exactly {idv['participant_id']}")
     if (idv or {}).get("email"):
         parts.append(f"Prolific email is exactly {idv['email']}")
     if not parts:
@@ -641,6 +642,23 @@ def identity_hint(idv: dict) -> str:
             "invent): " + "; ".join(parts) + ". When a study or survey asks for your Prolific ID "
             "or email, type exactly this value. It is already available, so never say it is "
             "missing and never refuse, cancel, or return a study over a Prolific ID / email field.")
+
+
+# Injected in place of a human answer when the model calls ask_user_question
+# during an UNATTENDED loop run. The whole point of loop mode is a 24/7 run
+# the user does not have to babysit, so a question must never stall it: the
+# agent is steered to decide for itself and keep moving. The user keeps full
+# control via /inject at any time, and gets a non-blocking Telegram heads-up.
+_UNATTENDED_ANSWER = (
+    "You are running UNATTENDED in a 24/7 loop — no human will answer, so stop "
+    "asking questions (this is a standing rule). Decide for yourself using the "
+    "standing rules. If a study will not open, is broken, or you are stuck, go "
+    "back to the Prolific studies list and pick another eligible study; if none "
+    "is open, wait and re-check the list. If you genuinely cannot finish the "
+    "current study, cancel/return it (Ctrl+Shift+Tab to the Prolific tab → "
+    "Cancel participation) then terminate with NOCODE and move on. Never stop "
+    "to ask again."
+)
 
 
 # @@ PROLIFIC-DEFINITIONS @@
@@ -750,11 +768,37 @@ class ProlificSite(Site):
     def reservation_nudge(self, fresh_unlaunched: bool, task_id: str) -> str:
         return reservation_nudge(fresh_unlaunched, task_id)
 
+    # --- the participant's identity ---------------------------------------
+    # Researchers label the field "Prolific ID", "PID" or "participant ID";
+    # Prolific appends PROLIFIC_PID (24 hex characters) to every study URL.
+    participant_id_label_re = re.compile(r"prolific\s*[-_]?\s*(id|pid|identifier)|\bpid\b"
+                                         r"|participant\s*[-_]?\s*id")
+    participant_id_params = ("prolific_pid", "pid", "participant_id", "participantid",
+                             "prolificid", "prolific_id")
+    participant_id_format = re.compile(r"[0-9a-fA-F]{24}")
+    participant_id_in_text = re.compile(r"\b[0-9a-f]{24}\b")
+    participant_id_aliases = ("prolific_id",)
+
+    # --- the account's history (sites/prolific/submissions.py) -------------
+    history_url = _subs._SUBMISSIONS_URL
+    history_per_page = _subs._SUBS_PER_PAGE
+    history_ready_js = _subs._SUBMISSIONS_READY_JS
+    history_status_re = _subs._STATUS_RE
+    history_paid_statuses = _subs._SUBS_PAID
+    parse_history_rows = staticmethod(_subs._parse_submission_rows)
+    parse_history_header = staticmethod(_subs._parse_submission_header)
+    parse_history_last_page = staticmethod(_subs._parse_last_page)
+    money = staticmethod(_subs._money)
+
     # --- what the model is told (texts above) -----------------------------
     def standing_rules(self, compact: bool = False) -> str:
         return _STANDING_RULES_COMPACT if compact else _STANDING_RULES_FULL
 
     identity_hint = staticmethod(identity_hint)
+
+    def unattended_answer(self) -> str:
+        return _UNATTENDED_ANSWER
+
     nocode_refusal = staticmethod(nocode_refusal)
     nocode_codes_refusal_text = staticmethod(nocode_codes_refusal_text)
     completion_pushback_text = staticmethod(completion_pushback_text)

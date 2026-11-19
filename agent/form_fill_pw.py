@@ -880,13 +880,13 @@ def verify_fields(fields: list) -> dict:
 # -- orchestration ----------------------------------------------------------
 
 
-# -- identity fields (Prolific ID / email): copied, never generated ---------
+# -- identity fields (participant ID / email): copied, never generated ------
 #
-# Some studies ask the participant to type their Prolific ID and email
-# right before starting. These must be exact (a wrong ID loses the credit),
-# so they are never sent to the language model: values come only from
-#   1. the PROLIFIC_PID parameter Prolific appends to every study URL
-#      (any open tab or frame), and
+# Some tasks ask the participant to type their platform ID and email right
+# before starting. These must be exact (a wrong ID loses the credit), so they
+# are never sent to the language model: values come only from
+#   1. the participant-id parameter the platform appends to every task URL
+#      (any open tab or frame; names and format from the site profile), and
 #   2. identity.json, a local file the user fills once, and
 #   3. the user's own task/context text (exact pattern match, not the model).
 # If a value isn't known, the field is left empty and reported undecided,
@@ -897,15 +897,16 @@ import os as _os
 import re as _re
 from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
 
+import sites
+
 IDENTITY_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "identity.json")
-_PID_PARAMS = ("prolific_pid", "pid", "participant_id", "participantid", "prolificid", "prolific_id")
 
 
 def _identity_kind(f: dict):
     # Both free-text widgets count. Qualtrics renders a single-line text entry
     # as <input> (extracted as "text") but a multi-line one as <textarea>
-    # (extracted as "textarea"), and researchers use either for the Prolific
-    # ID. Accepting only "text" meant a textarea ID field was never recognised
+    # (extracted as "textarea"), and researchers use either for the
+    # participant ID. Accepting only "text" meant a textarea ID field was never recognised
     # as identity, so it fell through to the model, got an INVENTED id, and
     # batch-fill auto-advanced the page: measured in run_20261106_082719,
     # where the survey recorded a bad id, showed no completion code, and the
@@ -914,9 +915,8 @@ def _identity_kind(f: dict):
     if f.get("type") not in ("text", "textarea"):
         return None
     hay = f"{f.get('text','')} {f.get('id','')}".lower()
-    if _re.search(r"prolific\s*[-_]?\s*(id|pid|identifier)|\bpid\b"
-                  r"|participant\s*[-_]?\s*id", hay):
-        return "prolific_id"
+    if sites.current.participant_id_label_re.search(hay):
+        return "participant_id"
     if _re.search(r"e-?mail", hay):
         return "email"
     return None
@@ -930,7 +930,8 @@ def _pid_from_urls(b):
             except Exception:
                 continue
             for k, v in q.items():
-                if k.lower() in _PID_PARAMS and v and _re.fullmatch(r"[0-9a-fA-F]{24}", v[0]):
+                if (k.lower() in sites.current.participant_id_params and v
+                        and sites.current.participant_id_format.fullmatch(v[0])):
                     return v[0]
     return None
 
@@ -941,12 +942,19 @@ def identity_values(context: str = "") -> dict:
     m = _re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", context or "")
     if m:
         vals["email"] = m.group(0).rstrip(".")
-    m = _re.search(r"\b[0-9a-f]{24}\b", context or "")
+    m = sites.current.participant_id_in_text.search(context or "")
     if m:
-        vals["prolific_id"] = m.group(0)
+        vals["participant_id"] = m.group(0)
     try:
         with open(IDENTITY_FILE) as fh:
             data = json.load(fh)
+        # Older identity.json files name the ID after the platform; the file
+        # still outranks the task text, whichever key it uses.
+        for alias in sites.current.participant_id_aliases:
+            if alias in data:
+                v = data.pop(alias)
+                if str(v).strip() and not str(data.get("participant_id", "")).strip():
+                    data["participant_id"] = v
         vals.update({k: str(v).strip() for k, v in data.items() if str(v).strip()})
     except Exception:
         pass
@@ -955,7 +963,7 @@ def identity_values(context: str = "") -> dict:
     except Exception:
         pid = None
     if pid:
-        vals["prolific_id"] = pid   # the study URL is the authoritative source
+        vals["participant_id"] = pid   # the task URL is the authoritative source
     return vals
 
 

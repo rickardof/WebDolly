@@ -313,7 +313,7 @@
 
   <div class="grid row-c">
     <section class="card" id="cardSubs">
-      <div class="card-h"><div><h2>Submission su Prolific</h2><p id="subsSub">Lette dalla pagina delle submission tra un ciclo e l'altro</p></div></div>
+      <div class="card-h"><div><h2>Submission sulla piattaforma</h2><p id="subsSub">Lette dalla pagina delle submission tra un ciclo e l'altro</p></div></div>
       <div class="card-b" id="subs"></div>
     </section>
     <section class="card" id="cardTables">
@@ -397,7 +397,7 @@ function svgEl(tag, attrs, parent) {
 }
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
-/* Prolific states the account's own totals on its submissions page. While the
+/* The platform states the account's own totals on its submissions page. While the
    local history is still being read in, say so under the earnings tile rather
    than letting a partial sum pass for the whole period: reading only the first
    of 41 pages is what made this report claim £0.70 + $27.39 against the
@@ -697,7 +697,7 @@ function renderSplit(A) {
     `<div class="blist"><h3>Passi</h3>` +
     row('Dentro uno studio', 'play', 'var(--c-blue)', A.w.study / wAll, fmtN(A.w.study) + ' passi') +
     row('Sull\'elenco studi', 'inbox', 'var(--c-blue)', A.w.list / wAll, fmtN(A.w.list) + ' passi') +
-    row('Altrove su Prolific', 'filter', 'var(--c-blue)', A.w.elsewhere / wAll, fmtN(A.w.elsewhere) + ' passi') + `</div>`;
+    row('Altrove sulla piattaforma', 'filter', 'var(--c-blue)', A.w.elsewhere / wAll, fmtN(A.w.elsewhere) + ' passi') + `</div>`;
 }
 
 /* ============================================================ heatmap (weekday x hour) */
@@ -873,7 +873,7 @@ const SUB_STATUS = {
   'rejected': {l: 'Rifiutata', c: '--c-bad', ic: 'x'},
 };
 function fmtMoneyByCur(byCur) {
-  // Keep £ and $ separate: Prolific pays some studies in GBP, others in USD,
+  // Keep £ and $ separate: the platform pays some studies in GBP, others in USD,
   // and summing them into one scalar would silently misrepresent earnings.
   const parts = [];
   for (const [sym, amt] of Object.entries(byCur)) {
@@ -888,7 +888,7 @@ function filteredSubs(a, b) {
   for (const s of list) {
     const st = (s.status || '').toLowerCase();
     const c = s.currency || '£';
-    // A screened-out submission pays a screening fee, and Prolific counts it
+    // A screened-out submission pays a screening fee, and the platform counts it
     // in its own "Total earned": leaving it out kept every period short of
     // the account's headline (523 approved = $909.12 + £577.19, with the 35
     // screened out = $933.95 + £580.14 against a SUMMARY of $939.95+£590.94).
@@ -905,7 +905,7 @@ function filteredSubs(a, b) {
 function renderSubs(a, b) {
   const host = $('subs'), f = filteredSubs(a, b);
   if (!(D.submissions || []).length) {
-    emptyChart(host, D.submissions_ts ? 'Nessuna submission trovata sulla pagina di Prolific' : 'Le submission vengono lette dalla pagina di Prolific nella pausa tra due cicli: compariranno qui dopo la prima lettura.', 'coin');
+    emptyChart(host, D.submissions_ts ? 'Nessuna submission trovata sulla pagina della piattaforma' : 'Le submission vengono lette dalla pagina della piattaforma nella pausa tra due cicli: compariranno qui dopo la prima lettura.', 'coin');
     return;
   }
   if (!f.has) { emptyChart(host, 'Nessuna submission in questo periodo', 'coin'); return; }
@@ -949,7 +949,7 @@ function renderTables(runs) {
         const code = String(r[ANS] || '').replace(/^CODE:\s*/, '');
         return `<tr><td>${esc(dt(r[S]))}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
           `<td>${r[OUT] === 'CODE' ? `<span class="code">${esc(code)}<button class="copy" data-copy="${esc(code)}" title="Copia">${icon('copy', 13)}</button></span>` : '<span class="dim">senza codice</span>'}</td>` +
-          `<td class="dim">${r[SRC] === 'url' ? 'URL di Prolific' : r[SRC] === 'model' ? 'schermo' : '—'}</td>` +
+          `<td class="dim">${r[SRC] === 'url' ? 'URL della piattaforma' : r[SRC] === 'model' ? 'schermo' : '—'}</td>` +
           (anyFlag ? `<td class="dim">${r[FLAG] ? `<span class="flag" title="${esc(r[FLAG])}">controlli non superati</span>` : ''}</td>` : '') + `</tr>`;
       }).join('') + `</tbody></table>` + more(done) : '';
     if (!done.length) html = `<div class="empty-chart">${icon('check', 22)}<div>Nessuno studio completato in questo periodo</div></div>`;

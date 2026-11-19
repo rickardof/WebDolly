@@ -38,6 +38,7 @@ import agent_core
 import study_cache
 import pusher_listener
 import local_agent
+import sites
 from agent_core import run_agent, docker_exec, get_current_url, KEY_MAP, DATA_DIR, CONTAINER
 
 HERE = Path(__file__).parent
@@ -193,7 +194,7 @@ def _local_current() -> list:
 _local_load()
 
 # "data": every submission known, newest first (see the local store below).
-# "header": Prolific's own SUMMARY figures, which are the account's real
+# "header": the platform's own SUMMARY figures, which are the account's real
 # lifetime totals. "complete": whether the store matches that SUMMARY yet.
 _submissions_cache: dict = {"data": [], "ts": 0.0, "header": {}, "complete": False}
 _submissions_lock = threading.Lock()
@@ -259,166 +260,25 @@ def _dbg(msg: str):
     except Exception:
         pass
 
-import re as _re
-
-_STATUS_RE   = _re.compile(
-    r'^(AWAITING REVIEW|APPROVED|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)$',
-    _re.IGNORECASE)
-_MONEY_RE    = _re.compile(r'^(screened out )?reward', _re.IGNORECASE)
-# The label of an extra payment on a submission, whose amount is on the next
-# line with no prefix of its own.
-_EXTRA_PAY_RE = _re.compile(r'^(bonus|adjustment|tip)s?\s*:?\s*$', _re.IGNORECASE)
-# Chromium runs with --lang=it-IT, so Prolific renders rewards in Italian
-# locale: "Reward: £0,06" / "Reward: £1,20". The old regex only accepted
-# "." and silently truncated the fractional part, showing £1,20 as £1.00
-# and £0,06 as £0.00. Accept both separators and normalise below.
-_REWARD_AMT  = _re.compile(r'([£$€])\s*(\d+(?:[.,]\d+)?)')
-_BY_RE       = _re.compile(r'^by\s+.+', _re.IGNORECASE)
-_DATELINE_RE = _re.compile(r'^\d{1,2}\s+\w{3}\s+\d{4}', _re.IGNORECASE)
-_SKIP_LINE   = _re.compile(
-    r'^(approved by|read more|submissions?|summary|total|filters?|sort|search'
-    r'|balance|pending|about you|messages|studies|refer|projects?'
-    r'|date|status|reward|actions?|study name|\d+\s*submissions?'
-    r'|skip to main|time taken).*$', _re.IGNORECASE)
-
+# -- the account's submission history ----------------------------------------
+# What a page of the history looks like (its rows, badges, SUMMARY and pager)
+# belongs to the site profile; the crawl and the local store below are generic.
+# A profile without a history (history_url "") switches all of it off.
 
 def _parse_submission_rows(raw_rows: list[str]) -> list[dict]:
-    """Parse the Prolific /submissions page innerText (as a list of stripped
-    non-empty lines) into one dict per row.
-
-    Pulled out of _fetch_submissions so it can be unit-tested without a browser:
-    the regex layer has had subtle bugs twice (comma-decimal truncation, title
-    stealing the reward line), and locale/currency changes will keep coming.
-    """
-    parsed, i = [], 0
-    while i < len(raw_rows):
-        line = raw_rows[i]
-        if _STATUS_RE.match(line):
-            status = line.title()
-            title, date_full, currency, paid = "", "", "£", 0.0
-            # A row reads, in page order: title, "By <researcher>", date,
-            # ["Approved by <date>"], ["Read more"], "Reward: <amount>",
-            # optionally "Bonus:"/"Adjustment:" and a bare amount, then the
-            # status. So walk back from the status until the title.
-            for j in range(i - 1, max(i - 12, -1), -1):
-                prev = raw_rows[j]
-                if _DATELINE_RE.match(prev):
-                    date_full = prev.strip()
-                elif _MONEY_RE.match(prev):
-                    m = _REWARD_AMT.search(prev)
-                    if m:
-                        currency = m.group(1)
-                        paid += float(m.group(2).replace(",", "."))
-                elif _AMOUNT_RE.match(prev):
-                    # A bare amount: the value of the "Bonus:"/"Adjustment:"
-                    # line just above it. It belongs to this submission, so it
-                    # is added to what the study paid. This line used to fall
-                    # through to the title branch, which took "£0,51" for the
-                    # study name and stopped -- inventing a dateless,
-                    # rewardless phantom submission and losing the real one
-                    # (9 of the first 399 rows read).
-                    m = _money(prev)
-                    if m:
-                        currency = m[0]
-                        paid += m[1]
-                elif (_EXTRA_PAY_RE.match(prev) or _BY_RE.match(prev)
-                        or _SKIP_LINE.match(prev)):
-                    continue
-                elif not title and len(prev) > 4:
-                    title = prev[:80]
-                    break
-            if title:
-                parsed.append({
-                    "title": title, "status": status,
-                    "date": date_full.split(",")[0].strip(),
-                    "date_full": date_full,
-                    "reward": f"{paid:.2f}" if paid else "", "currency": currency,
-                })
-        i += 1
-    return parsed
-
-
-# Prolific's own SUMMARY block, at the top of every /submissions page. These
-# are the account's authoritative lifetime figures: summing the rows we
-# managed to read instead reported GBP 0,70 + USD 27,39 over 8 studies against
-# the GBP 590,94 + USD 939,95 over 559 the page itself was showing, because
-# only the first of 41 pages was ever read.
-_AMOUNT_RE = _re.compile(r'^([£$€])\s*([\d.,]+)$')
-_INT_RE = _re.compile(r'^\d[\d.,]*$')
-
-
-def _money(line: str) -> tuple[str, float] | None:
-    """("£", 590.94) from a bare amount line, or None.
-
-    Chromium runs with --lang=it-IT, so Prolific renders "£590,94": the comma
-    is the decimal separator and the dot groups thousands ("£1.234,56").
-    """
-    m = _AMOUNT_RE.match(line.strip())
-    if not m:
-        return None
-    raw = m.group(2)
-    if "," in raw:
-        raw = raw.replace(".", "").replace(",", ".")
-    elif raw.count(".") > 1:
-        raw = raw.replace(".", "")
-    try:
-        return m.group(1), float(raw)
-    except ValueError:
-        return None
+    return sites.current.parse_history_rows(raw_rows)
 
 
 def _parse_submission_header(rows: list[str]) -> dict:
-    """The SUMMARY block and the wallet lines, or {} if the page did not show
-    them. Earnings are per currency: Prolific pays some studies in GBP and
-    others in USD and never adds them up itself."""
-    def _after(label: str, within: int = 3):
-        for i, r in enumerate(rows):
-            if r.strip().lower() == label:
-                return rows[i + 1:i + 1 + within]
-        return []
-
-    out: dict = {}
-    for key, label in (("balance", "balance"), ("pending", "pending")):
-        for line in _after(label, 1):
-            m = _money(line)
-            if m:
-                out[key] = {m[0]: m[1]}
-    for key, label in (("total", "total submissions"), ("approved", "submissions approved")):
-        for line in _after(label, 1):
-            if _INT_RE.match(line.strip()):
-                out[key] = int(line.strip().replace(".", "").replace(",", ""))
-    earned: dict = {}
-    # "Total earned" is followed by one line per currency, so read until the
-    # next line that is not an amount instead of assuming how many there are.
-    for line in _after("total earned", 6):
-        m = _money(line)
-        if not m:
-            break
-        earned[m[0]] = earned.get(m[0], 0.0) + m[1]
-    if earned:
-        out["earned"] = earned
-    return out
+    return sites.current.parse_history_header(rows)
 
 
 def _parse_last_page(rows: list[str]) -> int:
-    """The highest page number in the pager at the foot of the list, or 1.
-
-    The pager reads "Prev 1 2 3 4 5 ... 41 Next", so the last numbered button
-    is the page count. Only the tail of the page is considered: a study title
-    that happens to be a number must not be mistaken for a page.
-    """
-    tail = rows[-16:]
-    if not any(r.strip().lower() == "next" for r in tail):
-        return 1
-    nums = [int(r) for r in tail if r.strip().isdigit()]
-    return max(nums) if nums else 1
+    return sites.current.parse_history_last_page(rows)
 
 
-# Prolific lists 20 submissions a page and pages with ?page=N (verified
-# against the live account: pages 1-3 return disjoint sets of 20 rows and the
-# pager reports 41 pages for 816 submissions).
-_SUBMISSIONS_URL = "https://app.prolific.com/submissions"
-_SUBS_PER_PAGE = 20
+def _money(line: str):
+    return sites.current.money(line)
 
 
 def _fetch_submissions(page: int = 1) -> dict:
@@ -431,15 +291,13 @@ def _fetch_submissions(page: int = 1) -> dict:
     _submissions_auto_updater), so the agent never notices the pause. Saves
     and restores the active tab atomically inside the bridge worker thread.
     """
-    url = _SUBMISSIONS_URL if page <= 1 else f"{_SUBMISSIONS_URL}?page={page}"
+    base = sites.current.history_url
+    url = base if page <= 1 else f"{base}?page={page}"
     JS = """() => (document.body.innerText || '').split('\\n')
                   .map(s => s.trim()).filter(s => s.length > 0)"""
-    # The list is rendered client-side, so wait for it to be there instead of
-    # for a fixed five seconds: at several pages a refresh the fixed wait IS
-    # the cost of the crawl.
-    READY = ("() => /SUBMISSION HISTORY/i.test(document.body.innerText) && "
-             "/(APPROVED|AWAITING REVIEW|RETURNED|REJECTED|TIMED OUT|ACTIVE|SCREENED OUT)/"
-             ".test(document.body.innerText)")
+    # The list is rendered client-side, so wait for it to be there (the
+    # profile's history_ready_js) instead of for a fixed five seconds.
+    READY = sites.current.history_ready_js
 
     def _do(b):
         prev     = b._active
@@ -449,6 +307,8 @@ def _fetch_submissions(page: int = 1) -> dict:
         try:
             new_page.goto(url, wait_until="domcontentloaded", timeout=25000)
             try:
+                if not READY:
+                    raise ValueError("no readiness test")
                 new_page.wait_for_function(READY, timeout=12000)
             except Exception:
                 new_page.wait_for_timeout(4000)   # read whatever is there
@@ -478,12 +338,12 @@ def _fetch_submissions(page: int = 1) -> dict:
     # parser drops (no title found within the backward window, so nothing is
     # emitted) or two rows of one page landing on a single key. Both are
     # invisible unless measured here, so measure both and keep the page.
-    badges = sum(1 for r in raw_rows if _STATUS_RE.match(r))
+    badges = sum(1 for r in raw_rows if sites.current.history_status_re.match(r))
     keys = [_subs_key(r) for r in rows]
     dupes = len(keys) - len(set(keys))
     _dbg(f"page {page}/{last_page}: {len(raw_rows)} lines, {badges} badges, "
          f"{len(rows)} rows" + (f", {dupes} duplicate keys" if dupes else ""))
-    if dupes or len(rows) != badges or (badges < _SUBS_PER_PAGE and page < last_page):
+    if dupes or len(rows) != badges or (badges < sites.current.history_per_page and page < last_page):
         try:
             (Path(agent_core.LOG_ROOT) / f"submissions_odd_p{page}.txt"
              ).write_text("\n".join(raw_rows))
@@ -503,20 +363,10 @@ def _fetch_submissions(page: int = 1) -> dict:
 SUBS_STORE = Path(agent_core.LOG_ROOT) / "submissions.json"
 _SUBS_STORE_V = 1
 # How long to leave the history alone after a sweep that ended without
-# matching Prolific's SUMMARY. Six hours: long enough that an unmatchable
+# matching the platform's SUMMARY. Six hours: long enough that an unmatchable
 # count cannot turn into a permanent crawl, short enough that a status that
 # flips deep in the history is picked up the same day.
 _SUBS_SWEEP_COOLDOWN = 6 * 3600
-
-
-# What Prolific counts in "Submissions approved" and "Total earned": not only
-# the approved rows but the screened-out ones too, which pay a screening fee.
-# Measured against the live account: 523 approved + 35 screened out = 558
-# rows worth $933.95 + £580.14, against a SUMMARY of 559 rows worth
-# $939.95 + £590.94 (the gap is the 9 rows still missing from the store).
-# Counting only "approved" made the crawl's checksum unsatisfiable and left
-# every period short of the account's own headline.
-_SUBS_PAID = ("approved", "screened out")
 
 
 def _subs_key(row: dict) -> str:
@@ -577,7 +427,7 @@ def _subs_merge(store: dict, rows: list) -> int:
     without a trace, and the store then never reaches the SUMMARY's count: a
     full 41-page read lands 807 of 816 while every single page yields its 20
     rows. Whenever a key arrives over a row that differs in more than its
-    status, say so -- the line shows whether Prolific listed two payments of
+    status, say so -- the line shows whether the platform listed two payments of
     one study separately (so the key needs a third part) or simply added an
     adjustment to a row already read (so it does not).
     """
@@ -613,7 +463,7 @@ def _subs_rows(store: dict) -> list:
 
 
 def _subs_complete(store: dict) -> bool:
-    """True when the store holds as much as Prolific's own SUMMARY claims.
+    """True when the store holds as much as the platform's own SUMMARY claims.
 
     The page states the account's totals, so they are the checksum that says
     whether the crawl still has pages to read -- no guessing from page counts,
@@ -624,7 +474,7 @@ def _subs_complete(store: dict) -> bool:
     if not h.get("total"):
         return False
     rows = store["rows"].values()
-    paid = sum(1 for r in rows if (r.get("status") or "").lower() in _SUBS_PAID)
+    paid = sum(1 for r in rows if (r.get("status") or "").lower() in sites.current.history_paid_statuses)
     return len(store["rows"]) >= h["total"] and paid >= h.get("approved", 0)
 
 
@@ -664,7 +514,7 @@ def _submissions_refresh(max_pages: int = 6) -> bool:
     page = max(2, int(store.get("cursor") or 2))
     # A sweep in progress (cursor past page 2) always continues. A new one
     # starts only after the cooldown: if the SUMMARY can never be matched --
-    # a row Prolific no longer lists, a title we truncate differently -- the
+    # a row the platform no longer lists, a title we truncate differently -- the
     # crawl must not then borrow the browser on every single cycle forever.
     # Page numbers only mean something while the list stands still. Every new
     # submission pushes every older one down, so a row can cross a boundary
@@ -780,7 +630,6 @@ state = {
     "answer_queue": None,
     "inject_message": None,
 }
-
 
 
 class _Hub:
@@ -1087,23 +936,6 @@ def run_one_cycle(task: str, url: str, max_rounds: int, stop_event, answer_queue
         return False, messages, "STOPPED"
 
 
-# Injected in place of a human answer when the model calls ask_user_question
-# during an UNATTENDED loop run. The whole point of loop mode is a 24/7 run
-# the user does not have to babysit, so a question must never stall it: the
-# agent is steered to decide for itself and keep moving. The user keeps full
-# control via /inject at any time, and gets a non-blocking Telegram heads-up.
-_UNATTENDED_ANSWER = (
-    "You are running UNATTENDED in a 24/7 loop — no human will answer, so stop "
-    "asking questions (this is a standing rule). Decide for yourself using the "
-    "standing rules. If a study will not open, is broken, or you are stuck, go "
-    "back to the Prolific studies list and pick another eligible study; if none "
-    "is open, wait and re-check the list. If you genuinely cannot finish the "
-    "current study, cancel/return it (Ctrl+Shift+Tab to the Prolific tab → "
-    "Cancel participation) then terminate with NOCODE and move on. Never stop "
-    "to ask again."
-)
-
-
 def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batch_fill,
                   wander_seconds=0, skip_av=False):
     gen = run_agent(task, url, max_rounds, stop_event=stop_event, messages=messages,
@@ -1138,7 +970,7 @@ def _drive_cycle(task, url, max_rounds, stop_event, answer_queue, messages, batc
                         + "\n\nPer intervenire: /inject <testo>.")
                 except Exception:
                     pass
-                event = gen.send(_UNATTENDED_ANSWER)
+                event = gen.send(sites.current.unattended_answer())
                 continue
             with state_lock:
                 state["pending_question"] = event["question"]
@@ -1187,7 +1019,7 @@ def _cached_url():
 
 
 def _dashboard_for(url: str) -> str:
-    """The page each loop cycle returns to: always the Prolific studies list
+    """The page each loop cycle returns to: always the platform studies list
     (see agent_core.loop_home_for). A study detail, submission/completion or
     external survey page is never a valid home -- returning there would make
     the loop re-open a finished study -- so only an actual studies list is
@@ -1369,7 +1201,7 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
     # same screenshot: with prior history or even with a few lines of text
     # notes about earlier cycles it repeated the wrong count 3/3 times;
     # with no prior context it saw all three every time. Nothing is lost:
-    # Prolific drops completed studies from the list, and eligibility is
+    # the platform drops completed studies from the list, and eligibility is
     # cheap to re-judge each cycle.
     home_url = url  # where each new cycle starts from; captured below if not given
     inhibitor = _inhibit_sleep()
@@ -1537,7 +1369,7 @@ def _mark_repeats(records: list) -> list:
     done: run_20261109_183807 re-banked CODE: CBBD09819 nineteen seconds
     after run_20261109_175856 earned it.
 
-    A study can be taken only once on Prolific, so the same study id twice is
+    A study can be taken only once on the platform, so the same study id twice is
     always the same submission. A repeated code alone is not: one
     researcher's recurring series reuses a single code across different study
     ids (C3YV0TJP came back under four of them), so a code counts as a repeat
@@ -1692,7 +1524,7 @@ def _dashboard_data() -> dict:
     except Exception:
         skipped = []
     return {"generated": time.time(), "runs": runs, "submissions": subs,
-            # Prolific's own SUMMARY block: the account's real lifetime totals,
+            # the platform's own SUMMARY block: the account's real lifetime totals,
             # and whether the local history is still being read in.
             "subs_header": dict(_submissions_cache.get("header") or {}),
             "subs_complete": bool(_submissions_cache.get("complete")),
@@ -2300,7 +2132,7 @@ def _daily_summary_text(day=None) -> str:
     speed = agent_core.model_speed()
     if speed:
         lines.append(f"🧠 Modello: {speed['median_gen_tps']:.1f} token/s (mediana recente)")
-    # Keep currencies separate: Prolific pays some studies in £ and others
+    # Keep currencies separate: the platform pays some studies in £ and others
     # in $/€, so summing them into one scalar silently misrepresents the day.
     by_cur: dict[str, float] = {}
     for s in list(_submissions_cache.get("data") or []):
@@ -2321,7 +2153,7 @@ def _daily_summary_text(day=None) -> str:
 
 def _fmt_money_by_cur(by_cur: dict[str, float]) -> str:
     """Join non-zero currency buckets with " + " so £ and $ stay separate.
-    Keeps the display honest when Prolific mixes GBP/USD studies in one day.
+    Keeps the display honest when the platform mixes GBP/USD studies in one day.
     """
     parts = [f"{sym}{amt:.2f}" for sym, amt in by_cur.items() if amt > 0]
     return " + ".join(parts) if parts else "£0.00"
@@ -2336,11 +2168,11 @@ def _earnings_text() -> str:
     """Earnings by the date the study was taken, plus the account's own totals.
 
     The periods are summed from the local submission store; the all-time
-    figures come from Prolific's SUMMARY block, which states them itself.
+    figures come from the platform's SUMMARY block, which states them itself.
     Summing the rows for an all-time total is what made this report read
     "£0.70 + $27.39 over 8 studies" while the page said £590.94 + $939.95
     over 559: only the first of 41 pages was ever read.
-    Per currency throughout, because Prolific pays some studies in £ and
+    Per currency throughout, because the platform pays some studies in £ and
     others in $ and the two are never added together.
     """
     from datetime import date, datetime as _dt, timedelta
@@ -2368,7 +2200,7 @@ def _earnings_text() -> str:
 
     for s in subs:
         status = (s.get("status") or "").lower()
-        if status not in _SUBS_PAID and status != "awaiting review":
+        if status not in sites.current.history_paid_statuses and status != "awaiting review":
             continue                   # returned / timed out / rejected pay nothing
         try:
             amt = float(s.get("reward") or 0)
@@ -2389,13 +2221,13 @@ def _earnings_text() -> str:
             continue
         for key, _label, since in PERIODS:
             if d >= since:
-                bucket, count = ((ok, n_ok) if status in _SUBS_PAID
+                bucket, count = ((ok, n_ok) if status in sites.current.history_paid_statuses
                                  else (wait, n_wait))
                 bucket[key][cur] = bucket[key].get(cur, 0.0) + amt
                 count[key] += 1
 
     lines = ["💰 Guadagni (per data di partecipazione)",
-             "   incassati = approvati + screening fee, come li conta Prolific"]
+             f"   incassati = approvati + screening fee, come li conta {sites.current.title}"]
     for key, label, _since in PERIODS:
         money = _fmt_money_by_cur(ok[key]) if ok[key] else "—"
         if n_ok[key] or n_wait[key]:
@@ -2413,7 +2245,7 @@ def _earnings_text() -> str:
                      + (f" su {header['approved']} studi approvati"
                         if header.get("approved") else ""))
     if header.get("balance"):
-        # Prolific's wallet converts everything to one currency: its "Pending"
+        # the platform's wallet converts everything to one currency: its "Pending"
         # £7.74 is the same money as the £2.85 + $6.71 awaiting review above,
         # at its own rate. Labelled as the wallet, not as a second "in
         # revisione", so two different-looking figures do not sit under one
@@ -2421,7 +2253,7 @@ def _earnings_text() -> str:
         bal = f"   Portafoglio: {_fmt_money_by_cur(header['balance'])} disponibili"
         if header.get("pending"):
             bal += (f" · {_fmt_money_by_cur(header['pending'])} in attesa "
-                    "(Prolific converte tutto in £)")
+                    f"({sites.current.title} converte tutto in £)")
         lines.append(bal)
     if header.get("total"):
         read = len(subs)
@@ -2593,15 +2425,17 @@ def _telegram_bot_loop():
                     if not state["running"]:
                         break
         try:
-            pw_bridge.reset_to("https://app.prolific.com/studies")
-            pw_bridge.wait_for_content()
+            home = agent_core.studies_url()
+            if home:
+                pw_bridge.reset_to(home)
+                pw_bridge.wait_for_content()
         except Exception:
             pass
         return _do_start(name)
 
     def _do_hardrestart() -> str:
         """Kill THIS gui_server process and relaunch it via scripts/restart.sh,
-        then navigate the browser to the Prolific studies list. The server
+        then navigate the browser to the platform's task list. The server
         comes back EMPTY (no agent running). Done through a detached shell so
         the script survives this very process being killed by its pkill step."""
         script = str(HERE.parent / "scripts" / "restart.sh")
@@ -2613,18 +2447,21 @@ def _telegram_bot_loop():
         # to respond, (4) navigates to the studies list. Each step tolerates
         # transient failures -- we don't want the browser-nav step to abort
         # the whole restart on a 1-second race.
-        studies_url = "https://app.prolific.com/studies"
+        studies_url = agent_core.studies_url()
         oneliner = (
             f"sleep 1 && "
             f"bash {shlex.quote(script)} > /tmp/fara-hardrestart.log 2>&1; "
             f"for i in $(seq 1 30); do "
             f"  curl -sf -o /dev/null --max-time 2 http://127.0.0.1:{port}/agent/status && break; "
             f"  sleep 1; "
-            f"done; "
-            f"curl -s -X POST http://127.0.0.1:{port}/navigate "
-            f"  -H 'Content-Type: application/json' "
-            f"  -d {shlex.quote(json.dumps({'url': studies_url}))} > /dev/null 2>&1 || true"
+            f"done"
         )
+        if studies_url:
+            oneliner += (
+                f"; curl -s -X POST http://127.0.0.1:{port}/navigate "
+                f"  -H 'Content-Type: application/json' "
+                f"  -d {shlex.quote(json.dumps({'url': studies_url}))} > /dev/null 2>&1 || true"
+            )
         try:
             subprocess.Popen(
                 ["bash", "-c", oneliner],
@@ -2633,7 +2470,8 @@ def _telegram_bot_loop():
             )
         except Exception as e:
             return f"❌ Non riesco a lanciare il restart: {e}"
-        return "🔄 Hard restart avviato: il server si ucciderà, ripartirà vuoto e il browser tornerà a app.prolific.com/studies."
+        where = studies_url.split("://", 1)[-1] if studies_url else "la pagina corrente"
+        return f"🔄 Hard restart avviato: il server si ucciderà, ripartirà vuoto e il browser tornerà a {where}."
 
     def _do_status() -> str:
         with state_lock:
@@ -2704,7 +2542,7 @@ def _telegram_bot_loop():
         except Exception:
             pass
 
-        # Submissions from Prolific (opens a tab briefly when agent is idle)
+        # Submissions from the platform (opens a tab briefly when agent is idle)
         try:
             subs = _agent_submissions()
             if subs:
@@ -2900,7 +2738,7 @@ def _submissions_auto_updater():
         try:
             # Skip if the cache is fresh -- unless history is still missing,
             # in which case every idle window is wanted until the store
-            # matches Prolific's own SUMMARY.
+            # matches the platform's own SUMMARY.
             if (time.time() - _submissions_cache["ts"] < 60
                     and _submissions_cache.get("complete")):
                 continue

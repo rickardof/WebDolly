@@ -96,6 +96,42 @@ class Site:
         """Guidance for a model stuck on a held task's detail page."""
         return ""
 
+    # --- the participant's identity on the platform ------------------------
+    #: A form field label/id that asks for the participant's platform ID.
+    participant_id_label_re = NEVER
+    #: URL query parameters the platform uses to pass that ID to a task.
+    participant_id_params: tuple = ()
+    #: What a valid ID looks like (fullmatch), and how to spot one in text.
+    participant_id_format = NEVER
+    participant_id_in_text = NEVER
+    #: identity.json keys older versions used for the ID.
+    participant_id_aliases: tuple = ()
+
+    # --- the account's history (read between cycles by the GUI server) ------
+    #: First page of the account's submission history ("" = no history).
+    history_url = ""
+    history_per_page = 20
+    #: JS that is true once a history page has rendered its rows.
+    history_ready_js = ""
+    #: A row's status badge, and the statuses the platform pays for.
+    history_status_re = NEVER
+    history_paid_statuses: tuple = ()
+
+    def parse_history_rows(self, raw_rows: list) -> list:
+        """One dict per submission on a history page (its text lines)."""
+        return []
+
+    def parse_history_header(self, rows: list) -> dict:
+        """The page's own account totals (balance, earned, counts)."""
+        return {}
+
+    def parse_history_last_page(self, rows: list) -> int:
+        return 1
+
+    def money(self, line: str):
+        """("£", 1.5) from a bare amount line, or None."""
+        return None
+
     # --- what the model is told -------------------------------------------
     def standing_rules(self, compact: bool = False) -> str:
         """Rules appended to every run's task on this site ("" = none)."""
@@ -113,6 +149,14 @@ class Site:
     # The generic wording below is used by any profile that does not supply
     # its own; texts that only make sense on a platform with a completion
     # contract return "", which the loop reads as "nothing to say".
+
+    def unattended_answer(self) -> str:
+        """Sent instead of a human answer when the model asks a question
+        during an unattended loop run."""
+        return ("You are running UNATTENDED in a 24/7 loop — no human will answer, so stop "
+                "asking questions (this is a standing rule). Decide for yourself and keep "
+                "going; if you genuinely cannot continue the current task, terminate and "
+                "move on. Never stop to ask again.")
 
     def nocode_refusal(self) -> str:
         """A NOCODE terminate on a task page whose task was never opened."""
