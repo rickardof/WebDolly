@@ -47,6 +47,7 @@ import study_memory
 import os
 import re
 import pw_bridge
+import sites
 
 FARA_URL   = os.environ.get("FARA_URL",   "http://127.0.0.1:8090/v1/chat/completions")
 FARA_MODEL = os.environ.get("FARA_MODEL", "Fara1.5-27B-Q4_K_M.gguf")
@@ -993,88 +994,74 @@ def get_current_url() -> str:
         return ""
 
 
-# Sections of the site the agent must never be in. The agent's whole job is to
-# take part in studies and, when none fits, wait for new ones; the profile
-# ("About you") questionnaire is not part of that, whatever the page nudges
-# it towards. Enforced here in code -- every step, every visit_url, every
-# cycle restart -- not left to the model's judgement or to prompt text.
-_FORBIDDEN_PATH = re.compile(r"^/(about-you|logout|sign-out|signout)(/|$)", re.IGNORECASE)
-
-
-# Only on the site that has such a section: a third-party survey that happens
-# to have an /about-you page must not be hijacked.
-_GUARDED_HOSTS = tuple(h.strip().lower() for h in
-                       os.environ.get("FARA_GUARDED_HOSTS", "prolific.com,prolific.co").split(",") if h.strip())
+# -- the platform's URL model ------------------------------------------------
+#
+# Everything below asks the active site profile (sites.current) what its URLs
+# mean. With the generic profile no URL belongs to a platform, so every one of
+# these answers "no" and the platform-only branches of the loop stay off.
 
 
 def _on_guarded_site(url: str) -> bool:
+    """True when `url` belongs to the active platform (its domain or a
+    subdomain). A third-party site -- the survey a task launches, a search
+    result -- never does, so platform rules never touch it."""
     try:
         host = (urlparse(url or "").hostname or "").lower()
-        return any(host == h or host.endswith("." + h) for h in _GUARDED_HOSTS)
+        return any(host == h or host.endswith("." + h) for h in sites.current.hosts)
     except Exception:
         return False
 
 
 def is_forbidden_url(url: str) -> bool:
+    """A section of the platform the agent must never be in (see the
+    profile's forbidden_path). Enforced in code -- every step, every
+    visit_url, every cycle restart -- not left to the model's judgement."""
     try:
-        return _on_guarded_site(url) and bool(_FORBIDDEN_PATH.match(urlparse(url).path or ""))
+        return _on_guarded_site(url) and bool(sites.current.forbidden_path.match(urlparse(url).path or ""))
     except Exception:
         return False
-
-
-# The agent's workspace is the APP host. Other hosts on the same guarded
-# domain -- www.prolific.com and its marketing pages -- are a different site
-# with no studies on it, yet every guard here treats them as "on Prolific"
-# because they share the domain. Wandering onto one burns a whole cycle: in
-# run_20261106_142347 the model typed www instead of app at step 1, landed on
-# /ai-task-builder, and spent 23 steps there and on /login before finding its
-# way back. Learnt from start_url at run start, so a different deployment
-# does not need a code change.
-_APP_HOST = (os.environ.get("FARA_APP_HOST") or "app.prolific.com").lower()
 
 
 def _learn_app_host(url: str) -> None:
-    global _APP_HOST
+    """Adopt the start URL's host as the platform's app host, so a different
+    deployment of the same platform needs no code change."""
     host = (urlparse(url or "").hostname or "").lower()
     if host and _on_guarded_site(url):
-        _APP_HOST = host
+        sites.current.app_host = host
 
 
 def _off_app_host(url: str) -> bool:
-    """On the guarded domain but NOT on the app host (the marketing site)."""
+    """On the platform's domain but NOT on its app host (e.g. its marketing
+    site): a different site that only shares the domain."""
     try:
         host = (urlparse(url or "").hostname or "").lower()
-        return bool(host) and _on_guarded_site(url) and host != _APP_HOST
+        app = sites.current.app_host
+        return bool(host) and bool(app) and _on_guarded_site(url) and host != app
     except Exception:
         return False
-
-
-_APP_VISITABLE_PREFIXES = ("/submissions", "/account", "/settings",
-                           "/data-collection-tool")
 
 
 def _unknown_app_path(url: str) -> bool:
     """A typed navigation to the app host that goes nowhere real.
 
     Clicking is unaffected -- this only rejects addresses the model composes
-    itself. run_20261108_154719 invented /study/<uuid> from a study it had
-    just been looking at, landed on Prolific's 404, and spent the rest of the
-    cycle trying to work out where the list had gone. Prolific's study ids
-    are 24 hex characters under /studies/, never a UUID under /study/, so a
-    made-up address is recognisable before it is loaded.
+    itself, which it has been seen to invent from a task's name or from an
+    id read elsewhere. A path that is not the list, not a task page and not
+    one of the profile's app_visitable_prefixes is refused before it loads.
     """
     try:
         if not _on_guarded_site(url):
             return False
+        site = sites.current
         host = (urlparse(url).hostname or "").lower()
-        if host != _APP_HOST:
-            return False          # handled by the marketing-site guard
+        if not site.app_host or host != site.app_host:
+            return False          # handled by the wrong-host guard
         path = urlparse(url).path or "/"
         norm = path.rstrip("/") or "/"
-        if norm == "/" or _LIST_PATH.match(path) or _STUDY_PATH.match(path):
+        if norm == "/" or site.home_path.match(path) or site.task_path.match(path):
             return False
         return not any(norm == p or norm.startswith(p + "/")
-                       for p in _APP_VISITABLE_PREFIXES)
+                       for p in site.app_visitable_prefixes)
     except Exception:
         return False
 
@@ -1083,48 +1070,9 @@ def _to_app_host(url: str) -> str:
     """Same path and query, moved onto the app host."""
     try:
         p = urlparse(url)
-        return urlunparse(p._replace(netloc=_APP_HOST))
+        return urlunparse(p._replace(netloc=sites.current.app_host))
     except Exception:
         return url
-
-
-_LIST_PATH = re.compile(r"^/studies/?$", re.IGNORECASE)
-_STUDY_PATH = re.compile(r"^/studies/([0-9a-fA-F]{24})/?$", re.IGNORECASE)
-_COMPLETE_PATH = re.compile(r"^/submissions/complete/?$", re.IGNORECASE)
-
-# Prolific "chrome" prefixes: pages where no study TASK is running yet -- the
-# account/submissions surfaces (the studies list and the per-study reservation
-# page are handled separately via _LIST_PATH / _STUDY_PATH).
-# Read off the live app's own navigation (2026-11-08): the in-app links are
-# / /balance-hub /studies /submissions /about-you /messages/unread
-# /desktop-app /referrals /account/general /account/preferences. Five of
-# those ten were missing here, so clicking any of them from the studies list
-# made _on_launch_surface answer "a task is running": run_20261108_181732
-# step 42 clicked "About you" in the top nav and the harness started a study
-# timer on /about-you, told the model it was inside a running survey and
-# pushed a "Studio iniziato" notification. The page-identity guard in
-# _reached_in_launch_tab covers the paths this tuple still does not name.
-_LAUNCH_CHROME_PREFIXES = ("/submissions", "/account", "/settings",
-                           "/about-you", "/balance-hub", "/messages",
-                           "/desktop-app", "/referrals")
-
-# Prolific's own error pages. They need naming explicitly because
-# _on_launch_surface answers "unknown path => a task is running": that
-# default is deliberate (it is what stops the wander guard cutting short a
-# first-party task at a path we have not catalogued, 1ffb26d), but it also
-# made a 404 look like a running study. run_20261108_154719 step 19 invented
-# the URL /study/<uuid> (singular, UUID -- not Prolific's /studies/<24hex>),
-# got redirected to /404, and the harness started a study timer on it,
-# switched the wander guard off and turned batch-fill, reading dwell and the
-# audio/video check loose on an error page.
-_ERROR_PATH = re.compile(
-    r"^/(40[0-9]|41[0-9]|50[0-9]|error|errors|not[-_]?found|maintenance)(/|$)",
-    re.IGNORECASE)
-
-
-# The only Prolific-HOSTED task surface we have ever seen. Named so the
-# page-identity guard below keeps an explicit escape hatch for it.
-_HOSTED_TASK_PATH = re.compile(r"^/data-collection-tool(/|$)", re.IGNORECASE)
 
 
 def _reached_in_launch_tab(url, cur_page_id, launch_page_id) -> bool:
@@ -1132,49 +1080,47 @@ def _reached_in_launch_tab(url, cur_page_id, launch_page_id) -> bool:
     plain navigation in the very tab that was showing the launch surface.
 
     _on_launch_surface answers "unknown path => a task is running" on
-    purpose (1ffb26d: it stops the wander guard cutting a first-party task
-    short at a path we have not catalogued). That default keeps producing
-    false positives -- /404 in run_20261108_154719, /about-you in
-    run_20261108_181732 -- so pair it with the invariant that actually
-    separates the two cases: a Prolific-hosted task is always opened in its
-    own window (the control is literally open-study-in-new-window-button),
-    so it never shares a page object with the studies list it was launched
-    from. Same-tab navigation off the launch surface into an unknown app
-    path is account chrome, not a study. A task that did navigate in place
-    would still be caught by _HOSTED_TASK_PATH."""
+    purpose (it stops the wander guard cutting a platform-hosted task short
+    at a path nobody catalogued). That default keeps producing false
+    positives -- an error page, an account section -- so pair it with the
+    invariant that actually separates the two cases: a platform-hosted task
+    is opened in its own window, so it never shares a page object with the
+    list it was launched from. Same-tab navigation off the launch surface
+    into an unknown app path is account chrome, not a task. A task that did
+    navigate in place is still caught by the profile's hosted_task_path."""
     if not _on_guarded_site(url):
         return False
-    if _HOSTED_TASK_PATH.match(urlparse(url).path or "/"):
+    if sites.current.hosted_task_path.match(urlparse(url).path or "/"):
         return False
     return (launch_page_id is not None and cur_page_id is not None
             and cur_page_id == launch_page_id)
 
 
 def _on_launch_surface(url: str) -> bool:
-    """True when `url` is a Prolific page where no study task is running yet:
-    the studies list, a per-study reservation/detail page, or account /
-    submissions chrome.
+    """True when `url` is a platform page where no task is running yet: the
+    task list, a task's detail/reservation page, platform chrome (account,
+    history, settings) or one of its error pages.
 
-    False for external survey domains AND for Prolific-hosted task tools such
-    as /data-collection-tool/... -- those ARE a running task. "Inside a task"
-    is defined as the negation of this (off the launch surface), so a
-    first-party Prolific survey gets the same study timer, abandonment
-    accounting and in-task framing as an external one. Keyed on the surface,
-    not on "left prolific.com", so the model stops mistaking a running
-    first-party task for the reservation page and cancelling a study it is
-    actually completing (run_20261105_111957, run_20261104_204916)."""
+    False for third-party hosts AND for platform-hosted task tools -- those
+    ARE a running task. "Inside a task" is defined as the negation of this
+    (off the launch surface), so a task the platform hosts itself gets the
+    same timer, abandonment accounting and in-task framing as one on another
+    host. Keyed on the surface, not on "left the platform's domain", so the
+    model does not mistake a running first-party task for the detail page
+    and cancel a task it is actually completing."""
     if not _on_guarded_site(url):
         return False
+    site = sites.current
     path = urlparse(url).path or "/"
-    if _LIST_PATH.match(path) or _STUDY_PATH.match(path):
+    if site.home_path.match(path) or site.task_path.match(path):
         return True
     norm = path.rstrip("/") or "/"
     if norm == "/":
         return True
-    if _ERROR_PATH.match(norm):
+    if site.error_path.match(norm):
         return True
     return any(norm == p or norm.startswith(p + "/")
-               for p in _LAUNCH_CHROME_PREFIXES)
+               for p in site.launch_chrome_prefixes)
 
 
 _FILLER = r"(?:is|below|here|in|on|into|to|prolific|please|enter|paste|copy|the|your|following|this)"
@@ -1283,9 +1229,9 @@ def completion_code(url: str) -> str:
     """
     try:
         pr = urlparse(url or "")
-        if not _on_guarded_site(url) or not _COMPLETE_PATH.match(pr.path or ""):
+        if not _on_guarded_site(url) or not sites.current.complete_path.match(pr.path or ""):
             return ""
-        cc = (parse_qs(pr.query).get("cc") or [""])[0].strip()
+        cc = (parse_qs(pr.query).get(sites.current.complete_code_param) or [""])[0].strip()
         return cc if re.fullmatch(r"[A-Za-z0-9_\-]{2,64}", cc) else ""
     except Exception:
         return ""
@@ -1316,15 +1262,10 @@ def completion_code_of(answer: str) -> str:
     return code
 
 
-_EMPTY_LIST_MARKERS = ("waiting for studies",)
-# "showing: 0/0 studies" (or "0 / 0") — Prolific's counter when the list is empty.
-_EMPTY_LIST_RE = re.compile(r"showing\s*:?\s*0\s*/\s*0\s*stud", re.IGNORECASE)
-
-
 def studies_list_state() -> str:
     """What the studies list shows right now, read from the DOM, no model.
 
-    "empty"   -- the list page with Prolific's waiting message
+    "empty"   -- the list page showing the platform's "nothing yet" message
     "studies" -- the list page without it, i.e. something to look at
     "unknown" -- not on the list, logged out, page not readable...
 
@@ -1332,21 +1273,21 @@ def studies_list_state() -> str:
     to a normal cycle, so a layout change costs a model call, never a study.
     """
     url = get_current_url()
-    if not url or not _on_guarded_site(url) or not _LIST_PATH.match(urlparse(url).path or ""):
+    if not url or not _on_guarded_site(url) or not sites.current.home_path.match(urlparse(url).path or ""):
         return "unknown"
     return list_state_from(url, _page_text(8000))
 
 
 def list_state_from(url: str, text: str) -> str:
     """The decision behind studies_list_state(), on a URL and the page text."""
-    if not url or not _on_guarded_site(url) or not _LIST_PATH.match(urlparse(url).path or ""):
+    if not url or not _on_guarded_site(url) or not sites.current.home_path.match(urlparse(url).path or ""):
         return "unknown"
     text = (text or "").lower()
     if not text.strip():
         return "unknown"
-    if any(m in text for m in _EMPTY_LIST_MARKERS):
+    if any(m in text for m in sites.current.empty_list_markers):
         return "empty"
-    if _EMPTY_LIST_RE.search(text):
+    if sites.current.empty_list_re.search(text):
         return "empty"
     return "studies"
 
@@ -1358,7 +1299,7 @@ CAPTURE_DIR = Path(os.environ.get("FARA_CAPTURE_DIR",
 def capture_page(kind: str) -> None:
     """Save the current page's HTML once per kind per day.
 
-    Real Prolific pages (a list with studies, a study page, the completion
+    Real platform pages (a list with tasks, a task page, the completion
     redirect, the return flow) are what the DOM tests and the code paths
     built on selectors need, and they only show up during real runs. They
     land in var/ (ignored by git: they carry the account's name and balance)
@@ -1377,8 +1318,9 @@ def capture_page(kind: str) -> None:
 
 
 def studies_url() -> str:
-    """Where to go back to when a study has to be abandoned."""
-    return os.environ.get("FARA_STUDIES_URL", "https://app.prolific.com/studies")
+    """Where to go back to when a study has to be abandoned (the platform's
+    task list), or "" when the active site has no such list."""
+    return sites.current.home_url()
 
 
 _DOM_HINT_JS = r"""(args) => {
@@ -2321,7 +2263,7 @@ class WanderGuard:
     def check(self, url: str) -> bool:
         if self.seconds <= 0:
             return False
-        if not _on_launch_surface(url) or _LIST_PATH.match(urlparse(url).path or ""):
+        if not _on_launch_surface(url) or sites.current.home_path.match(urlparse(url).path or ""):
             self.since = None
             return False
         now = self.clock()
@@ -2336,8 +2278,7 @@ class WanderGuard:
 
 def safe_page_for(url: str) -> str:
     """The list of studies on the same site as `url`."""
-    pr = urlparse(url)
-    return f"{pr.scheme}://{pr.netloc}/studies"
+    return sites.current.home_on(url)
 
 
 def loop_home_for(url: str) -> str:
@@ -2352,7 +2293,7 @@ def loop_home_for(url: str) -> str:
     sits on such a page: the home resolves to the studies list wherever it was
     started from, so only an actual guarded (Prolific) studies list is kept."""
     pr = urlparse(url or "")
-    if _on_guarded_site(url) and _LIST_PATH.match(pr.path or ""):
+    if _on_guarded_site(url) and sites.current.home_path.match(pr.path or ""):
         return safe_page_for(url)
     return studies_url()
 
@@ -3197,17 +3138,17 @@ def dispatch_action(action_type: str, args: dict) -> str:
             # the app's 404 instead of the marketing site's. Send it where it
             # was actually trying to go.
             if _unknown_app_path(fixed):
-                home = f"https://{_APP_HOST}/studies"
+                home = sites.current.app_home_url()
                 pw_bridge.goto(home)
                 return (f"visit_url {home} (CORRECTED: {target} is not a real "
                         f"page -- wrong host AND no such path. Study pages are "
-                        f"{_APP_HOST}/studies/<id> with the id exactly as the "
+                        f"{sites.current.app_host}/studies/<id> with the id exactly as the "
                         f"list links it; never build one from a name or a UUID. "
                         f"You are back on the studies list: click the study.)")
             pw_bridge.goto(fixed)
             return (f"visit_url {fixed} (CORRECTED: you asked for {target}, which is "
                     f"Prolific's public marketing site. The studies only exist on "
-                    f"{_APP_HOST} -- always use that host.)")
+                    f"{sites.current.app_host} -- always use that host.)")
         pw_bridge.goto(target)
         return f"visit_url {target}"
 
@@ -3601,11 +3542,11 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
                 flagged = d["qc_flag"]
             if d.get("timer_active") and not d.get("guarded"):
                 where["study"] += 1
-            elif d.get("guarded") and _LIST_PATH.match(urlparse(url).path or ""):
+            elif d.get("guarded") and sites.current.home_path.match(urlparse(url).path or ""):
                 where["list"] += 1
             else:
                 where["elsewhere"] += 1
-            m = _STUDY_PATH.match(urlparse(url).path or "")
+            m = sites.current.task_path.match(urlparse(url).path or "")
             if m and m.group(1) not in studies:
                 studies.append(m.group(1))
             if d.get("code_source"):
@@ -3970,7 +3911,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # (run_20261106_142347). Never fires inside a study: an external
             # survey is not on the guarded domain at all.
             if _off_app_host(here):
-                back = f"https://{_APP_HOST}/studies"
+                back = sites.current.app_home_url()
                 _live({"type": "notice",
                        "text": f"[guard] off the app host ({urlparse(here).hostname}) "
                                f"-> back to {back}"})
@@ -3988,7 +3929,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                         f"advertises Prolific to researchers and has no studies, no "
                         f"study list and no account of yours on it. You have been "
                         f"returned to {back}. The studies only ever live on "
-                        f"{_APP_HOST} -- stay on it.")
+                        f"{sites.current.app_host} -- stay on it.")
             _timer_started_this_step = False
             # Proactive, cache-aware compaction at natural checkpoints: when
             # we cross the Prolific/external boundary (either direction),
@@ -4079,7 +4020,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     continue
 
             # Reset timer when back at the studies list (timer re-arms for next study).
-            on_list = here_guarded and bool(_LIST_PATH.match(urlparse(here).path or ""))
+            on_list = here_guarded and bool(sites.current.home_path.match(urlparse(here).path or ""))
             if on_list:
                 study_timer.reset()
                 _restore_user_speed()
@@ -4117,7 +4058,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             # description; on an external questionnaire only real media
             # elements count, because aborting a survey halfway on a false
             # positive costs much more than one wasted click.
-            m_study = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
+            m_study = sites.current.task_path.match(urlparse(here).path or "") if here_guarded else None
             if m_study:
                 _current_study_id = m_study.group(1)
                 capture_page("study")
@@ -4178,8 +4119,8 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
                     "taken back to the list of studies. Do not open it again: pick another "
                     "study, or follow your task instructions if none is eligible.")
                 label = f"«{title}»" if title else "lo studio aperto"
-                link = (f"\nhttps://app.prolific.com/studies/{key}"
-                        if _STUDY_PATH.match(f"/studies/{key}") else "")
+                link = (f"\n{sites.current.task_url(key)}"
+                        if sites.current.task_url(key) else "")
                 _notify_telegram(f"⏭ Studio saltato: {label}\n{skip_reason}{link}\n"
                                  "Se ti interessa, puoi farlo a mano.")
                 injected = yield {"type": "notice",
@@ -4633,7 +4574,7 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
             #   (B) loop-detector: count explicit abort attempts PLUS any step
             #       that ends on the same detail URL without progress; fire the
             #       nudge after 2 abort attempts or 6 stuck steps.
-            m_resv = _STUDY_PATH.match(urlparse(here).path or "") if here_guarded else None
+            m_resv = sites.current.task_path.match(urlparse(here).path or "") if here_guarded else None
             if m_resv:
                 detail_id = m_resv.group(1)
                 # A visit to a different detail page resets everything for it.

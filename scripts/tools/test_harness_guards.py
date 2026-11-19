@@ -107,14 +107,14 @@ check("rewrite keeps path and query",
       ac._to_app_host(WWW + "/studies?filter=available") == APP + "/studies?filter=available")
 check("rewrite is a no-op on the app host", ac._to_app_host(APP + "/studies") == APP + "/studies")
 
-_saved = ac._APP_HOST
+_saved = ac.sites.current.app_host
 ac._learn_app_host("https://app.prolific.co/studies")
-check("app host is learnt from start_url", ac._APP_HOST == "app.prolific.co")
+check("app host is learnt from start_url", ac.sites.current.app_host == "app.prolific.co")
 check("...and then www on THAT domain is flagged",
       ac._off_app_host("https://www.prolific.co/x") and not ac._off_app_host("https://app.prolific.co/x"))
 ac._learn_app_host("https://eval.services/survey")
-check("a non-guarded start_url does not move it", ac._APP_HOST == "app.prolific.co")
-ac._APP_HOST = _saved
+check("a non-guarded start_url does not move it", ac.sites.current.app_host == "app.prolific.co")
+ac.sites.current.app_host = _saved
 
 t = trail("run_20261106_142347")
 if t is None:
@@ -163,7 +163,7 @@ check("fires nowhere but the launch surface",
       ac._on_launch_surface(_LIST) and not ac._on_launch_surface(TASK))
 src = open(os.path.join(ROOT, "agent", "agent_core.py")).read()
 check("the guard keys on the launch surface, not the host",
-      "if not _on_launch_surface(url) or _LIST_PATH.match(" in src)
+      "if not _on_launch_surface(url) or sites.current.home_path.match(" in src)
 t = trail("run_20261106_084555")
 if t is None:
     skip("replay run_20261106_084555", "transcript pruned")
