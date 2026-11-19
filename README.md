@@ -5,8 +5,11 @@ WebDolly is an agent that uses a real browser for you. A vision-language model
 and decides where to click and what to type. You describe who you are (context)
 and what to do (task) in a small web panel, and the agent does it.
 
-It was built for filling in online surveys and studies (for example on Prolific)
-with a persona you define, but the task is free text, so it can drive any website.
+The task is free text, so it can drive any website. What the agent knows about a
+particular site lives in a **site profile** (see [docs/site-profiles.md](docs/site-profiles.md)):
+with the default `generic` profile it is a plain browser agent; the included
+`prolific` profile adds everything needed to take part in studies on Prolific
+with a persona you define (task list, launch flow, completion codes, time limits).
 
 Everything runs on your own machine: the model, the browser and the control panel.
 The model can also be a remote API instead, in which case no GPU is needed.
@@ -135,6 +138,7 @@ Main settings:
 | Loop + pause | after a cycle, wait N seconds and start again (for example to keep checking for new studies) |
 | Batch fill | on long forms, decide all answers in one model call instead of field by field |
 | Go to URL | page to open before starting |
+| Site profile | which site profile the run uses; *automatico* picks it from the URL (see [docs/site-profiles.md](docs/site-profiles.md)) |
 | Max steps | step limit per cycle |
 
 Optional files (copy the `.example` next to each one; they are git-ignored because
@@ -166,8 +170,9 @@ Set environment variables before starting (everything has a default).
 | `FARA_MODEL` | `Fara1.5-27B-Q4_K_M.gguf` | model name sent in requests |
 | `FARA_API_KEY` | empty | set it to use a hosted model (adds the auth header and HTTPS) |
 | `FARA_PORT` | `8766` | panel port (Windows scripts) |
-| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | sites where account and logout pages are off limits |
-| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | where to return when a study is abandoned |
+| `FARA_SITE` | `auto` | site profile: `generic`, `prolific`, or `auto` to pick it per run |
+| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | Prolific profile: the domains it owns |
+| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | Prolific profile: where to return when a study is abandoned |
 | `FARA_ENABLE_THINKING` | `0` | `1` keeps the model's thinking (worse clicks on the 9B) |
 | `FARA_BRIDGE_WATCHDOG` | `1` | `0` disables the auto-restart described below |
 | `FARA_BRIDGE_WEDGE_SECS` | `240` | how long the browser bridge may be stuck before the watchdog acts |
@@ -216,6 +221,7 @@ venv_pw\Scripts\python.exe tests\submissions_parse_test.py
 venv_pw\Scripts\python.exe tests\qc_flag_test.py
 venv_pw\Scripts\python.exe tests\run_counting_test.py
 venv_pw\Scripts\python.exe scripts\tools\test_harness_guards.py
+venv_pw\Scripts\python.exe tests\site_profiles_test.py
 ```
 
 On Linux use `venv_pw/bin/python`. The other scripts in `agent/` and `tests/`
@@ -225,16 +231,17 @@ On Linux use `venv_pw/bin/python`. The other scripts in `agent/` and `tests/`
 ## Project layout
 
 ```
-agent/        agent code: agent_core.py (loop and safety rules), pw_bridge.py
+agent/        agent code: agent_core.py (the generic loop), pw_bridge.py
               (Playwright bridge), form_fill_pw.py (batch fill), gui_server.py and
               gui_index.html (the panel)
+agent/sites/  site profiles: base.py (generic), prolific/ (Prolific)
 docker/       images: browser (Chromium + Xvfb + xdotool) and browser-pw (+ socat)
 scripts/      setup, start, stop and restart; windows/ has the PowerShell versions,
               cloud/ the VM deployment
 fixtures/     test pages
 tests/        offline and end-to-end tests
 bench/        model benchmarks
-docs/         detailed reference (Italian)
+docs/         site profiles guide, detailed reference (Italian)
 models/       GGUF model files (not in git)
 var/          logs, screenshots and the browser profile (not in git, personal data)
 ```
