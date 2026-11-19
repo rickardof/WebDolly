@@ -2,6 +2,7 @@
 independently by reading the final DOM, never by trusting form_fill's own
 report."""
 import sys, time, json, os, urllib.request
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import pw_bridge as pb, form_fill_pw as ff
 import agent_core  # noqa: F401 -- importing injects the real-input (xdotool) backend into form_fill_pw
 

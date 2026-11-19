@@ -21,6 +21,7 @@ What a replay can and cannot show:
           a test never opens the real survey.
 """
 import json, os, sys, time
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXDIR = os.environ.get("FARA_FIXTURE_DIR",

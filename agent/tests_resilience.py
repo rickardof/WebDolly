@@ -25,6 +25,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import os
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import agent_core as ac
 import study_cache
 

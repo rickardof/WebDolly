@@ -22,6 +22,7 @@ against 64 real ones over a month of runs):
 
 import json
 import os
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import sys
 import types
 

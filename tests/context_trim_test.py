@@ -16,6 +16,7 @@ These are the two regressions this file prevents:
 """
 
 import os
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import sys
 import types
 

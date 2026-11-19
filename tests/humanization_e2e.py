@@ -22,6 +22,7 @@ Run:  python3 tests/humanization_e2e.py
 import json
 import math
 import os
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import random
 import subprocess
 import sys

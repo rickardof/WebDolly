@@ -3,10 +3,12 @@
 
 Usage:
   ./controller.py "Click the BLUE button." --url file:///data/test.html
+  ./controller.py "Take an eligible study." --site prolific
 """
 
 import argparse
 
+import sites
 from agent_core import run_agent
 
 
@@ -15,7 +17,9 @@ def main():
     parser.add_argument("task")
     parser.add_argument("--url", default="")
     parser.add_argument("--max-rounds", type=int, default=10)
+    parser.add_argument("--site", default="", help="site profile (default: auto, from --url)")
     cli_args = parser.parse_args()
+    sites.use(sites.resolve(cli_args.site, cli_args.url), remember=True)
 
     gen = run_agent(cli_args.task, cli_args.url, cli_args.max_rounds)
     try:

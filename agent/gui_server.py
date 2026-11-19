@@ -818,6 +818,8 @@ def _status_payload(since: int = 0, with_events: bool = True, fresh_url: bool = 
     payload["url"] = _cached_url() if fresh_url else _url_cache["v"]
     payload["speed"] = agent_core.speed_state()
     payload["model"] = agent_core.model_speed()
+    payload["site"] = sites.current.name
+    payload["sites"] = sites.names()
     return payload
 
 
@@ -1113,6 +1115,13 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
     When the Pusher listener is connected, react instantly to push events
     instead of sleeping the full poll_interval between DOM checks."""
     every = max(float(poll_interval or 0), LIST_CHECK_MIN_SECONDS)
+    if not sites.current.home_url():
+        # A site with no task list: there is no list to watch, so the next
+        # cycle simply starts after the pause, from the start page again.
+        if stop_event.wait(every):
+            return True
+        _refresh_list(home_url)
+        return False
     since = time.time()
     checks = 0
     unknowns = 0
@@ -1190,10 +1199,38 @@ def _wait_for_studies(home_url: str, poll_interval: float, stop_event) -> bool:
                              "pusher": pl.connected})
 
 
+def _choose_site(site: str, url: str) -> str:
+    """Activate the site profile for a run (see sites.resolve) and say which.
+    The browser's current page is only looked at when the run has no start
+    URL of its own."""
+    current_url = ""
+    if not url and not site and not sites.configured():
+        try:
+            current_url = get_current_url()
+        except Exception:
+            current_url = ""
+    name = sites.resolve(site, url, current_url)
+    sites.use(name, remember=True)
+    with state_lock:
+        state["site"] = name
+    _push_event({"type": "notice", "text": f"Profilo sito: {name}"})
+    return name
+
+
 def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval: float,
-                  batch_fill: bool = False, wander_seconds: float = 0, skip_av: bool = False):
+                  batch_fill: bool = False, wander_seconds: float = 0, skip_av: bool = False,
+                  site: str = ""):
     stop_event = state["stop_event"]
     answer_queue = state["answer_queue"]
+    try:
+        _choose_site(site, url)
+    except ValueError as e:
+        _push_event({"type": "error", "message": str(e)})
+        with state_lock:
+            state["running"] = False
+            state["stopping"] = False
+        _publish_state()
+        return
     # Each cycle starts a FRESH conversation, with no memory of earlier
     # cycles. Threading history made the model anchor on old conclusions:
     # with 3 studies on screen it answered "still shows exactly one
@@ -1817,7 +1854,8 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(
                     target=agent_driver,
                     args=(task, url, max_rounds, loop, poll_interval, batch_fill, wander_seconds,
-                          skip_av), daemon=True,
+                          skip_av),
+                    kwargs={"site": str(body.get("site", "") or "")}, daemon=True,
                 ).start()
                 return self._send_json({"ok": True})
 
@@ -1890,6 +1928,8 @@ class Handler(BaseHTTPRequestHandler):
                     "poll_interval": float(body.get("poll_interval", 60)),
                     "batch_fill": bool(body.get("batch_fill", False)),
                     "wander_seconds": max(0.0, float(body.get("wander_seconds", 90))),
+                    # "" = automatic (see sites.resolve)
+                    "site": str(body.get("site", "") or ""),
                 }
                 save_preset(preset)
                 return self._send_json({"ok": True})
@@ -2410,6 +2450,7 @@ def _telegram_bot_loop():
                 max(0.0, float(p.get("wander_seconds", 90))),
                 bool(p.get("skip_av", False)),
             ),
+            kwargs={"site": str(p.get("site", "") or "")},
             daemon=True,
         ).start()
         return f"▶️ Agente avviato — preset: {p.get('name', '?')}"

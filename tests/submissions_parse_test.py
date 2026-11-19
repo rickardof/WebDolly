@@ -10,6 +10,7 @@ Two bugs this file guards against, both silent until the display looks wrong:
 """
 
 import os
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 import sys
 import types
 

@@ -17,6 +17,7 @@ Why these live in the repo: this suite was twice written into /tmp and twice
 lost to a reboot. Tests that evaporate are not tests.
 """
 import json, os, random, re, sys, types
+os.environ.setdefault("FARA_SITE", "prolific")  # this suite exercises the Prolific site profile
 from urllib.parse import urlparse
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

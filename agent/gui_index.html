@@ -771,6 +771,11 @@
               <div class="ctl"><label class="switch"><input type="checkbox" id="navigateOnStart"><span class="slider"></span></label></div>
             </div>
             <div class="opt">
+              <span class="oi"><i data-ic="globe" data-s="16"></i></span>
+              <div class="lbl"><b>Profilo del sito</b><span>Cosa sa l'agente del sito. «Automatico» lo sceglie dall'indirizzo: una piattaforma conosciuta, altrimenti nessuna regola specifica (generico).</span></div>
+              <div class="ctl"><div class="sel"><select id="siteSelect" aria-label="Profilo del sito"><option value="">automatico</option></select><i data-ic="chevdown" data-s="15"></i></div></div>
+            </div>
+            <div class="opt">
               <span class="oi"><i data-ic="home" data-s="16"></i></span>
               <div class="lbl"><b>Rientro automatico agli studi</b><span>Sulla piattaforma ma fuori dall'elenco per più di tanti secondi, senza svolgere uno studio: torna all'elenco. 0 = spento.</span></div>
               <div class="ctl"><input type="number" id="wanderSecs" value="90" min="0" max="3600"><span class="unit">s</span></div>
@@ -1047,7 +1052,7 @@ $('runBtn').onclick = async () => {
   const res = await postJSON('/start_agent', {
     task, url, max_rounds: parseInt($('maxRounds').value, 10) || 20, loop: $('loopBox').checked,
     poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
-    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked,
+    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked, site: $('siteSelect').value,
   });
   if (res.error) { addRow(errorRow(res.error, Date.now() / 1000)); notify(res.error, 'bad'); }
 };
@@ -1160,6 +1165,7 @@ $('loadPresetBtn').onclick = () => {
   $('batchFillBox').checked = !!p.batch_fill;
   $('skipAvBox').checked = !!p.skip_av;
   $('wanderSecs').value = p.wander_seconds ?? 90;
+  $('siteSelect').value = p.site || '';
   $('navigateOnStart').checked = false;   // loading a preset must never auto-send the agent to a URL
   $('presetNameBox').value = p.name; saveDraft(); syncCounts(); syncNavPreview();
   $('taskErr').classList.remove('show');
@@ -1171,7 +1177,7 @@ $('savePresetBtn').onclick = async () => {
   const res = await api('/presets', { name, context: $('contextBox').value, task: $('taskBox').value, url: $('urlBox').value,
     max_rounds: parseInt($('maxRounds').value, 10) || 60, loop: $('loopBox').checked,
     poll_interval: parseFloat($('pollInterval').value) || 60, batch_fill: $('batchFillBox').checked,
-    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked });
+    wander_seconds: wanderValue(), skip_av: $('skipAvBox').checked, site: $('siteSelect').value });
   await loadPresetList(); $('presetSelect').value = name;
   if (!res.error) notify(`Preset «${name}» salvato.`, 'ok', 2400);
 };
@@ -1551,6 +1557,17 @@ function applyState(d) {
   if (!d.running || !d.study_timer) { if (stimer.active) setTimer(null); }
   else if (!stimer.active) setTimer(d.study_timer);     // seed on load; live events keep it ticking
   if (d.running) $('skipAvBox').checked = !!d.skip_av;
+  if (Array.isArray(d.sites)) {
+    // The profiles the server knows. Filled once, keeping the user's choice.
+    const ss = $('siteSelect');
+    if (ss.options.length !== d.sites.length + 1) {
+      const keep = ss.value;
+      ss.innerHTML = '<option value="">automatico</option>';
+      d.sites.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; ss.appendChild(o); });
+      ss.value = d.sites.includes(keep) ? keep : '';
+    }
+    ss.title = d.site ? `Profilo in uso: ${d.site}` : '';
+  }
   applyModel(d.model);
   pendingQuestion = d.pending_question; renderAsk();
   const s = d.stats || {};

@@ -2210,20 +2210,21 @@ def safe_page_for(url: str) -> str:
 
 
 def loop_home_for(url: str) -> str:
-    """The page a loop cycle must return to between studies: always the
-    the platform studies list.
+    """The page a loop cycle must return to between tasks: on a platform,
+    always its task list; on a site with no profile, the page the loop was
+    started from.
 
-    A study detail page, a submission/completion page, or an external survey
-    host (a finished study's own "thank you / Return to the platform" page) is
+    On a platform, a task detail page, a submission/completion page, or an
+    external survey host (a finished task's own "thank you / return" page) is
     never a valid home. Returning there each cycle makes the loop re-open a
-    completed study and re-read its code instead of looking for a new one.
+    completed task and re-read its code instead of looking for a new one.
     This also protects against the loop being (re)started while the browser
-    sits on such a page: the home resolves to the studies list wherever it was
-    started from, so only an actual guarded (platform) studies list is kept."""
+    sits on such a page: the home resolves to the task list wherever it was
+    started from, so only an actual task list on the platform is kept."""
     pr = urlparse(url or "")
     if _on_guarded_site(url) and sites.current.home_path.match(pr.path or ""):
         return safe_page_for(url)
-    return studies_url()
+    return studies_url() or url
 
 
 def _close_extra_tabs():
@@ -3324,7 +3325,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         _last_guarded_deadline: float | None = None
         _prev_was_guarded: bool = False  # tracks previous step's site so ANY action triggers timer
         _model_moved_viewport: bool = False  # last action was the model's own scroll/page key
-        _prev_on_launch: bool = True  # prev step was on the platform launch surface (list/detail/chrome)
+        # Prev step was on the platform's launch surface (list/detail/chrome).
+        # Leaving it is what starts the task timer, so on a site with no
+        # platform profile there is no surface to leave and no timer.
+        _prev_on_launch: bool = bool(sites.current.hosts)
         # Page object the launch surface was last seen in, and the chrome
         # URLs we have already explained once (see _reached_in_launch_tab).
         _launch_page_id = None
@@ -3926,7 +3930,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
 
             if step == 1:
                 resume_hint = ""
-                if not on_list:
+                # Off the task list at step 1 means a cycle is resuming work a
+                # previous one started -- on a platform. A site with no task
+                # list has no such thing as resuming.
+                if not on_list and sites.current.home_url():
                     resume_hint = f"\n\nCurrent URL: {here}\n"
                     if here_guarded and m_study:
                         resume_hint += sites.current.resume_on_task_page()
