@@ -149,6 +149,20 @@ agent/identity.json.example      ->  agent/identity.json       fields the agent 
 agent/telegram_config.py.example ->  agent/telegram_config.py  Telegram bot, see below
 ```
 
+### Site profiles
+
+A site profile is what the agent knows about one website: its pages, its
+buttons, the rules the model follows there. Two come with the code, `generic`
+(any website, no special rules) and `prolific`. The full guide is
+[docs/site-profiles.md](docs/site-profiles.md):
+
+- [choose the profile](docs/site-profiles.md#which-profile-is-used): the
+  *Profilo del sito* menu, `FARA_SITE`, or automatic from the URL;
+- [what the generic profile does](docs/site-profiles.md#what-the-generic-profile-changes);
+- [customise the Prolific profile](docs/site-profiles.md#customising-the-prolific-profile):
+  the rules the model follows, the domains and URLs it uses;
+- [add a profile for another site](docs/site-profiles.md#adding-a-platform).
+
 ### Telegram (optional)
 
 1. In Telegram, talk to **@BotFather**, send `/newbot` and copy the token.

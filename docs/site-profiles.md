@@ -53,6 +53,49 @@ With `generic` the loop is a plain browser agent:
 Batch form filling, human-like input, stuck detection and the page-change
 hints work the same on every site.
 
+## Customising the Prolific profile
+
+Everything Prolific-specific is in two files:
+[agent/sites/prolific/\_\_init\_\_.py](../agent/sites/prolific/__init__.py) (pages,
+rules, texts) and
+[agent/sites/prolific/submissions.py](../agent/sites/prolific/submissions.py)
+(reading the submission history).
+
+**Without touching code**, set environment variables before starting:
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | the domains the profile owns |
+| `FARA_APP_HOST` | `app.prolific.com` | the host the studies live on (also learnt from the start URL) |
+| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | the list each cycle returns to |
+
+**The rules the model follows** on Prolific are appended to every run's task.
+They are two texts in `agent/sites/prolific/__init__.py`:
+
+- `_STANDING_RULES_FULL`, used at normal speed;
+- `_STANDING_RULES_COMPACT`, used in the faster speed modes.
+
+Edit them there, for example to change which studies to prefer or skip. Keep
+the two versions consistent, and keep them short: rules buried in a long text
+were measured to be ignored. Your own instructions for one kind of run belong
+in the task or the context in the panel (and in a preset), not here.
+
+**Other texts and patterns** in the same file, each with a comment explaining
+why it exists:
+
+| Name | What it is |
+|---|---|
+| `_DEAD_END_MARKERS` | page wording that means a study cannot be done (not eligible, full, already done, screened out) |
+| `_SEL_RESERVE`, `_SEL_OPEN_DIALOG`, `_SEL_DIALOG`, `_SEL_START` | the buttons of the study launch dialog |
+| `_COMPLETION_RETURN_JS`, `_NOCODE_LINK_JS` | how the "return to Prolific" and "I didn't receive a completion code" controls are found |
+| `_TIME_REMAINING_RE` | Prolific's countdown for a reserved study |
+| `reservation_nudge()`, `nocode_refusal()`, `completion_pushback_text()`, ... | what the model is told in each situation |
+| `_UNATTENDED_ANSWER` | the answer given in place of a human during loop runs |
+
+If Prolific changes its pages, these are the places to update. After a change,
+run the offline tests (see the README); `scripts/tools/test_harness_guards.py`
+covers most of this file.
+
 ## Adding a platform
 
 1. Create `agent/sites/<name>/__init__.py` with a subclass of `sites.base.Site`.
