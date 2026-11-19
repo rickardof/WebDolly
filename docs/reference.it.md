@@ -47,8 +47,7 @@ API la GPU non serve: vedi [Esecuzione su VM cloud](#esecuzione-su-vm-cloud).
 Il resto del documento: [Requisiti](#requisiti-e-hardware) · [Setup](#setup-una-tantum) ·
 [GUI](#come-si-usa-la-gui) · [Guardrail](#guardrail) · [Velocità](#modalità-di-velocità) ·
 [Telegram](#controllo-da-telegram) · [API HTTP](#api-http-tutto-su-loopback) ·
-[Variabili d'ambiente](#variabili-dambiente) · [Test](#test-e-benchmark) ·
-[cosa manca](../NEXT_STEPS.md).
+[Variabili d'ambiente](#variabili-dambiente) · [Test](#test-e-benchmark).
 
 ## Requisiti e hardware
 

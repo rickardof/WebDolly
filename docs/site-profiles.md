@@ -53,7 +53,10 @@ With `generic` the loop is a plain browser agent:
 Batch form filling, human-like input, stuck detection and the page-change
 hints work the same on every site.
 
-## Customising the Prolific profile
+## Customising an included profile
+
+The included platform profile is `prolific`.
+
 
 Everything Prolific-specific is in two files:
 [agent/sites/prolific/\_\_init\_\_.py](../agent/sites/prolific/__init__.py) (pages,

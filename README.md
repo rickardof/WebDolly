@@ -7,9 +7,11 @@ and what to do (task) in a small web panel, and the agent does it.
 
 The task is free text, so it can drive any website. What the agent knows about a
 particular site lives in a **site profile** (see [docs/site-profiles.md](docs/site-profiles.md)):
-with the default `generic` profile it is a plain browser agent; the included
-`prolific` profile adds everything needed to take part in studies on Prolific
-with a persona you define (task list, launch flow, completion codes, time limits).
+with the default `generic` profile it is a plain browser agent, and a profile for
+a specific platform adds what working on it takes: its task list, how a task is
+launched and handed back, completion codes, time limits and the rules to follow
+there. One such profile is included; the guide explains how to customise it or add
+your own.
 
 Everything runs on your own machine: the model, the browser and the control panel.
 The model can also be a remote API instead, in which case no GPU is needed.
@@ -152,14 +154,15 @@ agent/telegram_config.py.example ->  agent/telegram_config.py  Telegram bot, see
 ### Site profiles
 
 A site profile is what the agent knows about one website: its pages, its
-buttons, the rules the model follows there. Two come with the code, `generic`
-(any website, no special rules) and `prolific`. The full guide is
+buttons, the rules the model follows there. Two come with the code: `generic`
+(any website, no special rules) and one for an online research-study platform.
+The full guide is
 [docs/site-profiles.md](docs/site-profiles.md):
 
 - [choose the profile](docs/site-profiles.md#which-profile-is-used): the
   *Profilo del sito* menu, `FARA_SITE`, or automatic from the URL;
 - [what the generic profile does](docs/site-profiles.md#what-the-generic-profile-changes);
-- [customise the Prolific profile](docs/site-profiles.md#customising-the-prolific-profile):
+- [customise an included profile](docs/site-profiles.md#customising-an-included-profile):
   the rules the model follows, the domains and URLs it uses;
 - [add a profile for another site](docs/site-profiles.md#adding-a-platform).
 
@@ -184,16 +187,15 @@ Set environment variables before starting (everything has a default).
 | `FARA_MODEL` | `Fara1.5-27B-Q4_K_M.gguf` | model name sent in requests |
 | `FARA_API_KEY` | empty | set it to use a hosted model (adds the auth header and HTTPS) |
 | `FARA_PORT` | `8766` | panel port (Windows scripts) |
-| `FARA_SITE` | `auto` | site profile: `generic`, `prolific`, or `auto` to pick it per run |
-| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | Prolific profile: the domains it owns |
-| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | Prolific profile: where to return when a study is abandoned |
+| `FARA_SITE` | `auto` | site profile by name (see the guide), or `auto` to pick it per run |
 | `FARA_ENABLE_THINKING` | `0` | `1` keeps the model's thinking (worse clicks on the 9B) |
 | `FARA_BRIDGE_WATCHDOG` | `1` | `0` disables the auto-restart described below |
 | `FARA_BRIDGE_WEDGE_SECS` | `240` | how long the browser bridge may be stuck before the watchdog acts |
 
 The full list, plus the agent's safety rules, speed modes, the HTTP API, the
 dashboard, logs and cloud deployment, is in [docs/reference.it.md](docs/reference.it.md)
-(Italian). Planned work is in [NEXT_STEPS.md](NEXT_STEPS.md) (Italian).
+(Italian). Variables that belong to one site profile are listed in
+[docs/site-profiles.md](docs/site-profiles.md).
 
 ## Troubleshooting
 
@@ -248,7 +250,7 @@ On Linux use `venv_pw/bin/python`. The other scripts in `agent/` and `tests/`
 agent/        agent code: agent_core.py (the generic loop), pw_bridge.py
               (Playwright bridge), form_fill_pw.py (batch fill), gui_server.py and
               gui_index.html (the panel)
-agent/sites/  site profiles: base.py (generic), prolific/ (Prolific)
+agent/sites/  site profiles: base.py (generic) and one directory per platform
 docker/       images: browser (Chromium + Xvfb + xdotool) and browser-pw (+ socat)
 scripts/      setup, start, stop and restart; windows/ has the PowerShell versions,
               cloud/ the VM deployment
