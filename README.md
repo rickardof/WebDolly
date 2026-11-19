@@ -15,15 +15,16 @@ WebDolly is an agent that uses a real browser for you. You describe who you are
 vision-language model ([Fara 1.5](https://huggingface.co/microsoft/Fara1.5-27B))
 looks at the screen and decides where to click and what to type.
 
-You write no script: no selectors, no recorded steps. The agent works from the
-pixels on the screen, the way a person does, so a page it has never seen, a
+You write no script: no selectors, no recorded steps. The model decides from
+what is on the screen, the way a person does, so a page it has never seen, a
 changed layout, a pop-up, a canvas or a hand-made widget is simply the next
-screenshot to deal with, and every action is checked against the screenshot
-that follows it. Its input does not go through the browser's automation
-protocol: clicks, scrolls and keystrokes come from the window system, as from a
-physical mouse and keyboard, with a pointer that travels to its target and
-typing that has a rhythm. Playwright is only used to read the page and open
-addresses.
+screenshot to deal with. The page's DOM is read too, through Playwright, where
+it is the better source: the text on the page, the fields of a long form (which
+can be answered in one go), whether the last click changed anything. Whatever
+it reads, it acts the same way: clicks, scrolls and keystrokes come from the
+window system, as from a physical mouse and keyboard, not through the
+browser's automation protocol, with a pointer that travels to its target and
+typing that has a rhythm.
 
 The task is free text, so it can drive any website. What the agent knows about a
 particular site lives in a **site profile** (see [docs/site-profiles.md](docs/site-profiles.md)):
