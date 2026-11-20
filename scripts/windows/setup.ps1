@@ -39,9 +39,14 @@ Invoke-Docker build -t fara-browser-pw docker/browser-pw/ | Select-Object -Last 
 Write-Host '== container del browser (fara-browser-pw) =='
 New-Item -ItemType Directory -Force (Join-Path $Root 'var\logs\pw'), (Join-Path $Root 'var\profiles\pw') | Out-Null
 try { Invoke-Docker rm -f fara-browser-pw | Out-Null } catch { }
+# Chromium runs with its own sandbox; FARA_NO_SANDBOX=1 turns it off for a host
+# whose kernel has no user namespaces (see docs\security.md).
+$sandboxEnv = @(); if ($env:FARA_NO_SANDBOX -eq '1') { $sandboxEnv = @('-e', 'FARA_NO_SANDBOX=1') }
 Invoke-Docker run -d --name fara-browser-pw --restart unless-stopped `
     --network fara-net --shm-size 64m `
     --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 `
+    --security-opt "seccomp=$Root\docker\seccomp-chromium.json" `
+    @sandboxEnv `
     -p 127.0.0.1:9333:9333 -p 127.0.0.1:5901:5900 `
     -v "$Root\fixtures\pw:/data" `
     -v "$Root\var\profiles\pw:/home/browser/chromium-profile" `

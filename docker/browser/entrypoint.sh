@@ -50,8 +50,15 @@ rm -f /home/browser/chromium-profile/SingletonLock \
       /home/browser/chromium-profile/SingletonSocket \
       /home/browser/chromium-profile/SingletonCookie
 
+# Chromium's own sandbox is on. It needs user namespaces: the container is
+# created with docker/seccomp-chromium.json (Docker's default profile blocks
+# them). On a host whose kernel has none, create the container with
+# -e FARA_NO_SANDBOX=1 to run without it (weaker: see docs/security.md).
+SANDBOX_FLAG=""
+if [ "${FARA_NO_SANDBOX:-0}" = "1" ]; then SANDBOX_FLAG="--no-sandbox"; fi
+
 exec chromium \
-  --no-sandbox \
+  $SANDBOX_FLAG \
   --enable-unsafe-swiftshader \
   --use-gl=angle \
   --use-angle=swiftshader \

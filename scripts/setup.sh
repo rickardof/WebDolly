@@ -27,6 +27,8 @@ docker rm -f fara-browser-pw 2>/dev/null || true
 docker run -d --name fara-browser-pw --restart unless-stopped \
   --network fara-net --shm-size 64m \
   --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 \
+  --security-opt seccomp="$ROOT/docker/seccomp-chromium.json" \
+  ${FARA_NO_SANDBOX:+-e FARA_NO_SANDBOX=1} \
   -p 127.0.0.1:9333:9333 -p 127.0.0.1:5901:5900 \
   -v "$ROOT/fixtures/pw:/data" \
   -v "$ROOT/var/profiles/pw:/home/browser/chromium-profile" \

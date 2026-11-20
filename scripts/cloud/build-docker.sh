@@ -24,6 +24,8 @@ docker run -d \
   --network fara-net \
   --shm-size 64m \
   --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 \
+  --security-opt seccomp="$FARA_HOME/docker/seccomp-chromium.json" \
+  ${FARA_NO_SANDBOX:+-e FARA_NO_SANDBOX=1} \
   -p 127.0.0.1:9333:9333 \
   -p 127.0.0.1:5901:5900 \
   -v "$FARA_HOME/fixtures/pw:/data" \
