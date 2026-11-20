@@ -1304,6 +1304,11 @@ def agent_driver(task: str, url: str, max_rounds: int, loop: bool, poll_interval
             # reported, so a timed-out study ended silently and the user had
             # no way to know from the phone.
             _ca = (cycle_answer or "").strip()
+            if _ca == "SIGNIN_REQUIRED":
+                # The account is signed out: the run already said so (panel
+                # and Telegram). Cycling on would only reload the sign-in page,
+                # and while a run is on the manual control stays locked.
+                break
             if _ca and _ca not in ("NONE", "STOPPED") and "max_rounds=" not in _ca:
                 head = _ca.split("\n", 1)[0][:300]
                 if agent_core.completion_code_of(_ca):

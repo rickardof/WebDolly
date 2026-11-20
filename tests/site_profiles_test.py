@@ -288,6 +288,58 @@ check("a run's summary names the profile it ran with",
       ac.summarize_transcript(_lines).get("site") == "generic")
 check("a run recorded before that has no profile in its summary",
       "site" not in ac.summarize_transcript(_lines[1:]))
+
+# ---------------------------------------------------------------- sign-in pages
+import io  # noqa: E402
+
+_prev_profile = sites.current.name
+sites.use("prolific")
+LOGIN = "https://auth.prolific.com/u/login?state=hKFo2SBEc2xqc0lO"
+APP_LIST = "https://app.prolific.com/studies"
+check("the platform's sign-in host is a sign-in page, nothing else is",
+      sites.current.is_signin(LOGIN) and not sites.current.is_signin(APP_LIST)
+      and not sites.current.is_signin("https://survey.example.com/login"))
+check("a sign-in page is not a task being done", tp._on_launch_surface(LOGIN))
+check("and it is not 'off the app host', which would bounce the browser back to it",
+      not ac._off_app_host(LOGIN))
+check("the generic profile has no sign-in pages", not sites.get("generic").is_signin(LOGIN))
+
+
+def _arrive(url, again):
+    run = behaviors.Run("t", None, io.StringIO(), [], [], {})
+    b = tp.TaskPlatform()
+    run.behaviors = [b]
+    b.start(run, "")
+    run.step, run.here = 1, url
+    sent, events = [], []
+    saved = (ac.get_current_url, ac.cancel.sleep, ac._notify_telegram)
+    ac.get_current_url = lambda: again
+    ac.cancel.sleep = lambda secs: None
+    ac._notify_telegram = sent.append
+    try:
+        g = b.arrive(run)
+        try:
+            while True:
+                events.append(next(g))
+        except StopIteration as e:
+            ended = bool(e.value)
+    finally:
+        ac.get_current_url, ac.cancel.sleep, ac._notify_telegram = saved
+    return ended, events, sent, run, b
+
+
+ended, evs, sent, run_, b_ = _arrive(LOGIN, LOGIN)
+check("still on the sign-in page after the pause: the run ends, saying why",
+      ended and evs[-1].get("type") == "done" and evs[-1].get("answer") == "SIGNIN_REQUIRED"
+      and any("accedi" in (e.get("text") or "").lower() for e in evs))
+check("and tells the phone once", len(sent) == 1 and "WebDolly" in sent[0])
+check("no task timer was started for it", not b_.study_timer.is_active())
+ended, evs, sent, run_, b_ = _arrive(LOGIN, APP_LIST)
+check("a sign-in page that was only passed through does not end the run",
+      not ended and not sent and not any(e.get("type") == "done" for e in evs))
+check("the step carries on from the page it landed on", run_.here == APP_LIST)
+sites.use(_prev_profile)
+
 check("the task-platform helpers live with the behaviour, not in the loop",
       not [n for n in ("StudyTimer", "WanderGuard", "terminate_refusal", "guarded_nocode_refusal",
                        "_humanized_launch_reserved_study", "_detect_dead_end", "codes_on_page",

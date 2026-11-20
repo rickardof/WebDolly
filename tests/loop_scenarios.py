@@ -39,6 +39,7 @@ LIST = PRO + "/studies"
 DETAIL = PRO + "/studies/6af3550a148b4a6e6c385cdb"
 SURVEY = "https://survey.example.com/s/abc?PROLIFIC_PID=5f2a9b3c4d5e6f708192a3b4"
 DONE_URL = PRO + "/submissions/complete?cc=C1NKBGUZ"
+LOGIN = "https://auth.prolific.com/u/login?state=hKFo2SBEc2xqc0lO"
 BOX = {"x": 600, "y": 500, "width": 200, "height": 44}
 
 
@@ -149,6 +150,9 @@ SCENARIOS = {
     "resume_on_a_survey": dict(
         profile="prolific", start=SURVEY, pages={SURVEY: SURVEY_PAGE},
         steps=[(click(), None), (term("CODE: RS4321"), None)]),
+    "signed_out_at_the_start": dict(
+        profile="prolific", start=LOGIN, pages={LOGIN: {"text": "Log in\nEmail\nPassword", "title": "Log in"}},
+        steps=[]),
     "generic_site": dict(
         profile="generic", start="https://example.com/form",
         pages={"https://example.com/form": {"text": "Contact form\nName\nEmail\nSend",

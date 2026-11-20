@@ -691,6 +691,10 @@ class ProlificSite(Site):
         # run start, so a different deployment does not need a code change.
         self.app_host = (os.environ.get("FARA_APP_HOST") or "app.prolific.com").lower()
 
+    # Where the account signs in. A page here means the session ended; it is
+    # on the platform's domain but is neither the list nor a study.
+    signin_hosts = ("auth.prolific.com", "auth.prolific.co")
+
     # Sections of the site the agent must never be in. The agent's whole job
     # is to take part in studies and, when none fits, wait for new ones; the
     # profile ("About you") questionnaire is not part of that, whatever the

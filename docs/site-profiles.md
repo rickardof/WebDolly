@@ -114,6 +114,12 @@ is not in the profile but in the `TaskPlatform` behaviour,
 shared by every task-platform profile, so change it only for a rule that holds
 on all of them.
 
+When the browser lands on one of the profile's sign-in pages (`signin_hosts`),
+the session has ended. The run stops with a notice in the panel and a message
+on your phone, instead of treating the page as a task or looping on it; the
+agent never signs in for you. With the run stopped the panel's manual control
+is free: sign in there, then start the run again.
+
 ## Adding a platform
 
 1. Create `agent/sites/<name>/__init__.py` with a subclass of `sites.base.Site`.
@@ -167,7 +173,7 @@ The main groups of attributes in `Site`:
 
 | Group | Examples |
 |---|---|
-| URL model | `hosts`, `app_host`, `forbidden_path`, `home_path`, `task_path`, `complete_path`, `launch_chrome_prefixes`, `hosted_task_path` |
+| URL model | `hosts`, `app_host`, `signin_hosts`, `forbidden_path`, `home_path`, `task_path`, `complete_path`, `launch_chrome_prefixes`, `hosted_task_path` |
 | Page knowledge | `empty_list_markers`, `dead_end_markers`, `deadline_re`, `held_slot_banner_re`, `submission_confirmation_re`, `task_title_js`, `completion_return_js`, `nocode_link_js`, the `launch_*_sel` selectors |
 | Identity | `participant_id_label_re`, `participant_id_params`, `participant_id_format` |
 | Account history | `history_url`, `parse_history_rows()`, `parse_history_header()`, `history_paid_statuses` |

@@ -101,6 +101,8 @@ def _on_launch_surface(url: str) -> bool:
     if not core._on_guarded_site(url):
         return False
     site = sites.current
+    if site.is_signin(url):
+        return True   # where the session ends up when it expires, not a task
     path = urlparse(url).path or "/"
     if site.home_path.match(path) or site.task_path.match(path):
         return True
@@ -1097,9 +1099,38 @@ class TaskPlatform(Behavior):
         return False
 
     # -------------------------------------------------------------- arrive
+    # How long a sign-in page has to stay before it counts as a session that
+    # ended: signing in and token refreshes pass through one for a moment.
+    SIGNIN_RECHECK_SECONDS = 4.0
+    #: The answer a run ends with when it finds the account signed out; the
+    #: loop that drives the runs stops on it (see gui_server).
+    SIGNIN_ANSWER = "SIGNIN_REQUIRED"
+
     def arrive(self, run):
         here = run.here
         study_timer = self.study_timer
+        if sites.current.is_signin(here):
+            # The agent never signs in for the user, and nothing else makes
+            # sense on this page: not the task timer, not the batch fill, not
+            # a bounce back to the app (which only leads here again). Say so
+            # and stop; with the run stopped the panel's manual control is
+            # free for the user to sign in.
+            try:
+                core.cancel.sleep(self.SIGNIN_RECHECK_SECONDS)
+                again = core.get_current_url() or here
+            except core.cancel.Cancelled:
+                raise
+            except Exception:
+                again = here
+            if sites.current.is_signin(again):
+                text = ("Sessione scaduta: il browser è sulla pagina di accesso. "
+                        "Accedi dal pannello (Controllo manuale) e riavvia la run.")
+                run.write({"step": run.step, "type": "notice", "text": text, "url": again})
+                core._notify_telegram("🔐 WebDolly: " + text)
+                yield {"type": "notice", "text": text, "messages": run.messages}
+                yield {"type": "done", "answer": self.SIGNIN_ANSWER, "messages": run.messages}
+                return True
+            run.here = here = again
         if core.is_forbidden_url(here):
             back = core.safe_page_for(here)
             core.pw_bridge.goto(back)

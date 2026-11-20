@@ -1026,7 +1026,8 @@ def _off_app_host(url: str) -> bool:
     try:
         host = (urlparse(url or "").hostname or "").lower()
         app = sites.current.app_host
-        return bool(host) and bool(app) and _on_guarded_site(url) and host != app
+        return (bool(host) and bool(app) and _on_guarded_site(url) and host != app
+                and not sites.current.is_signin(url))
     except Exception:
         return False
 

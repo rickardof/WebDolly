@@ -42,6 +42,10 @@ class Site:
     #: The host the work happens on, when the platform also runs other hosts
     #: on the same domain (a marketing site, a help centre). "" = none.
     app_host: str = ""
+    #: Hosts where the account signs in (a login service on a subdomain of
+    #: the platform's domain). The agent never signs in for the user: seeing
+    #: one means the session ended, and the run stops to say so.
+    signin_hosts: tuple = ()
     #: App paths a typed URL may lead to besides home and task pages.
     app_visitable_prefixes: tuple = ()
     #: Sections the agent must never be in.
@@ -253,6 +257,12 @@ class Site:
     def home_url(self) -> str:
         """Where to go back to between tasks, or "" when there is no list."""
         return ""
+
+    def is_signin(self, url: str) -> bool:
+        """Whether `url` is one of the platform's sign-in pages."""
+        host = (urlparse(url or "").hostname or "").lower()
+        return bool(host) and any(host == h or host.endswith("." + h)
+                                  for h in self.signin_hosts)
 
     def home_on(self, url: str) -> str:
         """The task list on the same host as `url`."""
