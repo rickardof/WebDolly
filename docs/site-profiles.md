@@ -30,11 +30,12 @@ Two profiles ship with the code:
 | Profile | Behaviours | What it is |
 |---|---|---|
 | `generic` | none | no platform. The loop runs as a plain browser agent and nothing platform-specific reaches the model. Use it for any ordinary website. |
-| `prolific` | `TaskPlatform` | the participant side of [Prolific](https://www.prolific.com): its URLs, launch dialog, completion codes, minimum and maximum time per study, account history, and the rules the model follows there. |
+| the platform profile | `TaskPlatform` | the participant side of an online research-study platform: its URLs, launch dialog, completion codes, minimum and maximum time per study, account history, and the rules the model follows there. |
 
 ## Which profile is used
 
-`FARA_SITE` names the profile explicitly (`generic`, `prolific`, ...). When it
+`FARA_SITE` names the profile explicitly (`generic`, or the name of another
+profile as the panel's menu lists it). When it
 is unset or `auto`, each run picks one, in this order:
 
 1. the run's own setting (the panel's *Profilo del sito* menu, saved in presets;
@@ -64,25 +65,23 @@ hints work the same on every site.
 
 ## Customising an included profile
 
-The included platform profile is `prolific`.
-
-
-Everything Prolific-specific is in two files:
-[agent/sites/prolific/\_\_init\_\_.py](../agent/sites/prolific/__init__.py) (pages,
-rules, texts) and
-[agent/sites/prolific/submissions.py](../agent/sites/prolific/submissions.py)
-(reading the submission history).
+The included platform profile has its own directory under `agent/sites/`.
+Everything specific to that platform is in two files there: `__init__.py`
+(pages, rules, texts) and `submissions.py` (reading the submission history).
 
 **Without touching code**, set environment variables before starting:
 
-| Variable | Default | What it changes |
-|---|---|---|
-| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | the domains the profile owns |
-| `FARA_APP_HOST` | `app.prolific.com` | the host the studies live on (also learnt from the start URL) |
-| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | the list each cycle returns to |
+| Variable | What it changes |
+|---|---|
+| `FARA_GUARDED_HOSTS` | the domains the profile owns, comma-separated |
+| `FARA_APP_HOST` | the host the studies live on (also learnt from the start URL) |
+| `FARA_STUDIES_URL` | the list each cycle returns to |
 
-**The rules the model follows** on Prolific are appended to every run's task.
-They are two texts in `agent/sites/prolific/__init__.py`:
+The defaults are the platform's own addresses, set in the profile's
+`__init__.py`.
+
+**The rules the model follows** on the platform are appended to every run's
+task. They are two texts in the profile's `__init__.py`:
 
 - `_STANDING_RULES_FULL`, used at normal speed;
 - `_STANDING_RULES_COMPACT`, used in the faster speed modes.
@@ -99,12 +98,12 @@ why it exists:
 |---|---|
 | `_DEAD_END_MARKERS` | page wording that means a study cannot be done (not eligible, full, already done, screened out) |
 | `_SEL_RESERVE`, `_SEL_OPEN_DIALOG`, `_SEL_DIALOG`, `_SEL_START` | the buttons of the study launch dialog |
-| `_COMPLETION_RETURN_JS`, `_NOCODE_LINK_JS` | how the "return to Prolific" and "I didn't receive a completion code" controls are found |
-| `_TIME_REMAINING_RE` | Prolific's countdown for a reserved study |
+| `_COMPLETION_RETURN_JS`, `_NOCODE_LINK_JS` | how the "return to the platform" and "I didn't receive a completion code" controls are found |
+| `_TIME_REMAINING_RE` | the platform's countdown for a reserved study |
 | `reservation_nudge()`, `nocode_refusal()`, `completion_pushback_text()`, ... | what the model is told in each situation |
 | `_UNATTENDED_ANSWER` | the answer given in place of a human during loop runs |
 
-If Prolific changes its pages, these are the places to update. After a change,
+If the platform changes its pages, these are the places to update. After a change,
 run the offline tests (see the README); `scripts/tools/test_harness_guards.py`
 covers most of this file.
 
@@ -119,7 +118,7 @@ on all of them.
 
 1. Create `agent/sites/<name>/__init__.py` with a subclass of `sites.base.Site`.
    Every attribute and method of `Site` has a generic default, so set only what
-   the platform needs. `agent/sites/prolific/__init__.py` is a complete example.
+   the platform needs. The included platform profile is a complete example.
 
    ```python
    import re
@@ -141,7 +140,8 @@ on all of them.
            return "\n\nRULES: ..."            # appended to every run's task
    ```
 
-   If the site is a task platform like Prolific, have the profile run the
+   If the site is a task platform (a list of tasks, each launched, timed and
+   handed back), have the profile run the
    task-platform rules:
 
    ```python
@@ -205,7 +205,7 @@ named features (`batch_fill`, `reading_dwell`, `prescroll`, ...): override
 ## Tests
 
 The suites under `tests/` and `scripts/tools/` that test platform behaviour pin
-`FARA_SITE=prolific` at the top; `tests/site_profiles_test.py` covers profile
+`FARA_SITE` to the platform profile at the top; `tests/site_profiles_test.py` covers profile
 selection, the generic profile and the behaviour hooks, and needs no browser or
 model.
 

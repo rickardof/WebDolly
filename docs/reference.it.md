@@ -4,8 +4,8 @@
 
 Un agente che usa un browser reale al posto tuo, guidato da **Fara 1.5**
 (modello vision-language che guarda gli screenshot e decide dove cliccare/cosa
-scrivere). Il caso d'uso principale è la compilazione di survey/studi (es.
-Prolific) con un profilo/persona che definisci tu, ma il compito è libero: lo
+scrivere). Il caso d'uso principale è la compilazione di survey e studi su una
+piattaforma online, con un profilo/persona che definisci tu, ma il compito è libero: lo
 scrivi nella GUI.
 
 Di base tutto gira in locale (il modello può anche stare su un'API remota,
@@ -142,7 +142,7 @@ cp agent/identity.json.example      agent/identity.json
 cp agent/telegram_config.py.example agent/telegram_config.py
 ```
 
-- `agent/identity.json`: "Prolific ID", email e simili, campi che l'agente
+- `agent/identity.json`: "ID partecipante", email e simili, campi che l'agente
   **copia, mai inventa** (quando non li passi nel contesto del compito).
 - `agent/telegram_config.py`: per comandare l'agente dal telefono. Token da
   [@BotFather](https://t.me/BotFather) e chat id (istruzioni nel file); senza, bot e
@@ -195,7 +195,7 @@ docker stop fara-browser-pw fara-test      # ferma browser e modello
 > il container né perdere il login:
 >
 > ```bash
-> curl -X PUT "localhost:9333/json/new?https://app.prolific.com/studies"
+> curl -X PUT "localhost:9333/json/new?<indirizzo della pagina da aprire>"
 > curl "localhost:9333/json/close/<id della vecchia scheda>"   # da /json/list
 > ./scripts/restart.sh                                                 # riconnette il bridge
 > ```
@@ -272,9 +272,9 @@ Durante la run:
 
 ### Guardrail
 
-- Sui siti in `FARA_GUARDED_HOSTS` (default `prolific.com,prolific.co`) l'agente non
+- Sui siti in `FARA_GUARDED_HOSTS` (default: i domini della piattaforma) l'agente non
   entra in `/about-you` né nelle pagine di logout: viene riportato all'elenco studi.
-- **Timer dello studio**: parte passando da Prolific a un sito esterno (click, Invio
+- **Timer dello studio**: parte passando dalla piattaforma a un sito esterno (click, Invio
   in un modale o redirect JS), col minimo letto dalla card dello studio (o dal testo
   della pagina). Finché mancano più di 30 s `terminate` viene **rifiutato** e
   all'agente si dice di usare `wait`; a `/studies` si ri-arma per lo studio dopo.
@@ -287,16 +287,16 @@ Durante la run:
   posti esauriti, già svolto, screened out), quando la pagina lo dice chiaramente,
   finisce in `agent/study_cache.json`; dal ciclo dopo l'agente ne vede il titolo e, se
   lo riapre, viene rimbalzato all'elenco al primo passo. Il nome è letto sulla pagina
-  Prolific (non dentro la survey). Scade dopo 14 giorni (`FARA_STUDY_CACHE_DAYS`); si
+  della piattaforma (non dentro la survey). Scade dopo 14 giorni (`FARA_STUDY_CACHE_DAYS`); si
   legge con `curl localhost:8766/study_cache`, si azzera con `.../study_cache/clear`.
 - **Audio/video (opzionale)**: un `<video>`/`<audio>` o un player fa abbandonare lo
   studio su qualunque pagina; le frasi tipo "you will need headphones" vengono invece
-  lette **solo** sulla pagina Prolific (dentro un questionario potrebbero essere una
+  lette **solo** sulla pagina della piattaforma (dentro un questionario potrebbero essere una
   domanda, e abbandonare per un falso positivo costa più di un click sprecato).
-- **Codice di completamento**, tre casi: (1) lo studio rimanda a Prolific con
+- **Codice di completamento**, tre casi: (1) lo studio rimanda alla piattaforma con
   `…/submissions/complete?cc=XXXX` → l'agente legge il codice **dall'URL** e chiude
   senza interpellare il modello; (2) il codice è **sulla pagina** (testo, campo,
-  iframe, o `?code=XXXX` nell'URL) → torna su Prolific, clicca "I'm finished" e lo
+  iframe, o `?code=XXXX` nell'URL) → torna sulla piattaforma, clicca "I'm finished" e lo
   scrive; tutti i codici visti vengono annotati e confrontati con quello inserito, e
   se non torna (o chiude `NOCODE` con un codice presente) arriva un ⚠️ su Telegram
   (segnala soltanto, non corregge); (3) nessun codice → chiude con `NOCODE` (un URL
@@ -304,8 +304,8 @@ Durante la run:
 - **Falso completamento**: se il modello chiude con `terminate` a testo libero (non
   `CODE:`/`NOCODE`) mentre è ancora sul sito della survey e nessun codice è comparso,
   di solito si è fermato sulla pagina di ringraziamento saltando il bottone finale che
-  riporta a Prolific. La chiusura viene rifiutata una volta sola, con l'invito a cercare
-  quel controllo (Submit/Finish/Return to Prolific); se richiude, viene obbedito.
+  riporta alla piattaforma. La chiusura viene rifiutata una volta sola, con l'invito a cercare
+  quel controllo (Submit/Finish/Return to …); se richiude, viene obbedito.
 - **Attesa sull'elenco senza modello**: in loop la pagina viene ricaricata e letta dal
   DOM ogni ~45 s; con "Waiting for studies" il modello non viene chiamato, parte solo
   se c'è qualcosa, se la pagina non è riconoscibile, o ogni 15 min per sicurezza.
@@ -345,8 +345,8 @@ ora e la tabella degli studi completati con codice, durata, passi e **da dove
 viene il codice** (URL o schermo).
 
 La sezione **Dove va il tempo** divide il tempo tra elenco vuoto, studi
-completati e cicli falliti, e i passi tra elenco, dentro uno studio e altrove su
-Prolific, con la velocità recente del modello.
+completati e cicli falliti, e i passi tra elenco, dentro uno studio e altrove sulla
+piattaforma, con la velocità recente del modello.
 
 Ogni run scrive un `summary.json` accanto al transcript e la dashboard legge
 quelli; per le run più vecchie il riassunto si calcola una volta e si salva. Si
@@ -378,8 +378,8 @@ verificare, ⚠️ ciclo fallito con il tempo del prossimo tentativo, 🐌 model
 lento, ❌ errore della run, 📊 riepilogo serale (cicli, studi completati e
 scartati, errori, velocità del modello, guadagni approvati o in revisione).
 
-Gli "studi recenti" e i guadagni arrivano dalla pagina `submissions` di
-Prolific, letta in una scheda temporanea aperta **solo nella pausa fra due
+Gli "studi recenti" e i guadagni arrivano dalla pagina `submissions` della
+piattaforma, letta in una scheda temporanea aperta **solo nella pausa fra due
 cicli** (mai durante uno step), con cache di 60 s e aggiornamento a fine ciclo o
 ogni 5 minuti. Se la lettura fallisce, resta in cache il risultato precedente.
 
@@ -430,7 +430,7 @@ ARM64, es. Oracle Cloud free tier). In `scripts/cloud/`:
 | Script | Dove si lancia | Cosa fa |
 |---|---|---|
 | `setup-vm.sh` | sulla VM, una volta | Docker, Python venv (da `requirements.txt`), cartelle (`fixtures/pw`, `var/logs/pw`, `var/profiles/pw`) |
-| `sync-to-cloud.sh user@ip [dir]` | dal PC locale | rsync del codice **e del profilo browser già loggato** (così su Prolific non devi rifare il login). Non copia `fara.env`, i log e i modelli |
+| `sync-to-cloud.sh user@ip [dir]` | dal PC locale | rsync del codice **e del profilo browser già loggato** (così non devi rifare i login). Non copia `fara.env`, i log e i modelli |
 | `build-docker.sh` | sulla VM | costruisce `fara-browser` / `fara-browser-pw` e avvia il container del browser |
 | `start-agent.sh` | sulla VM | carica `scripts/cloud/fara.env` e avvia `gui_server.py` su `:8766`, con log in `var/logs/pw/gui_server.out` |
 | `fara-agent.service` | sulla VM | unit systemd (`Restart=always`) per tenerlo su anche dopo reboot o crash; i log vanno nel journal (`journalctl -u fara-agent -f`) |
@@ -473,13 +473,13 @@ l'endpoint `/tokenize`, stima i token con un fallback a ~4 caratteri per token.
 | `FARA_LOG_ROOT` | `~/web-agent/var/logs/pw` | dove salva le run (`run_*/transcript.jsonl` + screenshot) |
 | `FARA_MAX_RUNS` | `200` | run di cui tenere gli screenshot; oltre, il transcript viene compresso e gli screenshot cancellati |
 | `FARA_PRESETS` | `agent/presets.json` | file dei preset |
-| `FARA_GUARDED_HOSTS` | `prolific.com,prolific.co` | siti con le sezioni vietate |
-| `FARA_STUDIES_URL` | `https://app.prolific.com/studies` | dove tornare quando uno studio viene abbandonato |
+| `FARA_GUARDED_HOSTS` | i domini della piattaforma | siti con le sezioni vietate |
+| `FARA_STUDIES_URL` | l'elenco studi della piattaforma | dove tornare quando uno studio viene abbandonato |
 | `FARA_STUDY_CACHE` | `agent/study_cache.json` | memoria degli studi scartati |
 | `FARA_STUDY_CACHE_DAYS` | `14` | dopo quanti giorni uno studio scartato può essere riaperto |
 | `FARA_SLOW_TPS` | `10` | sotto questa velocità di generazione (mediana di 6 risposte) arriva l'avviso "modello lento" |
 | `FARA_SUMMARY_HOUR` | `21` | ora del riepilogo giornaliero su Telegram |
-| `FARA_CAPTURE_DIR` | `var/captures` | dove salvare l'HTML delle pagine Prolific che servono per i test |
+| `FARA_CAPTURE_DIR` | `var/captures` | dove salvare l'HTML delle pagine della piattaforma che servono per i test |
 | `FARA_TEST_INSTANCE` | *(vuota)* | `1` su un secondo server di prova: niente bot Telegram (due poller sullo stesso token si rubano i messaggi) e niente lettura delle submission (aprirebbe una scheda nel browser vero) |
 | `FARA_ENABLE_THINKING` | `0` | `1` = lascia il thinking del template. Sul 9B peggiora molto i click, sul 27B è indifferente |
 | `FARA_STREAM_FPS` / `FARA_STREAM_QUALITY` | `5` / `60` | stream MJPEG della GUI |
@@ -505,9 +505,9 @@ confronto tra il codice inserito e quelli visti (`code_check`).
 
 Altri file in `var/logs/pw/`: `gui_server.out` (log del server quando è avviato dagli
 script cloud o da systemd) e `submissions_api_debug.txt` (ultimo esito della
-lettura delle submission di Prolific).
+lettura delle submission della piattaforma).
 
-In `var/captures/` finisce l'HTML delle pagine Prolific vere che servono per i
+In `var/captures/` finisce l'HTML delle pagine vere della piattaforma che servono per i
 test (elenco con studi, pagina di uno studio, redirect di completamento), una
 volta al giorno per tipo. Contengono nome e saldo dell'account: si ritagliano e
 si spostano a mano in `fixtures/`.
