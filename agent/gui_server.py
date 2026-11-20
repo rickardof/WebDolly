@@ -1507,11 +1507,15 @@ def _is_platform(name: str) -> bool:
 def _legacy_site(s: dict) -> str:
     """The profile of a run recorded before runs named theirs: one that saw
     a task list, a task or a completion code ran on the platform profile;
-    anything else is a plain run."""
+    one that took steps and saw none of that was a plain run; one that
+    ended before its first step (a cycle that failed to start) says nothing
+    either way and is given the profile last used."""
     w = s.get("steps_where") or {}
     if (w.get("list") or w.get("study") or s.get("code_source")
             or s.get("outcome") in ("CODE", "NOCODE", "NONE")):
         return next((n for n in sites.names() if _is_platform(n)), "generic")
+    if not s.get("steps"):
+        return sites.last_used() or "generic"
     return "generic"
 
 
