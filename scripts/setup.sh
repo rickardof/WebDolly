@@ -26,6 +26,7 @@ mkdir -p var/logs/pw var/profiles/pw
 docker rm -f fara-browser-pw 2>/dev/null || true
 docker run -d --name fara-browser-pw --restart unless-stopped \
   --network fara-net --shm-size 64m \
+  --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 \
   -p 127.0.0.1:9333:9333 -p 127.0.0.1:5901:5900 \
   -v "$ROOT/fixtures/pw:/data" \
   -v "$ROOT/var/profiles/pw:/home/browser/chromium-profile" \
@@ -38,8 +39,9 @@ if [ -f "models/$MODEL" ]; then
     docker rm -f fara-test 2>/dev/null || true
     docker run -d --name fara-test --restart unless-stopped \
       --gpus all --network fara-net \
+      --security-opt no-new-privileges:true \
       -p 127.0.0.1:8090:8080 \
-      -v "$ROOT/models:/models" \
+      -v "$ROOT/models:/models:ro" \
       ghcr.io/ggml-org/llama.cpp:server-cuda \
       -m "/models/$MODEL" --mmproj "/models/$MMPROJ" \
       --host 0.0.0.0 --port 8080 \

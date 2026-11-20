@@ -246,6 +246,7 @@ Offline tests need no browser and no model. Run each with
 ```
 tests/context_trim_test.py      tests/site_profiles_test.py
 tests/qc_flag_test.py           tests/run_counting_test.py
+tests/panel_guard_test.py       the panel refuses foreign requests
 tests/submissions_parse_test.py scripts/tools/test_harness_guards.py
 tests/loop_scenarios.py         whole runs with browser and model stubbed
 ```
@@ -268,12 +269,13 @@ scripts/          setup, start, stop and restart; windows/ has the PowerShell ve
 fixtures/         test pages
 tests/            offline and end-to-end tests
 bench/            model benchmarks
-docs/             site profiles guide, detailed reference (Italian)
+docs/             site profiles guide, security notes, detailed reference (Italian)
 models/           GGUF model files (not in git)
 var/              logs, screenshots and the browser profile (not in git, personal data)
 ```
 
 Never share `var/profiles/` (cookies and logins) or `agent/telegram_config.py`.
+How the containers and the panel are protected, and what is not: [docs/security.md](docs/security.md).
 
 ## Responsible use
 

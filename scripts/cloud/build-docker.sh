@@ -23,6 +23,7 @@ docker run -d \
   --restart unless-stopped \
   --network fara-net \
   --shm-size 64m \
+  --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 \
   -p 127.0.0.1:9333:9333 \
   -p 127.0.0.1:5901:5900 \
   -v "$FARA_HOME/fixtures/pw:/data" \

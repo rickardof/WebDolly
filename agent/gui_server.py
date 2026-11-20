@@ -1625,6 +1625,38 @@ def _build_dashboard() -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # --- who may talk to the panel -----------------------------------------
+    # The panel has no login: it is safe because only this machine can reach
+    # it. But web pages can send requests to a local address too -- one in the
+    # user's own browser, or one open in the agent's browser, which reaches the
+    # host as host.docker.internal. Two checks keep those out: the Host header
+    # must be a loopback address (this also defeats DNS rebinding), and a
+    # request that carries an Origin must come from the panel's own page.
+    # Scripts and curl send no Origin and are unaffected.
+    def _loopback_names(self) -> set:
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
+    def _request_allowed(self) -> bool:
+        names = self._loopback_names()
+        host = self.headers.get("Host")
+        if host is not None and host.lower() not in names:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.lower() not in {"http://" + n for n in names}:
+            return False
+        return True
+
+    def do_GET(self):
+        if not self._request_allowed():
+            return self._send_json({"error": "forbidden: not a request from this panel"}, status=403)
+        return self._do_GET()
+
+    def do_POST(self):
+        if not self._request_allowed():
+            return self._send_json({"error": "forbidden: not a request from this panel"}, status=403)
+        return self._do_POST()
+
     def _send_json(self, payload, status=200):
         body = json.dumps(payload).encode()
         self.send_response(status)
@@ -1651,7 +1683,7 @@ class Handler(BaseHTTPRequestHandler):
             return state["running"]
 
     # -- GET --------------------------------------------------------
-    def do_GET(self):
+    def _do_GET(self):
         if self.path == "/":
             html = (HERE / "gui_index.html").read_bytes()
             self._send_bytes(html, "text/html; charset=utf-8")
@@ -1820,7 +1852,7 @@ class Handler(BaseHTTPRequestHandler):
             streamer.remove_client()
 
     # -- POST -------------------------------------------------------
-    def do_POST(self):
+    def _do_POST(self):
         try:
             if self.path == "/click":
                 if self._agent_running():

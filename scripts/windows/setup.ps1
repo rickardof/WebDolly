@@ -41,6 +41,7 @@ New-Item -ItemType Directory -Force (Join-Path $Root 'var\logs\pw'), (Join-Path 
 try { Invoke-Docker rm -f fara-browser-pw | Out-Null } catch { }
 Invoke-Docker run -d --name fara-browser-pw --restart unless-stopped `
     --network fara-net --shm-size 64m `
+    --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 `
     -p 127.0.0.1:9333:9333 -p 127.0.0.1:5901:5900 `
     -v "$Root\fixtures\pw:/data" `
     -v "$Root\var\profiles\pw:/home/browser/chromium-profile" `
@@ -63,8 +64,9 @@ if ($SkipModel) {
         try { Invoke-Docker rm -f fara-test | Out-Null } catch { }
         Invoke-Docker run -d --name fara-test --restart unless-stopped `
             --gpus all --network fara-net `
+            --security-opt no-new-privileges:true `
             -p 127.0.0.1:8090:8080 `
-            -v "$Root\models:/models" `
+            -v "$Root\models:/models:ro" `
             ghcr.io/ggml-org/llama.cpp:server-cuda `
             -m "/models/$Model" --mmproj "/models/$Mmproj" `
             --host 0.0.0.0 --port 8080 `
