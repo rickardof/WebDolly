@@ -1039,7 +1039,7 @@ def _inhibit_sleep():
     try:
         return subprocess.Popen(
             ["systemd-inhibit", "--what=handle-lid-switch:sleep:idle",
-             "--who=Fara agent", "--why=Agent run in progress", "--mode=block",
+             "--who=WebDolly agent", "--why=Agent run in progress", "--mode=block",
              "sleep", "infinity"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             # Die with the server even on a hard kill/crash, so an orphaned
@@ -1490,7 +1490,44 @@ def _run_record(tf) -> dict | None:
             "steps": s.get("steps", 0), "outcome": outcome, "answer": s.get("answer", ""),
             "code": s.get("code") or "", "studies": s.get("studies") or [],
             "code_source": s.get("code_source"), "where": s.get("steps_where") or {},
-            "gen_tps": s.get("gen_tps_median"), "flagged": s.get("flagged") or ""}
+            "gen_tps": s.get("gen_tps_median"), "flagged": s.get("flagged") or "",
+            "site": s.get("site") or _legacy_site(s)}
+
+
+def _is_platform(name: str) -> bool:
+    """Whether a profile runs the task-platform rules (task list, timer,
+    completion codes): the statistics about tasks only apply to those."""
+    try:
+        return any(getattr(c, "name", "") == "task_platform"
+                   for c in sites.get(name).behaviors())
+    except Exception:
+        return False
+
+
+def _legacy_site(s: dict) -> str:
+    """The profile of a run recorded before runs named theirs: one that saw
+    a task list, a task or a completion code ran on the platform profile;
+    anything else is a plain run."""
+    w = s.get("steps_where") or {}
+    if (w.get("list") or w.get("study") or s.get("code_source")
+            or s.get("outcome") in ("CODE", "NOCODE", "NONE")):
+        return next((n for n in sites.names() if _is_platform(n)), "generic")
+    return "generic"
+
+
+def _profiles_info() -> dict:
+    """What the statistics page needs to know about each profile."""
+    out = {}
+    for n in sites.names():
+        try:
+            prof = sites.get(n)
+            out[n] = {"title": getattr(prof, "title", n),
+                      "label": "Generico" if n == "generic" else getattr(prof, "title", n),
+                      "platform": _is_platform(n),
+                      "history": bool(getattr(prof, "history_url", ""))}
+        except Exception:
+            pass
+    return out
 
 
 _record_cache: dict = {}
@@ -1525,7 +1562,7 @@ def _dashboard_data() -> dict:
     the server only has to list runs. One row per run:
     [start, end, seconds, steps, outcome, answer, code_source,
      steps_on_list, steps_in_study, steps_elsewhere, model_tokens_per_s,
-     qc_flag]
+     qc_flag, site]
     """
     from datetime import datetime as _dt
     runs = []
@@ -1538,7 +1575,7 @@ def _dashboard_data() -> dict:
                      int(r.get("duration_s") or 0), int(r.get("steps") or 0), _outcome_of(r),
                      (r.get("answer") or "")[:80], r.get("code_source"),
                      int(w.get("list", 0)), int(w.get("study", 0)), int(w.get("elsewhere", 0)),
-                     r.get("gen_tps"), r.get("flagged") or ""])
+                     r.get("gen_tps"), r.get("flagged") or "", r.get("site") or "generic"])
     subs = []
     for s in list(_submissions_cache.get("data") or []):
         ts = None
@@ -1561,6 +1598,7 @@ def _dashboard_data() -> dict:
     except Exception:
         skipped = []
     return {"generated": time.time(), "runs": runs, "submissions": subs,
+            "profiles": _profiles_info(),
             # the platform's own SUMMARY block: the account's real lifetime totals,
             # and whether the local history is still being read in.
             "subs_header": dict(_submissions_cache.get("header") or {}),

@@ -1146,10 +1146,10 @@ class TaskPlatform(Behavior):
                 core._live({"type": "notice",
                             "text": f"⚠️ Studio restituito {rem}s SOTTO il tempo minimo "
                                     f"(min {study_timer.min_seconds:.0f}s) via URL: submit sfuggito alle gate."})
-                core._notify_telegram(f"⚠️ Fara: studio restituito TROPPO PRESTO\n{answer}\n"
+                core._notify_telegram(f"⚠️ WebDolly: studio restituito TROPPO PRESTO\n{answer}\n"
                                       f"{rem}s sotto il minimo ({study_timer.min_seconds:.0f}s)\n{here}")
             else:
-                core._notify_telegram(f"Fara studio completato ✅\n{answer} (dall'URL)\n"
+                core._notify_telegram(f"WebDolly: studio completato ✅\n{answer} (dall'URL)\n"
                                       f"Ciclo: {run.run_dir.name if run.run_dir else '?'}")
             yield {"type": "notice", "text": f"Codice di completamento letto dall'URL: {cc}",
                    "messages": run.messages}
@@ -1788,7 +1788,7 @@ class TaskPlatform(Behavior):
 
     def finished(self, run, answer):
         if answer.startswith("CODE:") or answer == "NOCODE":
-            core._notify_telegram(f"Fara studio completato ✅\n{answer}\n"
+            core._notify_telegram(f"WebDolly: studio completato ✅\n{answer}\n"
                                   f"Ciclo: {run.run_dir.name if run.run_dir else '?'}")
         if self._survey_url:
             core.study_memory.record(self._survey_url,

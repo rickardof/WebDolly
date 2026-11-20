@@ -282,6 +282,12 @@ _words = ("timer", "guarded", "completion_code", "study_timer", "here_on_launch"
 check("run_agent's body names nothing of a task platform",
       not [w for w in _words if w in _loop.replace("timer=run.timer", "")],
       str([w for w in _words if w in _loop.replace("timer=run.timer", "")]))
+_lines = [json.dumps({"type": "run", "site": "generic", "behaviors": []}),
+          json.dumps({"step": 2, "action_type": "terminate", "args": {"answer": "Done."}})]
+check("a run's summary names the profile it ran with",
+      ac.summarize_transcript(_lines).get("site") == "generic")
+check("a run recorded before that has no profile in its summary",
+      "site" not in ac.summarize_transcript(_lines[1:]))
 check("the task-platform helpers live with the behaviour, not in the loop",
       not [n for n in ("StudyTimer", "WanderGuard", "terminate_refusal", "guarded_nocode_refusal",
                        "_humanized_launch_reserved_study", "_detect_dead_end", "codes_on_page",

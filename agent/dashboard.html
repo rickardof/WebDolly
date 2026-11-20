@@ -3,49 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fara · Statistiche</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238b8cff'/%3E%3Cstop offset='1' stop-color='%235f8bff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M11 23V9h10M11 16h7' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<title>WebDolly · Statistiche</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128' width='128' height='128' role='img' aria-label='WebDolly'%3E  %3Cdefs%3E    %3ClinearGradient id='wd-bg' x1='0' y1='0' x2='1' y2='1'%3E      %3Cstop offset='0' stop-color='#8b8cff'/%3E      %3Cstop offset='1' stop-color='#4f7cff'/%3E    %3C/linearGradient%3E    %3ClinearGradient id='wd-wool' x1='0' y1='0' x2='0' y2='1'%3E      %3Cstop offset='0' stop-color='#ffffff'/%3E      %3Cstop offset='1' stop-color='#e6e9ff'/%3E    %3C/linearGradient%3E  %3C/defs%3E  %3Crect width='128' height='128' rx='30' fill='url%28#wd-bg%29'/%3E  %3C%21-- wool --%3E  %3Cg fill='url%28#wd-wool%29'%3E    %3Ccircle cx='42' cy='46' r='15'/%3E    %3Ccircle cx='62' cy='36' r='17'/%3E    %3Ccircle cx='82' cy='45' r='15'/%3E    %3Ccircle cx='90' cy='63' r='13'/%3E    %3Ccircle cx='35' cy='64' r='13'/%3E    %3Ccircle cx='62' cy='62' r='24'/%3E  %3C/g%3E  %3C%21-- ears --%3E  %3Cellipse cx='40' cy='70' rx='10' ry='5.5' transform='rotate%28-28 40 70%29' fill='#2a2c6e'/%3E  %3Cellipse cx='84' cy='70' rx='10' ry='5.5' transform='rotate%2828 84 70%29' fill='#2a2c6e'/%3E  %3C%21-- face --%3E  %3Cpath d='M62 54c10 0 15 8 15 19 0 11-7 21-15 21s-15-10-15-21c0-11 5-19 15-19z' fill='#2a2c6e'/%3E  %3Ccircle cx='56' cy='70' r='3.2' fill='#fff'/%3E  %3Ccircle cx='68' cy='70' r='3.2' fill='#fff'/%3E  %3Cpath d='M58.5 84q3.5 2.5 7 0' stroke='#8b8cff' stroke-width='2.4' stroke-linecap='round' fill='none'/%3E  %3C%21-- cursor --%3E  %3Cpath d='M84 78v31l8.5-8 6 13.5 6.5-3-6-13.2H111z' fill='#fff' stroke='#2a2c6e' stroke-width='3.5' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script>
   try { const t = localStorage.getItem('fara_theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
   /* ================================================================ tokens (shared with the panel) */
   :root {
-    --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --font: "IBM Plex Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --ease: cubic-bezier(.2, .8, .2, 1);
+    --r-xl: 8px; --r-lg: 6px; --r: 5px; --r-sm: 4px;
   }
   :root, [data-theme="dark"] {
     color-scheme: dark;
-    --bg: #07080c; --glow-1: rgba(118, 120, 255, .14); --glow-2: rgba(56, 214, 196, .06);
-    --surface: #0e1016; --surface-2: #13161e; --surface-3: #1a1e29; --surface-4: #232836;
-    --line: rgba(150, 162, 195, .085); --line-2: rgba(150, 162, 195, .15);
-    --text: #eceef4; --text-2: #a6adbd; --text-3: #687085;
-    --accent: #8d8eff; --accent-2: #5d8dff;
-    --ok: #3ddc97; --warn: #f6b74a; --bad: #ff6b6e;
-    --shadow: 0 10px 30px -16px rgba(0, 0, 0, .7); --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .75);
-    --hl: inset 0 1px 0 rgba(255, 255, 255, .035);
+    --bg: #0c0e12; --glow-1: transparent; --glow-2: transparent;
+    --surface: #12151a; --surface-2: #161a20; --surface-3: #1c2128; --surface-4: #252b34;
+    --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .12);
+    --text: #e7e9ee; --text-2: #a4abb7; --text-3: #6c7482;
+    --accent: #7b85ff; --accent-2: #7b85ff;
+    --ok: #3fb67f; --warn: #d9a441; --bad: #e5605a;
+    --shadow: 0 0 #0000; --shadow-lg: 0 14px 36px -14px rgba(0, 0, 0, .7);
+    --hl: 0 0 #0000;
     /* chart roles — validated with the dataviz checks (contrast >= 3:1 on --surface, CVD-safe neighbours) */
-    --c-done: #3ddc97; --c-fail: #f6b74a; --c-empty: #596277; --c-blue: #3987e5; --c-bad: #ff6b6e;
-    --seq-1: #1c5cab; --seq-2: #2a78d6; --seq-3: #5598e7; --seq-4: #86b6ef; --c-idle: #1d2230;
-    --grid: rgba(150, 162, 195, .09); --axis: rgba(150, 162, 195, .24);
+    --c-done: #3fb67f; --c-fail: #d9a441; --c-empty: #4c5462; --c-blue: #7b85ff; --c-bad: #e5605a;
+    --seq-1: #353d9e; --seq-2: #5560d8; --seq-3: #7b85ff; --seq-4: #adb3ff; --c-idle: #1a1f26;
+    --grid: rgba(255, 255, 255, .06); --axis: rgba(255, 255, 255, .18);
   }
   [data-theme="light"] {
     color-scheme: light;
-    --bg: #f3f4f8; --glow-1: rgba(99, 102, 241, .10); --glow-2: rgba(20, 184, 166, .07);
-    --surface: #ffffff; --surface-2: #f7f8fb; --surface-3: #eef0f6; --surface-4: #e3e6ef;
-    --line: rgba(17, 24, 48, .075); --line-2: rgba(17, 24, 48, .13);
-    --text: #111522; --text-2: #4a5367; --text-3: #8a92a6;
-    --accent: #5b5cf0; --accent-2: #3b74f2;
-    --ok: #0d9a68; --warn: #c47a08; --bad: #e0383e;
-    --shadow: 0 10px 26px -16px rgba(17, 24, 48, .28); --shadow-lg: 0 24px 50px -24px rgba(17, 24, 48, .3);
-    --hl: inset 0 1px 0 rgba(255, 255, 255, .9);
-    --c-done: #0d9a68; --c-fail: #c47a08; --c-empty: #878ea0; --c-blue: #2a78d6; --c-bad: #e0383e;
-    --seq-1: #86b6ef; --seq-2: #5598e7; --seq-3: #2a78d6; --seq-4: #184f95; --c-idle: #e8ebf2;
-    --grid: rgba(17, 24, 48, .07); --axis: rgba(17, 24, 48, .2);
+    --bg: #f5f6f8; --glow-1: transparent; --glow-2: transparent;
+    --surface: #ffffff; --surface-2: #f9fafb; --surface-3: #f1f3f6; --surface-4: #e7eaef;
+    --line: rgba(15, 23, 42, .08); --line-2: rgba(15, 23, 42, .14);
+    --text: #121721; --text-2: #4a5263; --text-3: #858d9b;
+    --accent: #4f5bd5; --accent-2: #4f5bd5;
+    --ok: #16865a; --warn: #b7791f; --bad: #cf3d36;
+    --shadow: 0 0 #0000; --shadow-lg: 0 14px 30px -16px rgba(15, 23, 42, .25);
+    --hl: 0 0 #0000;
+    --c-done: #16865a; --c-fail: #b7791f; --c-empty: #a3aab6; --c-blue: #4f5bd5; --c-bad: #cf3d36;
+    --seq-1: #c5c9fb; --seq-2: #8f98f2; --seq-3: #5a66e0; --seq-4: #323c9e; --c-idle: #eceff3;
+    --grid: rgba(15, 23, 42, .06); --axis: rgba(15, 23, 42, .2);
   }
 
   /* ================================================================ base */
@@ -71,13 +72,13 @@
     backdrop-filter: saturate(150%) blur(16px); -webkit-backdrop-filter: saturate(150%) blur(16px);
   }
   .brand { display: flex; align-items: center; gap: 10px; }
-  .logo { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: #fff;
-    background: linear-gradient(140deg, var(--accent), var(--accent-2)); box-shadow: 0 8px 22px -8px var(--accent), inset 0 1px 0 rgba(255, 255, 255, .25); }
+  .logo { width: 32px; height: 32px; border-radius: var(--r); display: grid; place-items: center; color: #fff;
+    background: var(--accent); box-shadow: 0 8px 22px -8px var(--accent), inset 0 1px 0 rgba(255, 255, 255, .25); }
   .brand-txt { display: flex; flex-direction: column; line-height: 1.12; }
   .brand-txt b { font-size: 15px; letter-spacing: -.015em; }
   .brand-txt span { font-size: 10.5px; color: var(--text-3); font-weight: 500; letter-spacing: .04em; }
   .vsep { width: 1px; height: 28px; background: var(--line-2); }
-  .pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 11px; border-radius: 999px; font-weight: 600; font-size: 12px;
+  .pill { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 11px; border-radius: 4px; font-weight: 600; font-size: 12px;
     color: var(--text-2); background: var(--surface-3); border: 1px solid var(--line); white-space: nowrap; }
   .pill .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
   .pill.running, .pill.waiting { --pc: var(--ok); color: var(--pc); background: color-mix(in srgb, var(--pc) 12%, transparent); border-color: color-mix(in srgb, var(--pc) 30%, transparent); }
@@ -86,7 +87,7 @@
   .pill.running .dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1.5px solid var(--pc); animation: ping 1.8s var(--ease) infinite; }
   .pill .live-meta { font: 500 11.5px var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums; }
   .spacer { flex: 1 1 auto; }
-  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: 10px;
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 13px; border-radius: var(--r);
     border: 1px solid var(--line-2); background: var(--surface-3); color: var(--text); font: 600 12.5px var(--font); cursor: pointer; white-space: nowrap;
     transition: background .15s, border-color .15s, color .15s, transform .06s; }
   .btn:hover { background: var(--surface-4); }
@@ -96,24 +97,24 @@
   .btn-danger { color: var(--bad); background: color-mix(in srgb, var(--bad) 11%, transparent); border-color: color-mix(in srgb, var(--bad) 38%, transparent); }
   .btn-danger:hover { background: color-mix(in srgb, var(--bad) 18%, transparent); }
   .btn-danger.armed { color: #fff; background: var(--bad); border-color: var(--bad); }
-  .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; color: var(--text-2); background: transparent; border: 1px solid transparent; cursor: pointer; }
+  .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border-radius: var(--r); color: var(--text-2); background: transparent; border: 1px solid transparent; cursor: pointer; }
   .icon-btn:hover { background: var(--surface-3); color: var(--text); border-color: var(--line); }
 
   /* ================================================================ page */
   .page { max-width: 1480px; margin: 0 auto; padding: 18px 20px 40px; transition: opacity .2s; }
   .page.refreshing .card, .page.refreshing .tile { opacity: .62; }
   .filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-  .seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); box-shadow: var(--hl); }
-  .seg button { height: 30px; padding: 0 13px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; transition: color .15s, background .15s; }
+  .seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--line); box-shadow: var(--hl); }
+  .seg button { height: 30px; padding: 0 13px; border: 0; border-radius: var(--r); background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; transition: color .15s, background .15s; }
   .seg button:hover { color: var(--text); }
   .seg button.on { color: var(--text); background: var(--surface-4); box-shadow: var(--hl), 0 1px 3px rgba(0, 0, 0, .3); }
-  .seg.mini { padding: 2px; border-radius: 10px; }
-  .seg.mini button { height: 24px; padding: 0 9px; font-size: 11.5px; border-radius: 8px; white-space: nowrap; }
+  .seg.mini { padding: 2px; border-radius: var(--r); }
+  .seg.mini button { height: 24px; padding: 0 9px; font-size: 11.5px; border-radius: var(--r-sm); white-space: nowrap; }
   .range-txt { font-size: 12px; color: var(--text-3); }
   .range-txt b { color: var(--text-2); font-weight: 600; }
   .updated { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); }
 
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--hl), var(--shadow); min-width: 0; transition: opacity .2s; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--hl), var(--shadow); min-width: 0; transition: opacity .2s; }
   .grid { display: grid; gap: 14px; }
 
   /* KPI tiles */
@@ -128,24 +129,26 @@
      because a truncated amount is worse than a smaller one. */
   .tile .v.v-multi { font-size: 18px; line-height: 1.3; white-space: normal; }
   .tile .sub { display: flex; align-items: center; gap: 8px; min-height: 18px; font-size: 11.5px; color: var(--text-3); white-space: normal; flex-wrap: wrap; overflow: hidden; }
-  .delta { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 999px; font-weight: 600; font-size: 11px; }
+  .delta { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; border-radius: 4px; font-weight: 600; font-size: 11px; }
   .delta.up-good, .delta.down-good { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
   .delta.up-bad, .delta.down-bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
   .delta.flat, .delta.neutral { color: var(--text-2); background: var(--surface-3); }
   .tile .spark { position: absolute; right: 14px; top: 42px; width: 70px; height: 28px; }
-  .meter { height: 6px; border-radius: 6px; background: color-mix(in srgb, var(--c-done) 18%, transparent); overflow: hidden; margin-top: 2px; }
-  .meter i { display: block; height: 100%; border-radius: 6px; background: var(--c-done); transition: width .5s var(--ease); }
+  .meter { height: 6px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--c-done) 18%, transparent); overflow: hidden; margin-top: 2px; }
+  .meter i { display: block; height: 100%; border-radius: var(--r-sm); background: var(--c-done); transition: width .5s var(--ease); }
 
   /* chart cards */
   .row-a { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); margin-bottom: 14px; }
   .row-b { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 14px; }
   .row-c { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); align-items: start; }
+  .grid.solo { grid-template-columns: minmax(0, 1fr); }
+  .filters .seg[hidden], .card[hidden] { display: none; }
   .card-h { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 10px; padding: 14px 16px 0; }
   .card-h > div:first-child { flex: 1 1 220px; min-width: 0; }
   .card-h h2 { margin: 0; font-size: 13.5px; font-weight: 700; letter-spacing: -.005em; }
   .card-h p { margin: 2px 0 0; font-size: 11.5px; color: var(--text-3); }
   .card-h .tools { margin-left: auto; display: flex; align-items: center; gap: 4px; }
-  .tbtn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--text-3); font: 600 11.5px var(--font); cursor: pointer; }
+  .tbtn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: var(--r-sm); border: 1px solid transparent; background: transparent; color: var(--text-3); font: 600 11.5px var(--font); cursor: pointer; }
   .tbtn:hover, .tbtn.on { color: var(--text); background: var(--surface-3); border-color: var(--line); }
   .card-b { padding: 10px 16px 16px; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 16px 0; font-size: 12px; color: var(--text-2); }
@@ -183,8 +186,8 @@
   .bl .lab .ic { color: var(--text-3); }
   .bl .val { font-size: 12px; color: var(--text-2); white-space: nowrap; }
   .bl .val b { color: var(--text); font-weight: 650; }
-  .bl .track { grid-column: 1 / -1; height: 8px; border-radius: 8px; background: var(--surface-3); overflow: hidden; }
-  .bl .track i { display: block; height: 100%; border-radius: 8px; background: var(--c); min-width: 2px; transition: width .5s var(--ease); }
+  .bl .track { grid-column: 1 / -1; height: 8px; border-radius: var(--r-sm); background: var(--surface-3); overflow: hidden; }
+  .bl .track i { display: block; height: 100%; border-radius: var(--r-sm); background: var(--c); min-width: 2px; transition: width .5s var(--ease); }
 
   /* submissions */
   .money { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -197,15 +200,15 @@
   .si .st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .si .sr2 { font: 600 12px var(--font); white-space: nowrap; }
   .si .sd { font-size: 11.5px; color: var(--text-3); }
-  .chip { justify-self: end; display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  .chip { justify-self: end; display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 4px; font-size: 11px; font-weight: 600;
     color: var(--c); background: color-mix(in srgb, var(--c) 13%, transparent); white-space: nowrap; }
 
   /* tables */
-  .tabs { display: flex; gap: 4px; padding: 4px; margin: 12px 16px 0; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); width: fit-content; max-width: calc(100% - 32px); overflow-x: auto; }
-  .tabs button { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; white-space: nowrap; }
+  .tabs { display: flex; gap: 4px; padding: 4px; margin: 12px 16px 0; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--line); width: fit-content; max-width: calc(100% - 32px); overflow-x: auto; }
+  .tabs button { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border: 0; border-radius: var(--r); background: transparent; color: var(--text-3); font: 600 12.5px var(--font); cursor: pointer; white-space: nowrap; }
   .tabs button:hover { color: var(--text); }
   .tabs button.on { color: var(--text); background: var(--surface-4); box-shadow: var(--hl); }
-  .tabs .n { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 999px; background: var(--surface-3); color: var(--text-3); }
+  .tabs .n { font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--surface-3); color: var(--text-3); }
   .tbl-wrap { overflow-x: auto; }
   .tbl-wrap th, .tbl-wrap td { white-space: nowrap; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -216,17 +219,17 @@
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
   td.mono { font-family: var(--mono); font-size: 12px; }
   td.dim { color: var(--text-3); }
-  .code { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border-radius: 7px; font: 600 12px var(--mono); color: var(--ok);
+  .code { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border-radius: var(--r-sm); font: 600 12px var(--mono); color: var(--ok);
     background: color-mix(in srgb, var(--ok) 10%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 26%, transparent); }
-  .copy { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; }
+  .copy { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--r-sm); border: 0; background: transparent; color: inherit; opacity: .7; cursor: pointer; }
   .copy:hover { opacity: 1; background: color-mix(in srgb, var(--ok) 16%, transparent); }
-  .flag { display: inline-block; padding: 2px 8px; border-radius: 7px; font: 600 11px var(--mono); color: var(--bad);
+  .flag { display: inline-block; padding: 2px 8px; border-radius: var(--r-sm); font: 600 11px var(--mono); color: var(--bad);
     background: color-mix(in srgb, var(--bad) 10%, transparent); border: 1px solid color-mix(in srgb, var(--bad) 26%, transparent); cursor: help; }
   .more { display: flex; justify-content: center; padding: 10px 0 2px; }
   .tview { max-height: 320px; overflow: auto; }
 
   /* tooltip */
-  .tip { position: fixed; z-index: 50; pointer-events: none; min-width: 170px; max-width: 280px; padding: 10px 12px; border-radius: 12px;
+  .tip { position: fixed; z-index: 50; pointer-events: none; min-width: 170px; max-width: 280px; padding: 10px 12px; border-radius: var(--r);
     background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); opacity: 0; transform: translateY(4px); transition: opacity .1s, transform .1s; }
   .tip.show { opacity: 1; transform: none; }
   .tip .tt { font-size: 11.5px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
@@ -237,7 +240,7 @@
   .tip .tf { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--text-3); }
 
   .ntfs { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
-  .ntf { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); font-weight: 500; animation: rise .25s var(--ease); }
+  .ntf { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--line-2); box-shadow: var(--shadow-lg); font-weight: 500; animation: rise .25s var(--ease); }
   .ntf .ic { color: var(--ok); }
   .foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 18px; font-size: 11.5px; color: var(--text-3); }
   .foot a { color: var(--accent); font-weight: 600; }
@@ -255,13 +258,97 @@
     .tile .sub { white-space: normal; flex-wrap: wrap; }
     .updated { margin-left: 0; }
   }
+
+  /* ================================================================ WebDolly: flat, 1px lines, one accent */
+  body { background: var(--bg); font-feature-settings: normal; }
+  .topbar { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .logo { width: 28px; height: 28px; background: none; box-shadow: none; border-radius: 0; color: inherit; }
+  .logo svg { width: 28px; height: 28px; display: block; }
+  .brand-txt b { font-weight: 600; letter-spacing: -.005em; }
+  .brand-txt span { letter-spacing: .02em; }
+  .card { box-shadow: none; }
+  .btn-primary, .btn-primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); box-shadow: none; filter: none; }
+  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #fff); }
+  .btn:active:not(:disabled) { transform: none; }
+  .switch .slider { border-radius: 999px; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch .slider::before { box-shadow: none; }
+  input:focus, textarea:focus, select:focus { box-shadow: 0 0 0 1px var(--accent); }
+  .seg button.on, .tab.active { box-shadow: inset 0 0 0 1px var(--line-2); }
+  .pill .dot::after, .phase-chip .pdot, .tab .badge, .tchip i, .live.on::before { box-shadow: none; animation: none; }
+  .pill.running .dot::after, .pill.waiting .dot::after { display: none; }
+  .metric .k, .kpi .k, .lbl-caps { letter-spacing: .06em; }
+  .viewer { background-image: none; }
+  #screen { border-radius: 3px; box-shadow: 0 0 0 1px var(--line-2); }
+  .glass { backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: 0 6px 18px -8px rgba(0, 0, 0, .6); }
+
+  /* ================================================================ WebDolly: components */
+  h1, h2, h3, b, strong { font-weight: 600; }
+  /* Labels in sentence case, not tracked capitals. */
+  .metric .k, .eyebrow, .cycle, .ask .ask-k, label.cap, .blist h3, th, .kpi .k {
+    text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 12px; color: var(--text-3);
+  }
+  /* Status: a dot and a word, no capsule. */
+  .pill { background: none; border: 0; padding: 0 2px; height: auto; font-weight: 500; }
+  .pill.running, .pill.waiting, .pill.stopping { background: none; border: 0; }
+  /* Numbers in the text face, tabular. */
+  .metric .v, .kpi .v, .tchip b, .stepno, .t { font-family: var(--font); font-variant-numeric: tabular-nums; }
+  .metric .v { font-size: 14px; font-weight: 500; }
+  .metric .u { font-family: var(--font); }
+  .metrics { background: none; border: 0; padding: 0; }
+  /* Buttons: text only, quieter weight. */
+  .btn { font-weight: 500; height: 30px; }
+  .btn-sm { height: 28px; }
+  .icon-btn { width: 32px; height: 32px; border-radius: var(--r); }
+  .seg .ic { display: none; }
+  .seg button { font-weight: 500; }
+  kbd { border-bottom-width: 1px; font-weight: 500; }
+
+  .tile .k .ic, .legend .ic, .card-h h2 .ic, .blist .ic, .bl .lab .ic, .empty-chart .ic { display: none; }
+  .tile .k { font-weight: 500; color: var(--text-3); }
+  .tile .v { font-weight: 500; letter-spacing: -.01em; font-size: 26px; }
+  .tile .v small { font-weight: 500; }
+  .legend .sw { border-radius: 2px; }
+  .card-h p { display: none; }
+  .card-h h2 { font-size: 13px; }
 </style>
 </head>
 <body>
 <header class="topbar">
   <a class="brand" href="/" title="Torna al pannello">
-    <span class="logo"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 20V4h11M7 12h8"/></svg></span>
-    <span class="brand-txt"><b>Statistiche</b><span>Fara · agent console</span></span>
+    <span class="logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="28" height="28" aria-hidden="true">
+  <defs>
+    <linearGradient id="wdl-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b8cff"/>
+      <stop offset="1" stop-color="#4f7cff"/>
+    </linearGradient>
+    <linearGradient id="wdl-wool" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6e9ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#wdl-bg)"/>
+  <!-- wool -->
+  <g fill="url(#wdl-wool)">
+    <circle cx="42" cy="46" r="15"/>
+    <circle cx="62" cy="36" r="17"/>
+    <circle cx="82" cy="45" r="15"/>
+    <circle cx="90" cy="63" r="13"/>
+    <circle cx="35" cy="64" r="13"/>
+    <circle cx="62" cy="62" r="24"/>
+  </g>
+  <!-- ears -->
+  <ellipse cx="40" cy="70" rx="10" ry="5.5" transform="rotate(-28 40 70)" fill="#2a2c6e"/>
+  <ellipse cx="84" cy="70" rx="10" ry="5.5" transform="rotate(28 84 70)" fill="#2a2c6e"/>
+  <!-- face -->
+  <path d="M62 54c10 0 15 8 15 19 0 11-7 21-15 21s-15-10-15-21c0-11 5-19 15-19z" fill="#2a2c6e"/>
+  <circle cx="56" cy="70" r="3.2" fill="#fff"/>
+  <circle cx="68" cy="70" r="3.2" fill="#fff"/>
+  <path d="M58.5 84q3.5 2.5 7 0" stroke="#8b8cff" stroke-width="2.4" stroke-linecap="round" fill="none"/>
+  <!-- cursor -->
+  <path d="M84 78v31l8.5-8 6 13.5 6.5-3-6-13.2H111z" fill="#fff" stroke="#2a2c6e" stroke-width="3.5" stroke-linejoin="round"/>
+</svg></span>
+    <span class="brand-txt"><b>Statistiche</b><span>WebDolly</span></span>
   </a>
   <span class="vsep"></span>
   <span class="pill" id="pill"><span class="dot"></span><span id="pillText">fermo</span><span class="live-meta" id="pillMeta"></span></span>
@@ -279,6 +366,7 @@
       <button data-p="30d" role="radio">30 giorni</button>
       <button data-p="all" role="radio">Tutto</button>
     </div>
+    <div class="seg" id="siteSeg" role="radiogroup" aria-label="Profilo del sito" hidden></div>
     <span class="range-txt" id="rangeTxt"></span>
     <span class="updated"><span id="updatedTxt"></span><button class="icon-btn" id="refreshBtn" title="Aggiorna adesso" aria-label="Aggiorna adesso"></button></span>
   </div>
@@ -332,7 +420,7 @@
 /* ============================================================ data */
 let D = /*__DATA__*/null;
 const S = 0, E = 1, DUR = 2, STEPS = 3, OUT = 4, ANS = 5, SRC = 6, WL = 7, WS = 8, WE = 9, TPS = 10,
-      FLAG = 11;
+      FLAG = 11, SITE = 12;
 const $ = id => document.getElementById(id);
 
 /* ============================================================ formatting */
@@ -416,6 +504,15 @@ function subsFootnote() {
    and REPEAT is a cycle that re-read a code already banked by an earlier one,
    so neither is a study done: both belong with the interrupted cycles. */
 const kind = o => o === 'CODE' ? 'done' : o === 'NONE' ? 'empty' : 'fail';
+/* Runs are grouped by the site profile they used. On a task platform a run is
+   done when it banked a completion code, and an empty task list is its own
+   case; anywhere else a run is done when the model ended it. */
+const prof = n => (D && D.profiles && D.profiles[n]) || {};
+const isPlat = r => !!prof(r[SITE]).platform;
+const kindOf = r => isPlat(r) ? kind(r[OUT]) : (r[OUT] === 'INCOMPLETE' ? 'fail' : 'done');
+let site = '';
+try { site = localStorage.getItem('fara_dash_site') || ''; } catch (e) {}
+let plat = true;   // every run in view is a task-platform run
 /* Read instead of the raw answer in the interrupted table. TERMINATE is left
    out on purpose: there the model's own words are the useful detail. */
 const OUT_LABEL = {REPEAT: 'codice già registrato', NOCODE: 'finito senza codice',
@@ -443,7 +540,7 @@ function aggregate(runs) {
   const n = {done: 0, fail: 0, empty: 0}, t = {done: 0, fail: 0, empty: 0}, w = {list: 0, study: 0, elsewhere: 0};
   const doneDur = [], doneSteps = [], tps = [];
   for (const r of runs) {
-    const k = kind(r[OUT]); n[k]++; t[k] += r[DUR];
+    const k = kindOf(r); n[k]++; t[k] += r[DUR];
     w.list += r[WL]; w.study += r[WS]; w.elsewhere += r[WE];
     if (k === 'done') { doneDur.push(r[DUR]); doneSteps.push(r[STEPS]); }
     if (r[TPS]) tps.push(r[TPS]);
@@ -531,12 +628,10 @@ function renderKPIs(runs, prevRuns, A, P, a, b) {
   const prevRate = P && (P.n.done + P.n.fail) ? P.n.done / (P.n.done + P.n.fail) : null;
   const medDur = median(A.doneDur), medSteps = median(A.doneSteps);
   const perHour = A.span ? A.total / (A.span / 3600) : NaN;
-  const tpsMed = median(A.tps);
-  const slow = D.slow_tps || 10;
   const tiles = [];
   tiles.push(`<div class="card tile"><div class="k">${icon('check', 15)}Studi completati</div>` +
     `<div class="v">${fmtN(A.n.done)}</div><div class="sub">${deltaHTML(A.n.done, P ? P.n.done : null, true)}<span>${A.n.done === 1 ? 'studio' : 'studi'} nel periodo</span></div>` +
-    sparkSVG(bucketSeries(runs, a, b, 12, r => kind(r[OUT]) === 'done' ? 1 : 0), css('--c-done')) + `</div>`);
+    sparkSVG(bucketSeries(runs, a, b, 12, r => kindOf(r) === 'done' ? 1 : 0), css('--c-done')) + `</div>`);
   tiles.push(`<div class="card tile"><div class="k">${icon('target', 15)}Tasso di completamento</div>` +
     `<div class="v">${fmtPct(rate)}</div><div class="meter" title="Completati su cicli che hanno trovato uno studio"><i style="width:${isFinite(rate) ? rate * 100 : 0}%"></i></div>` +
     `<div class="sub">${deltaHTML(isFinite(rate) ? rate * 100 : NaN, prevRate === null ? null : prevRate * 100, true, v => Math.round(v) + ' pt')}<span>${fmtN(A.n.done)} su ${fmtN(attempted)} cicli con lavoro</span></div></div>`);
@@ -562,11 +657,41 @@ function renderKPIs(runs, prevRuns, A, P, a, b) {
     tiles.push(`<div class="card tile"><div class="k">${icon('coin', 15)}Guadagno incassato</div><div class="v">—</div>` +
       `<div class="sub"><span>${D.submissions_ts ? 'nessuna submission nel periodo' : 'submission non ancora lette'}</span>${subsFootnote()}</div></div>`);
   }
+  tiles.push(modelTile(A, runs));
+  $('kpis').innerHTML = tiles.join('');
+}
+
+function modelTile(A, runs) {
+  const tpsMed = median(A.tps), slow = D.slow_tps || 10;
   const tpsColor = !isFinite(tpsMed) ? css('--c-blue') : tpsMed < slow ? css('--c-bad') : css('--c-blue');
-  tiles.push(`<div class="card tile"><div class="k">${icon('gauge', 15)}Velocità del modello</div>` +
+  return `<div class="card tile"><div class="k">Velocità del modello</div>` +
     `<div class="v">${isFinite(tpsMed) ? (tpsMed >= 10 ? fmtN(tpsMed) : fmt1(tpsMed)) : '—'}<small>tok/s</small></div>` +
     `<div class="sub">${isFinite(tpsMed) && tpsMed < slow ? `<span class="delta up-bad">sotto soglia</span>` : ''}<span>${A.tps.length ? 'mediana su ' + fmtN(A.tps.length) + ' cicli' : 'non ancora misurata'}</span></div>` +
-    sparkSVG(runs.filter(r => r[TPS]).slice(-24).map(r => r[TPS]), tpsColor) + `</div>`);
+    sparkSVG(runs.filter(r => r[TPS]).slice(-24).map(r => r[TPS]), tpsColor) + `</div>`;
+}
+/* Runs on sites with no task platform: done means the model ended the run. */
+function renderKPIsPlain(runs, prevRuns, A, P, a, b) {
+  const rate = A.total ? A.n.done / A.total : NaN;
+  const prevRate = P && P.total ? P.n.done / P.total : null;
+  const medDur = median(A.doneDur), medSteps = median(A.doneSteps);
+  const perHour = A.span ? A.total / (A.span / 3600) : NaN;
+  const steps = runs.reduce((x, r) => x + r[STEPS], 0);
+  const prevSteps = prevRuns ? prevRuns.reduce((x, r) => x + r[STEPS], 0) : null;
+  const tiles = [];
+  tiles.push(`<div class="card tile"><div class="k">Cicli completati</div>` +
+    `<div class="v">${fmtN(A.n.done)}</div><div class="sub">${deltaHTML(A.n.done, P ? P.n.done : null, true)}<span>finiti dal modello</span></div>` +
+    sparkSVG(bucketSeries(runs, a, b, 12, r => kindOf(r) === 'done' ? 1 : 0), css('--c-done')) + `</div>`);
+  tiles.push(`<div class="card tile"><div class="k">Tasso di completamento</div>` +
+    `<div class="v">${fmtPct(rate)}</div><div class="meter"><i style="width:${isFinite(rate) ? rate * 100 : 0}%"></i></div>` +
+    `<div class="sub">${deltaHTML(isFinite(rate) ? rate * 100 : NaN, prevRate === null ? null : prevRate * 100, true, v => Math.round(v) + ' pt')}<span>${fmtN(A.n.done)} su ${fmtN(A.total)} cicli</span></div></div>`);
+  tiles.push(`<div class="card tile"><div class="k">Durata per ciclo</div>` +
+    `<div class="v">${isFinite(medDur) ? fmtDur(medDur) : '—'}</div><div class="sub"><span>${isFinite(medSteps) ? 'mediana · ' + fmtN(medSteps) + ' passi' : 'nessun ciclo completato'}</span></div></div>`);
+  tiles.push(`<div class="card tile"><div class="k">Cicli</div>` +
+    `<div class="v">${fmtN(A.total)}</div><div class="sub">${deltaHTML(A.total, P ? P.total : null, null)}<span>${isFinite(perHour) ? fmt1(perHour) + ' all\'ora' : ''}</span></div>` +
+    sparkSVG(bucketSeries(runs, a, b, 12, () => 1), css('--c-blue')) + `</div>`);
+  tiles.push(`<div class="card tile"><div class="k">Passi</div>` +
+    `<div class="v">${fmtN(steps)}</div><div class="sub">${deltaHTML(steps, prevSteps, null)}<span>${A.total ? fmt1(steps / A.total) + ' per ciclo' : ''}</span></div></div>`);
+  tiles.push(modelTile(A, runs));
   $('kpis').innerHTML = tiles.join('');
 }
 
@@ -592,11 +717,13 @@ function renderActivity(runs, a, b) {
   const plan = bucketPlan(a, b), start = alignStart(a, plan.size);
   const n = Math.max(1, Math.ceil((b - start) / plan.size));
   const buckets = Array.from({length: n}, (_, i) => ({t0: start + i * plan.size, done: 0, fail: 0, empty: 0}));
-  for (const r of runs) { const i = Math.floor((r[S] - start) / plan.size); if (i >= 0 && i < n) buckets[i][kind(r[OUT])]++; }
+  for (const r of runs) { const i = Math.floor((r[S] - start) / plan.size); if (i >= 0 && i < n) buckets[i][kindOf(r)]++; }
   ACT = buckets;
-  const shown = actMode === 'work' ? ['done', 'fail'] : ['done', 'fail', 'empty'];
+  const mode = plat ? actMode : 'all';
+  $('actMode').hidden = !plat;
+  const shown = mode === 'work' ? ['done', 'fail'] : plat ? ['done', 'fail', 'empty'] : ['done', 'fail'];
   const nEmpty = buckets.reduce((s, x) => s + x.empty, 0), nWork = buckets.reduce((s, x) => s + x.done + x.fail, 0);
-  $('actSub').textContent = actMode === 'work'
+  $('actSub').textContent = mode === 'work'
     ? `Cicli che hanno trovato uno studio, per ${plan.label}` + (nEmpty ? ` · ${fmtN(nEmpty)} a elenco vuoto esclusi` : '')
     : `Tutti i cicli, per ${plan.label}, per esito`;
   $('actLegend').innerHTML = KINDS.filter(k => shown.includes(k.k)).map(k => `<span><i class="sw" style="--c:var(${k.c})"></i>${icon(k.ic, 13)}${k.short}</span>`).join('');
@@ -607,13 +734,13 @@ function renderActivity(runs, a, b) {
     return;
   }
   if (!runs.length) { emptyChart(host, 'Nessun ciclo in questo periodo', 'cycle'); return; }
-  if (actMode === 'work' && !nWork) { emptyChart(host, `Nessun ciclo ha trovato uno studio: ${fmtN(nEmpty)} cicli a elenco vuoto`, 'inbox'); return; }
+  if (mode === 'work' && !nWork) { emptyChart(host, `Nessun ciclo ha trovato uno studio: ${fmtN(nEmpty)} cicli a elenco vuoto`, 'inbox'); return; }
   const H = fillHeight(host, 230), W = host.clientWidth || 600, padL = 34, padR = 6, padT = 10, padB = 26;
   const pw = W - padL - padR, ph = H - padT - padB;
   const val = x => shown.reduce((s, k) => s + x[k], 0);
   const ny = niceMax(Math.max(1, ...buckets.map(val)), 4, true);
   const svg = svgEl('svg', {viewBox: `0 0 ${W} ${H}`, height: H, role: 'img',
-    'aria-label': `${actMode === 'work' ? 'Cicli con uno studio' : 'Cicli'} per ${plan.label}`}, host);
+    'aria-label': `${mode === 'work' ? 'Cicli con uno studio' : 'Cicli'} per ${plan.label}`}, host);
   for (let v = 0; v <= ny.max + 1e-9; v += ny.step) {
     const y = padT + ph - v / ny.max * ph;
     svgEl('line', {x1: padL, x2: W - padR, y1: Math.round(y) + .5, y2: Math.round(y) + .5, class: v === 0 ? 'base' : 'gl'}, svg);
@@ -707,7 +834,7 @@ function renderHeat(runs) {
   const grid = Array.from({length: 7}, () => Array.from({length: 24}, () => ({runs: 0, active: 0, done: 0})));
   for (const r of runs) {
     const d = new Date(r[S] * 1000), wd = (d.getDay() + 6) % 7, h = d.getHours(), c = grid[wd][h];
-    c.runs++; const k = kind(r[OUT]); if (k !== 'empty') c.active++; if (k === 'done') c.done++;
+    c.runs++; const k = kindOf(r); if (k !== 'empty') c.active++; if (k === 'done') c.done++;
   }
   HEAT = grid;
   const maxA = Math.max(0, ...grid.flat().map(c => c.active));
@@ -753,10 +880,10 @@ function renderHeat(runs) {
 const SESSION_GAP = 3 * 3600;
 function renderModel(runs) {
   const host = $('chModel'), slow = D.slow_tps || 10;
-  const pts = runs.filter(r => r[TPS]).map(r => ({t: r[S], v: r[TPS], o: r[OUT]}));
+  const pts = runs.filter(r => r[TPS]).map(r => ({t: r[S], v: r[TPS], o: kindOf(r)}));
   $('modelSub').textContent = `Token al secondo, un punto per ciclo · soglia di allarme ${fmtN(slow)}`;
   if (views.model === 'table') {
-    host.innerHTML = pts.length ? tableHTML(['Ciclo', 'Token/s', 'Esito'], pts.slice().reverse().map(p => [dt(p.t), fmt1(p.v), KINDS.find(k => k.k === kind(p.o)).short]), [1]) : '';
+    host.innerHTML = pts.length ? tableHTML(['Ciclo', 'Token/s', 'Esito'], pts.slice().reverse().map(p => [dt(p.t), fmt1(p.v), KINDS.find(k => k.k === p.o).short]), [1]) : '';
     if (!pts.length) emptyChart(host, 'Nessuna misura nel periodo', 'gauge');
     return;
   }
@@ -840,7 +967,7 @@ function renderModel(runs) {
     cross.setAttribute('x1', xs[i]); cross.setAttribute('x2', xs[i]); cross.setAttribute('opacity', 1);
     dot.setAttribute('cx', xs[i]); dot.setAttribute('cy', Y(q.v)); dot.setAttribute('opacity', 1);
     dot.setAttribute('fill', bad ? css('--c-bad') : blue);
-    const k = KINDS.find(kk => kk.k === kind(q.o)), b = svg.getBoundingClientRect();
+    const k = KINDS.find(kk => kk.k === q.o), b = svg.getBoundingClientRect();
     showTip(e || {clientX: b.left + xs[i] * b.width / W, clientY: b.top + Y(q.v) * b.height / H},
       dt(q.t), [{c: bad ? 'var(--c-bad)' : 'var(--c-blue)', v: fmt1(q.v), l: 'token/s'}],
       `Ciclo ${i + 1} di ${n}: ${k.short.toLowerCase()}${bad ? ' · sotto soglia' : ''}`);
@@ -930,16 +1057,24 @@ function renderSubs(a, b) {
 /* ============================================================ tables */
 let tblTab = 'done', tblAll = false;
 function renderTables(runs) {
-  const done = runs.filter(r => kind(r[OUT]) === 'done').reverse();
-  const fail = runs.filter(r => kind(r[OUT]) === 'fail').reverse();
+  const done = runs.filter(r => kindOf(r) === 'done').reverse();
+  const fail = runs.filter(r => kindOf(r) === 'fail').reverse();
   const skipped = (D.skipped || []).slice().sort((x, y) => (y.ts || 0) - (x.ts || 0));
-  const tabs = [['done', 'Studi completati', done.length], ['fail', 'Cicli interrotti', fail.length], ['skipped', 'Studi scartati', skipped.length]];
+  const tabs = plat
+    ? [['done', 'Studi completati', done.length], ['fail', 'Cicli interrotti', fail.length], ['skipped', 'Studi scartati', skipped.length]]
+    : [['done', 'Cicli completati', done.length], ['fail', 'Cicli interrotti', fail.length]];
+  if (!tabs.some(t => t[0] === tblTab)) tblTab = 'done';
   $('tblTabs').innerHTML = tabs.map(([k, l, n]) => `<button role="tab" data-tab="${k}" class="${k === tblTab ? 'on' : ''}" aria-selected="${k === tblTab}">${l}<span class="n">${n}</span></button>`).join('');
   const LIMIT = 25, host = $('tbl');
   const cut = arr => tblAll ? arr : arr.slice(0, LIMIT);
   const more = arr => arr.length > LIMIT ? `<div class="more"><button class="btn btn-ghost" id="moreBtn">${tblAll ? 'Mostra meno' : 'Mostra tutti (' + arr.length + ')'}</button></div>` : '';
   let html = '';
-  if (tblTab === 'done') {
+  if (tblTab === 'done' && !plat) {
+    html = done.length ? `<table><thead><tr><th>Inizio</th><th>Profilo</th><th class="num">Durata</th><th class="num">Passi</th><th>Risposta</th></tr></thead><tbody>` +
+      cut(done).map(r => `<tr><td>${esc(dt(r[S]))}</td><td class="dim">${esc(r[SITE] || '')}</td><td class="num">${esc(fmtDur(r[DUR]))}</td><td class="num">${fmtN(r[STEPS])}</td>` +
+        `<td class="dim">${esc(r[ANS] || '')}</td></tr>`).join('') + `</tbody></table>` + more(done)
+      : `<div class="empty-chart"><div>Nessun ciclo completato in questo periodo</div></div>`;
+  } else if (tblTab === 'done') {
     /* The checks column only appears when a run in this period was flagged:
        an always-empty column would say "checked, fine" on every run, which is
        exactly what it cannot promise -- most studies publish no verdict. */
@@ -981,18 +1116,35 @@ function renderAll() {
   if (!D) return;
   const now = Date.now() / 1000;
   const [a, b] = windowFor(period, now);
-  const runs = D.runs.filter(r => r[S] >= a && r[S] < b);
+  // Profiles that have runs; the filter only shows when there is a choice.
+  const used = [...new Set(D.runs.map(r => r[SITE]))].sort();
+  if (site && !used.includes(site)) site = '';
+  const seg = $('siteSeg');
+  seg.hidden = used.length < 2;
+  seg.innerHTML = [['', 'Tutti i siti'], ...used.map(n => [n, prof(n).label || prof(n).title || n])].map(([v, l]) =>
+    `<button data-s="${esc(v)}" role="radio" class="${v === site ? 'on' : ''}" aria-checked="${v === site}">${esc(l)}</button>`).join('');
+  const inSite = r => !site || r[SITE] === site;
+  const runs = D.runs.filter(r => inSite(r) && r[S] >= a && r[S] < b);
+  const prevRuns = period !== 'all' ? D.runs.filter(r => inSite(r) && r[S] >= a - (b - a) && r[S] < a) : null;
+  plat = runs.length ? runs.every(isPlat) : site ? !!prof(site).platform : D.runs.some(isPlat);
+  const platRuns = runs.filter(isPlat);
   const A = aggregate(runs);
-  let P = null;
-  if (period !== 'all') { const pr = D.runs.filter(r => r[S] >= a - (b - a) && r[S] < a); P = aggregate(pr); }
+  const P = prevRuns ? aggregate(prevRuns) : null;
   document.querySelectorAll('#periodSeg button').forEach(x => { const on = x.dataset.p === period; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); });
   $('rangeTxt').innerHTML = `<b>${esc(PERIOD_LABEL[period])}</b> · ${esc(dateShort(a))} → ${esc(dateShort(b))}` + (period !== 'all' ? ' · confronto col periodo precedente' : '');
-  renderKPIs(runs, P ? D.runs.filter(r => r[S] >= a - (b - a) && r[S] < a) : null, A, P, a, b);
+  if (plat) renderKPIs(runs, prevRuns, A, P, a, b); else renderKPIsPlain(runs, prevRuns, A, P, a, b);
   renderActivity(runs, a, b);
-  renderSplit(A);
+  // Task-platform sections: only for the platform runs in view.
+  $('cardSplit').hidden = !platRuns.length;
+  $('cardSplit').parentElement.classList.toggle('solo', !platRuns.length);
+  if (platRuns.length) renderSplit(aggregate(platRuns));
+  document.querySelector('#cardHeat h2').textContent = plat ? 'Quando c\'è lavoro' : 'Quando gira';
   renderHeat(runs);
   renderModel(runs);
-  renderSubs(a, b);
+  const subsOn = platRuns.length > 0 || (site ? !!prof(site).history : false);
+  $('cardSubs').hidden = !subsOn;
+  $('cardSubs').parentElement.classList.toggle('solo', !subsOn);
+  if (subsOn) renderSubs(a, b);
   renderTables(runs);
   document.querySelectorAll('.tbtn[data-view]').forEach(x => {
     const tbl = views[x.dataset.view] === 'table';
@@ -1005,6 +1157,11 @@ function renderAll() {
   $('updatedTxt').textContent = 'Aggiornato alle ' + new Date(D.generated * 1000).toLocaleTimeString('it-IT');
   renderAgent(D.agent);
 }
+$('siteSeg').addEventListener('click', e => {
+  const x = e.target.closest('button[data-s]'); if (!x) return;
+  site = x.dataset.s; try { localStorage.setItem('fara_dash_site', site); } catch (e2) {}
+  renderAll();
+});
 document.querySelectorAll('#periodSeg button').forEach(x => x.onclick = () => {
   period = x.dataset.p; try { localStorage.setItem('fara_dash_period', period); } catch (e) {}
   renderAll();

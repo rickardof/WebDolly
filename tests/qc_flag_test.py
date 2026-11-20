@@ -142,7 +142,7 @@ check("the daily summary lists the flagged runs",
 
 page = open(os.path.join(HERE, "..", "agent", "dashboard.html")).read()
 check("the page reads the verdict from the column the server writes",
-      "FLAG = 11;" in page and "r[FLAG]" in page)
+      "FLAG = 11," in page and "r[FLAG]" in page)
 
 section("the rule that stops it happening again")
 

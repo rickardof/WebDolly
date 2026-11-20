@@ -2287,6 +2287,7 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
     """
     steps, answer, source = 0, "", None
     flagged = ""
+    site = None
     where = {"list": 0, "study": 0, "elsewhere": 0}
     gen = []
     studies = []
@@ -2295,6 +2296,8 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
             d = json.loads(line)
         except Exception:
             continue
+        if d.get("type") == "run" and d.get("site"):
+            site = d["site"]
         if isinstance(d.get("step"), int):
             steps = max(steps, d["step"])
         if d.get("action_type") == "terminate":
@@ -2335,6 +2338,8 @@ def summarize_transcript(lines: list, started: datetime = None, ended: datetime 
            "code_source": source if outcome in ("CODE", "NOCODE") else None,
            "steps_where": where, "studies": studies,
            "gen_tps_median": sorted(gen)[len(gen) // 2] if gen else None}
+    if site:
+        out["site"] = site
     if flagged:
         # The researcher said the submission failed their checks. Kept out
         # of the outcome itself: the code was really earned and really
@@ -2413,6 +2418,10 @@ def run_agent(task: str, start_url: str, max_rounds: int, run_dir: Path = None,
         run = behaviors.Run(task, run_dir, transcript, messages,
                             behaviors.for_site(sites.current),
                             dict(options, batch_fill=batch_fill))
+        # Which profile and behaviours this run used, first thing in the
+        # transcript: the statistics group runs by it.
+        run.write({"type": "run", "site": sites.current.name,
+                   "behaviors": [b.name for b in run.behaviors]})
         for b in run.behaviors:
             b.start(run, start_url)
         if start_url:
